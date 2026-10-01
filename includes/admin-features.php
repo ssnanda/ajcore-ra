@@ -57,14 +57,17 @@ function ajcore_ra_render_features_page() {
 	}
 
 	echo '<div class="wrap"><h1>' . esc_html__( 'AJCore RA', 'ajcore-ra' ) . ' <small>' . esc_html( AJCORE_RA_VERSION ) . '</small></h1>';
-	echo '<p>' . esc_html( sprintf( '%d / %d moved', $done, $total ) ) . '</p>';
-	echo '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;max-width:1000px">';
+	echo '<p style="font-size:14px"><strong>' . esc_html( sprintf( '%d of %d moved', $done, $total ) ) . '</strong></p>';
+	echo '<table class="widefat" style="max-width:640px;font-size:14px"><tbody>';
 	foreach ( $groups as $group => $features ) {
-		echo '<table class="widefat striped"><thead><tr><th colspan="2">' . esc_html( $group ) . '</th></tr></thead><tbody>';
+		echo '<tr><th colspan="2" style="background:#1d2327;color:#fff;padding:8px 12px">' . esc_html( $group ) . '</th></tr>';
 		foreach ( $features as $label => $is_done ) {
-			echo '<tr><td style="width:24px">' . ( $is_done ? '&#9745;' : '&#9744;' ) . '</td><td>' . esc_html( $label ) . '</td></tr>';
+			$pill = $is_done
+				? '<span style="background:#00a32a;color:#fff;padding:2px 10px;border-radius:10px;font-weight:600">Moved</span>'
+				: '<span style="background:#dcdcde;color:#50575e;padding:2px 10px;border-radius:10px">Pending</span>';
+			$row  = $is_done ? 'background:#edfaef;font-weight:600' : 'color:#50575e';
+			echo '<tr style="' . esc_attr( $row ) . '"><td style="padding:8px 12px">' . esc_html( $label ) . '</td><td style="width:90px;text-align:right;padding:8px 12px">' . $pill . '</td></tr>'; // phpcs:ignore WordPress.Security.EscapeOutput -- static markup.
 		}
-		echo '</tbody></table>';
 	}
-	echo '</div></div>';
+	echo '</tbody></table></div>';
 }
