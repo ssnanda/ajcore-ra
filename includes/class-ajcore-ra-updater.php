@@ -23,6 +23,7 @@ class AJCore_RA_Updater {
 		add_filter( 'plugins_api', array( __CLASS__, 'plugin_info' ), 10, 3 );
 		add_filter( 'plugin_action_links_' . AJCORE_RA_BASENAME, array( __CLASS__, 'action_links' ) );
 		add_action( 'admin_init', array( __CLASS__, 'handle_actions' ) );
+		add_action( 'admin_notices', array( __CLASS__, 'result_notice' ) );
 	}
 
 	private static function dev_enabled() {
@@ -184,8 +185,52 @@ class AJCore_RA_Updater {
 		}
 		delete_transient( self::CACHE_PLAIN );
 		delete_transient( self::CACHE_DEV );
-		delete_site_transient( 'update_plugins' ); // Forces WP to re-run inject_update().
-		wp_safe_redirect( admin_url( 'update-core.php?force-check=1' ) );
+		delete_site_transient( 'update_plugins' );
+
+		// Refill the transient (runs inject_update()), then install right here if newer.
+		require_once ABSPATH . 'wp-admin/includes/update.php';
+		wp_update_plugins();
+
+		$result  = 'current';
+		$updates = get_site_transient( 'update_plugins' );
+		if ( is_object( $updates ) && isset( $updates->response[ AJCORE_RA_BASENAME ] ) ) {
+			$result = self::install_update() ? 'updated' : 'failed';
+		}
+
+		wp_safe_redirect( add_query_arg( 'ajcore_ra_result', $result, admin_url( 'plugins.php' ) ) );
 		exit;
+	}
+
+	private static function install_update() {
+		require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+		require_once ABSPATH . 'wp-admin/includes/plugin.php';
+
+		$was_active = is_plugin_active( AJCORE_RA_BASENAME );
+		$upgrader   = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+		$ok         = $upgrader->upgrade( AJCORE_RA_BASENAME );
+
+		if ( true !== $ok ) {
+			return false;
+		}
+		if ( $was_active ) {
+			activate_plugin( AJCORE_RA_BASENAME );
+		}
+		return true;
+	}
+
+	public static function result_notice() {
+		if ( empty( $_GET['ajcore_ra_result'] ) || ! current_user_can( 'update_plugins' ) ) {
+			return;
+		}
+		$messages = array(
+			'updated' => array( 'success', __( 'AJCore RA updated.', 'ajcore-ra' ) ),
+			'current' => array( 'info', __( 'AJCore RA is up to date.', 'ajcore-ra' ) ),
+			'failed'  => array( 'error', __( 'AJCore RA update failed. Try Update Now from the Updates screen.', 'ajcore-ra' ) ),
+		);
+		$key = sanitize_key( wp_unslash( $_GET['ajcore_ra_result'] ) );
+		if ( isset( $messages[ $key ] ) ) {
+			echo '<div class="notice notice-' . esc_attr( $messages[ $key ][0] ) . ' is-dismissible"><p>' . esc_html( $messages[ $key ][1] ) . '</p></div>';
+		}
 	}
 }
