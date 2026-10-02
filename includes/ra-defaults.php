@@ -16,7 +16,39 @@ if ( ! defined( 'WPINC' ) ) {
 add_filter( 'ajforms_settings_defaults', 'ajcore_ra_settings_defaults' );
 add_filter( 'ajcore_portal_overview_defaults', 'ajcore_ra_overview_defaults' );
 
+/**
+ * True on the University Place Office Suites site. That site gets its own brand defaults
+ * (AJCore already carries them as university_* keys) and none of the NC LLC Agents content,
+ * whether or not RA is enabled elsewhere. Filterable for other hosts/local domains.
+ */
+function ajcore_ra_is_university_site() {
+	$host  = (string) wp_parse_url( home_url(), PHP_URL_HOST );
+	$hosts = apply_filters( 'ajcore_ra_university_hosts', array( 'universityofficesuites.com', 'upos.ddev.site' ) );
+	foreach ( (array) $hosts as $h ) {
+		if ( $host === $h || substr( $host, -strlen( '.' . $h ) ) === '.' . $h ) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function ajcore_ra_settings_defaults( $defaults ) {
+	if ( ajcore_ra_is_university_site() ) {
+		$map = array(
+			'wp_password_reset_subject'   => 'university_wp_password_reset_subject',
+			'wp_welcome_email_subject'    => 'university_wp_welcome_email_subject',
+			'lead_followup_email_subject' => 'university_lead_followup_email_subject',
+			'lead_followup_body'          => 'university_lead_followup_body',
+			'email_footer_address'        => 'university_email_footer_address',
+		);
+		foreach ( $map as $key => $university_key ) {
+			if ( isset( $defaults[ $university_key ] ) ) {
+				$defaults[ $key ] = $defaults[ $university_key ];
+			}
+		}
+		return $defaults;
+	}
+
 	return array_merge(
 		$defaults,
 		array(
@@ -30,6 +62,9 @@ function ajcore_ra_settings_defaults( $defaults ) {
 }
 
 function ajcore_ra_overview_defaults( $defaults ) {
+	if ( ajcore_ra_is_university_site() ) {
+		return $defaults; // BOI / NC LLC content is NC LLC Agents only.
+	}
 	$defaults['banner_enabled'] = true;
 	$defaults['banner_heading'] = __( 'Beneficial Ownership Information (BOI) Report:', 'ajcore-ra' );
 	$defaults['banner_message'] = __( 'a federal filing most LLCs and corporations must submit to FinCEN — significant penalties can apply if you miss the deadline.', 'ajcore-ra' );
