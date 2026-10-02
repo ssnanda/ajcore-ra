@@ -16,6 +16,8 @@ if ( ! defined( 'WPINC' ) ) {
 add_filter( 'ajforms_settings_defaults', 'ajcore_ra_settings_defaults' );
 add_filter( 'ajcore_portal_overview_defaults', 'ajcore_ra_overview_defaults' );
 add_filter( 'ajcore_email_powered_by', 'ajcore_ra_email_powered_by' );
+// Turns on the Registered Agent Authorization email template (tab + ops send/preview).
+add_filter( 'ajcore_ra_authorization_enabled', '__return_true' );
 
 /**
  * True on the University Place Office Suites site. That site gets its own brand defaults
