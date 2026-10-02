@@ -18,6 +18,10 @@ add_filter( 'ajcore_portal_overview_defaults', 'ajcore_ra_overview_defaults' );
 add_filter( 'ajcore_email_powered_by', 'ajcore_ra_email_powered_by' );
 // Turns on the Registered Agent Authorization email template (tab + ops send/preview).
 add_filter( 'ajcore_ra_authorization_enabled', '__return_true' );
+add_filter( 'ajcore_default_brand', 'ajcore_ra_default_brand' );
+add_filter( 'ajcore_business_contact', 'ajcore_ra_business_contact' );
+add_filter( 'ajcore_ra_authorization_default_body_lines', 'ajcore_ra_authorization_body_lines' );
+add_filter( 'ajcore_ra_authorization_default_address', 'ajcore_ra_authorization_address' );
 
 /**
  * True on the University Place Office Suites site. That site gets its own brand defaults
@@ -54,6 +58,10 @@ function ajcore_ra_mark_defaults( $defaults ) {
 }
 
 function ajcore_ra_settings_defaults( $defaults ) {
+	$defaults['ra_authorization_subject'] = 'Registered Agent Authorization and Address Use for {company}';
+	$defaults['ra_authorization_heading'] = 'Registered Agent Authorization';
+	$defaults['ra_authorization_body']    = implode( "\n", ajcore_ra_authorization_body_lines() );
+	$defaults['ra_authorization_address'] = ajcore_ra_authorization_address();
 	return ajcore_ra_mark_defaults( ajcore_ra_brand_defaults( $defaults ) );
 }
 
@@ -121,4 +129,35 @@ function ajcore_ra_overview_defaults( $defaults ) {
 /** Email footer credit: shows RA is active alongside AJCore. */
 function ajcore_ra_email_powered_by( $text ) {
 	return '' === trim( (string) $text ) ? $text : $text . ' + AJ Core RA';
+}
+
+/** NC LLC Agents identity for emails sent to non-University customers. */
+function ajcore_ra_default_brand( $brand ) {
+	$brand['entity_name'] = 'NC LLC Agents Inc';
+	$brand['from_email']  = 'donotreply@ncllcagents.com';
+	return $brand;
+}
+
+/** Contact details shown in email footers and info boxes. */
+function ajcore_ra_business_contact( $contact ) {
+	return array(
+		'phone'       => '(704) 307-2135',
+		'email'       => 'contactus@ncllcagents.com',
+		'service_url' => 'https://ncllcagents.com/service',
+	);
+}
+
+function ajcore_ra_authorization_address() {
+	return "NC LLC Agents Inc.\n1914 J N Pease Pl.\nCharlotte, NC 28262\nagent@ncllcagents.com";
+}
+
+function ajcore_ra_authorization_body_lines() {
+	return array(
+		__( 'You are authorized to use the following information for Registered Agent purposes only:', 'ajcore-ra' ),
+		__( '- Do not use our phone number anywhere on the filing.', 'ajcore-ra' ),
+		__( "- The address above is the Registered Agent / Registered Office address only. It is not authorized for use as the company's Principal Office address, Mailing Address, or Business Address.", 'ajcore-ra' ),
+		__( '- We authorize use of this address only for the North Carolina Secretary of State filing through the SOSNC website.', 'ajcore-ra' ),
+		__( '- This authorization does not permit use of our address on Google, business directories, websites, bank accounts, licenses, marketing materials, vendor accounts, or any other registrations or filings.', 'ajcore-ra' ),
+		__( '- If you need to use our address anywhere other than the Registered Agent section of the NC Secretary of State filing, please text or contact us first for approval.', 'ajcore-ra' ),
+	);
 }
