@@ -69,5 +69,46 @@ function ajcore_ra_render_features_page() {
 			echo '<tr style="' . esc_attr( $row ) . '"><td style="padding:8px 12px">' . esc_html( $label ) . '</td><td style="width:90px;text-align:right;padding:8px 12px">' . $pill . '</td></tr>'; // phpcs:ignore WordPress.Security.EscapeOutput -- static markup.
 		}
 	}
-	echo '</tbody></table></div>';
+	echo '</tbody></table>';
+	ajcore_ra_render_defaults_check();
+	echo '</div>';
+}
+
+/**
+ * Shows, per setting, whether the value in use is saved on this site, supplied by RA, or
+ * AJCore's own neutral default. Read-only; compare with RA off by checking Email Templates.
+ */
+function ajcore_ra_render_defaults_check() {
+	if ( ! function_exists( 'ajforms_get_settings_defaults' ) ) {
+		return;
+	}
+	$keys = array(
+		'wp_password_reset_subject',
+		'wp_welcome_email_subject',
+		'lead_followup_email_subject',
+		'lead_followup_body',
+		'email_footer_address',
+	);
+
+	$with_ra = ajforms_get_settings_defaults();
+	remove_filter( 'ajforms_settings_defaults', 'ajcore_ra_settings_defaults' );
+	$core_only = ajforms_get_settings_defaults();
+	add_filter( 'ajforms_settings_defaults', 'ajcore_ra_settings_defaults' );
+
+	$saved = get_option( 'ajforms_settings', array() );
+	$saved = is_array( $saved ) ? $saved : array();
+
+	echo '<h2 style="margin-top:24px">' . esc_html__( 'Email defaults check', 'ajcore-ra' ) . '</h2>';
+	echo '<table class="widefat striped" style="max-width:900px;font-size:13px"><thead><tr><th>Setting</th><th style="width:110px">In use</th><th>Value in use</th><th>RA default</th><th>AJCore-only default</th></tr></thead><tbody>';
+	foreach ( $keys as $key ) {
+		$is_saved = isset( $saved[ $key ] ) && '' !== (string) $saved[ $key ];
+		$in_use   = $is_saved ? (string) $saved[ $key ] : (string) ( $with_ra[ $key ] ?? '' );
+		$source   = $is_saved ? 'Saved' : ( ( $with_ra[ $key ] ?? '' ) !== ( $core_only[ $key ] ?? '' ) ? 'RA default' : 'AJCore default' );
+		$short    = static function ( $v ) {
+			$v = trim( preg_replace( '/\s+/', ' ', (string) $v ) );
+			return '' === $v ? '(blank)' : ( strlen( $v ) > 60 ? substr( $v, 0, 60 ) . '…' : $v );
+		};
+		echo '<tr><td>' . esc_html( $key ) . '</td><td><strong>' . esc_html( $source ) . '</strong></td><td>' . esc_html( $short( $in_use ) ) . '</td><td>' . esc_html( $short( $with_ra[ $key ] ?? '' ) ) . '</td><td>' . esc_html( $short( $core_only[ $key ] ?? '' ) ) . '</td></tr>';
+	}
+	echo '</tbody></table>';
 }

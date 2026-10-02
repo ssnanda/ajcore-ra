@@ -15,6 +15,7 @@ if ( ! defined( 'WPINC' ) ) {
 
 add_filter( 'ajforms_settings_defaults', 'ajcore_ra_settings_defaults' );
 add_filter( 'ajcore_portal_overview_defaults', 'ajcore_ra_overview_defaults' );
+add_filter( 'ajcore_email_powered_by', 'ajcore_ra_email_powered_by' );
 
 /**
  * True on the University Place Office Suites site. That site gets its own brand defaults
@@ -32,7 +33,29 @@ function ajcore_ra_is_university_site() {
 	return false;
 }
 
+/**
+ * TEMPORARY test aid: tags the five email defaults RA supplies with " [RA]" so it's visible
+ * whether a default came from RA or from AJCore alone. Only affects fields with nothing saved.
+ * Remove by returning '' from the 'ajcore_ra_defaults_marker' filter, or delete this function.
+ */
+function ajcore_ra_mark_defaults( $defaults ) {
+	$marker = (string) apply_filters( 'ajcore_ra_defaults_marker', ' [RA]' );
+	if ( '' === $marker ) {
+		return $defaults;
+	}
+	foreach ( array( 'wp_password_reset_subject', 'wp_welcome_email_subject', 'lead_followup_email_subject', 'lead_followup_body', 'email_footer_address' ) as $key ) {
+		if ( isset( $defaults[ $key ] ) && '' !== $defaults[ $key ] ) {
+			$defaults[ $key ] .= $marker;
+		}
+	}
+	return $defaults;
+}
+
 function ajcore_ra_settings_defaults( $defaults ) {
+	return ajcore_ra_mark_defaults( ajcore_ra_brand_defaults( $defaults ) );
+}
+
+function ajcore_ra_brand_defaults( $defaults ) {
 	if ( ajcore_ra_is_university_site() ) {
 		$map = array(
 			'wp_password_reset_subject'   => 'university_wp_password_reset_subject',
@@ -91,4 +114,9 @@ function ajcore_ra_overview_defaults( $defaults ) {
 		),
 	);
 	return $defaults;
+}
+
+/** Email footer credit: shows RA is active alongside AJCore. */
+function ajcore_ra_email_powered_by( $text ) {
+	return '' === trim( (string) $text ) ? $text : $text . ' + AJ Core RA';
 }
