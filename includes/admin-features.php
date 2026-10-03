@@ -21,7 +21,7 @@ function ajcore_ra_features() {
 		'Defaults & content' => array(
 			'NC LLC Agents email defaults (subjects, follow-up, footer)' => true,
 			'BOI banner and Helpful Reading links'                       => true,
-			'Registered Agent authorization email'                       => false,
+			'Registered Agent authorization email'                       => true,
 			'University Place email defaults and brand switching'        => false,
 		),
 		'Compliance'         => array(

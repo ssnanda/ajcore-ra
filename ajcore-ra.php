@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       AJ Core RA
  * Description:       Registered Agent (NC LLC Agents) extension for AJ Core. Requires the AJ Core plugin.
- * Version:           0.1.16
+ * Version:           0.1.17
  * Requires PHP:      7.4
  * Author:            IT Spector LLC
  * Author URI:        https://itspector.com
@@ -15,8 +15,8 @@ if ( ! defined( 'WPINC' ) ) {
 	die;
 }
 
-define( 'AJCORE_RA_VERSION', '0.1.16' );
-define( 'AJCORE_RA_MIN_EXTENSION_API', 5 );
+define( 'AJCORE_RA_VERSION', '0.1.17' );
+define( 'AJCORE_RA_MIN_EXTENSION_API', 6 );
 define( 'AJCORE_RA_BASENAME', plugin_basename( __FILE__ ) );
 
 // Loads regardless of AJCore so RA stays updatable on its own.
@@ -24,6 +24,7 @@ require_once plugin_dir_path( __FILE__ ) . 'includes/class-ajcore-ra-updater.php
 AJCore_RA_Updater::init();
 require_once plugin_dir_path( __FILE__ ) . 'includes/ra-defaults.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/admin-features.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/ra-authorization-email.php';
 
 /**
  * Plugins load alphabetically by path ("ajcore-ra/" sorts before "ajcore/"), so AJCore
