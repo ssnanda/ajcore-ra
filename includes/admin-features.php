@@ -29,7 +29,7 @@ function ajcore_ra_features() {
 		'Compliance'         => array(
 			'Compliance API (entities, filings, portal)'      => true,
 			'Compliance portal tab and admin screens'         => false,
-			'Compliance reminder job'                         => false,
+			'Compliance reminder job and emails'                 => true,
 		),
 		'Mail & documents'   => array(
 			'Mail items and mail routes'                  => false,

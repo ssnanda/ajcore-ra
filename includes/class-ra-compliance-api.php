@@ -7,8 +7,7 @@
  * small helpers at the top forward to AJCore's own (private) ones through the extension toolkit,
  * so every query and table name behaves exactly as it did inside AJCore.
  *
- * Still in AJCore until the next step: the reminder email and daily job
- * (AJForms_Admin::send_compliance_reminder_for_ops / run_compliance_reminder_job).
+ * The reminder email and daily job are in class-ra-compliance-reminders.php.
  */
 
 if ( ! defined( 'WPINC' ) ) {
@@ -644,8 +643,7 @@ class AJCore_RA_Compliance_API {
 		if ( ! class_exists( 'AJForms_Admin' ) ) {
 			return new WP_Error( 'server_error', 'Admin module unavailable.', array( 'status' => 500 ) );
 		}
-		$admin = AJForms_Admin::$instance ? AJForms_Admin::$instance : new AJForms_Admin();
-		$sent  = $admin->send_compliance_reminder_for_ops( $entity, $filing, (string) $customer->name, (string) $customer->email );
+		$sent = AJCore_RA_Compliance_Reminders::send( $entity, $filing, (string) $customer->name, (string) $customer->email );
 		if ( ! $sent ) {
 			return new WP_Error( 'send_failed', 'The reminder email could not be sent.', array( 'status' => 500 ) );
 		}
