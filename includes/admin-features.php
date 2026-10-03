@@ -23,11 +23,12 @@ function ajcore_ra_features() {
 			'BOI banner and Helpful Reading links'                       => true,
 			'Registered Agent authorization email'                       => true,
 			'University Place email brand and defaults'                  => true,
-			'University Place portal address block'                      => false,
+			'University Place portal address block'                      => true,
 			'University Place partner customer rules (opus, alliance_vo)' => false,
 		),
 		'Compliance'         => array(
-			'Compliance entities and filings (routes, views)' => false,
+			'Compliance API (entities, filings, portal)'      => true,
+			'Compliance portal tab and admin screens'         => false,
 			'Compliance reminder job'                         => false,
 		),
 		'Mail & documents'   => array(

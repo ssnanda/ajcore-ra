@@ -22,6 +22,7 @@ add_filter( 'ajcore_default_brand', 'ajcore_ra_default_brand' );
 add_filter( 'ajcore_customer_brand', 'ajcore_ra_customer_brand', 10, 2 );
 // Stored university_* settings belong to RA's University Place brand; AJCore's save leaves them alone.
 add_filter( 'ajcore_brand_setting_prefixes', 'ajcore_ra_brand_setting_prefixes' );
+add_filter( 'ajcore_portal_office_address', 'ajcore_ra_portal_office_address', 10, 2 );
 add_filter( 'ajcore_business_contact', 'ajcore_ra_business_contact' );
 add_filter( 'ajcore_ra_authorization_default_body_lines', 'ajcore_ra_authorization_body_lines' );
 add_filter( 'ajcore_ra_authorization_default_address', 'ajcore_ra_authorization_address' );
@@ -233,5 +234,20 @@ function ajcore_ra_authorization_body_lines() {
 		__( '- We authorize use of this address only for the North Carolina Secretary of State filing through the SOSNC website.', 'ajcore-ra' ),
 		__( '- This authorization does not permit use of our address on Google, business directories, websites, bank accounts, licenses, marketing materials, vendor accounts, or any other registrations or filings.', 'ajcore-ra' ),
 		__( '- If you need to use our address anywhere other than the Registered Agent section of the NC Secretary of State filing, please text or contact us first for approval.', 'ajcore-ra' ),
+	);
+}
+
+/**
+ * "Our Office Address" card on the client portal Overview. Same rule AJCore used to hard-code:
+ * shown on the University Place site, and for any customer with tracking services.
+ */
+function ajcore_ra_portal_office_address( $address, $context ) {
+	if ( ! ajcore_ra_is_university_site() && empty( $context['has_tracking_services'] ) ) {
+		return $address;
+	}
+	return array(
+		'title' => __( 'Our Office Address', 'ajcore-ra' ),
+		'name'  => 'University Place Office Suites',
+		'lines' => array( '1914 J N PEASE PL.', 'CHARLOTTE, NC 28262' ),
 	);
 }
