@@ -73,6 +73,7 @@ function ajcore_ra_render_features_page() {
 		}
 	}
 	echo '</tbody></table>';
+	ajcore_ra_render_tables_status();
 	ajcore_ra_render_defaults_check();
 	echo '</div>';
 }
@@ -114,4 +115,39 @@ function ajcore_ra_render_defaults_check() {
 		echo '<tr><td>' . esc_html( $key ) . '</td><td><strong>' . esc_html( $source ) . '</strong></td><td>' . esc_html( $short( $in_use ) ) . '</td><td>' . esc_html( $short( $with_ra[ $key ] ?? '' ) ) . '</td><td>' . esc_html( $short( $core_only[ $key ] ?? '' ) ) . '</td></tr>';
 	}
 	echo '</tbody></table>';
+}
+
+/** Compliance tables: status and a button that creates any that are missing (never drops data). */
+function ajcore_ra_render_tables_status() {
+	if ( ! class_exists( 'AJCore_RA_Compliance_Schema' ) ) {
+		return;
+	}
+	if ( isset( $_GET['ajcore_ra_tables'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+		$ok  = 'ok' === sanitize_key( wp_unslash( $_GET['ajcore_ra_tables'] ) ); // phpcs:ignore WordPress.Security.NonceVerification
+		$msg = isset( $_GET['ajcore_ra_message'] ) ? sanitize_text_field( wp_unslash( $_GET['ajcore_ra_message'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
+		echo '<div class="notice notice-' . ( $ok ? 'success' : 'error' ) . ' is-dismissible"><p>' . esc_html( $msg ) . '</p></div>';
+	}
+	$status = AJCore_RA_Compliance_Schema::status();
+
+	echo '<h2 style="margin-top:24px">' . esc_html__( 'Compliance tables', 'ajcore-ra' ) . '</h2>';
+	if ( null === $status ) {
+		echo '<p>' . esc_html__( 'AJ Core is not ready.', 'ajcore-ra' ) . '</p>';
+		return;
+	}
+	echo '<table class="widefat" style="max-width:640px;font-size:14px"><tbody>';
+	$missing = false;
+	foreach ( $status as $table => $exists ) {
+		$missing = $missing || ! $exists;
+		$pill    = $exists
+			? '<span style="background:#00a32a;color:#fff;padding:2px 10px;border-radius:10px;font-weight:600">Exists</span>'
+			: '<span style="background:#d63638;color:#fff;padding:2px 10px;border-radius:10px;font-weight:600">Missing</span>';
+		echo '<tr><td style="padding:8px 12px"><code>' . esc_html( $table ) . '</code></td><td style="width:90px;text-align:right;padding:8px 12px">' . $pill . '</td></tr>'; // phpcs:ignore WordPress.Security.EscapeOutput -- static markup.
+	}
+	echo '</tbody></table>';
+	if ( $missing ) {
+		echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" style="margin-top:8px">';
+		echo '<input type="hidden" name="action" value="ajcore_ra_create_compliance_tables">';
+		wp_nonce_field( 'ajcore_ra_create_compliance_tables' );
+		echo '<button type="submit" class="button button-primary">' . esc_html__( 'Create missing tables', 'ajcore-ra' ) . '</button></form>';
+	}
 }
