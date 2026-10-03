@@ -72,11 +72,14 @@ class AJCore_RA_Compliance_Tasks {
 
 	/** At most hourly, for the list screen. */
 	public static function maybe_reconcile() {
-		if ( get_transient( self::GUARD ) ) {
+		// Keyed by RA version so a new release re-runs straight away instead of waiting out the
+		// previous version's hour.
+		$guard = self::GUARD . '_' . ( defined( 'AJCORE_RA_VERSION' ) ? AJCORE_RA_VERSION : '' );
+		if ( get_transient( $guard ) ) {
 			return;
 		}
 		self::reconcile();
-		set_transient( self::GUARD, 1, HOUR_IN_SECONDS );
+		set_transient( $guard, 1, HOUR_IN_SECONDS );
 	}
 
 	/** Idempotent: safe to run any number of times. */

@@ -434,19 +434,19 @@ class AJCore_RA_Compliance_API {
 
 	/** At most hourly, so the list screen stays quick. */
 	private function maybe_sync_customers() {
-		if ( get_transient( 'ajcore_ra_compliance_customer_sync' ) ) {
+		if ( get_transient( 'ajcore_ra_compliance_customer_sync_' . AJCORE_RA_VERSION ) ) {
 			return;
 		}
 		$this->sync_customers_to_entities( false );
 		$this->follow_subscriptions();
-		set_transient( 'ajcore_ra_compliance_customer_sync', 1, HOUR_IN_SECONDS );
+		set_transient( 'ajcore_ra_compliance_customer_sync_' . AJCORE_RA_VERSION, 1, HOUR_IN_SECONDS );
 	}
 
 	public function sync_customers_to_entities_route( WP_REST_Request $request ) {
 		$dry = (bool) absint( $request->get_param( 'dry_run' ) );
 		$out = $this->sync_customers_to_entities( $dry );
 		if ( ! $dry ) {
-			set_transient( 'ajcore_ra_compliance_customer_sync', 1, HOUR_IN_SECONDS );
+			set_transient( 'ajcore_ra_compliance_customer_sync_' . AJCORE_RA_VERSION, 1, HOUR_IN_SECONDS );
 		}
 		return rest_ensure_response( array_merge( array( 'success' => true, 'dry_run' => $dry ), $out ) );
 	}
