@@ -130,7 +130,8 @@ function ajcore_ra_render_tables_status() {
 	}
 	$status = AJCore_RA_Compliance_Schema::status();
 
-	echo '<h2 style="margin-top:24px">' . esc_html__( 'Compliance tables', 'ajcore-ra' ) . '</h2>';
+	$db_name = AJCore_RA_Compliance_Schema::db_name();
+	echo '<h2 style="margin-top:24px">' . esc_html__( 'Compliance tables', 'ajcore-ra' ) . ( '' !== $db_name ? ' <small style="font-weight:400;color:#646970">· ' . esc_html( $db_name ) . '</small>' : '' ) . '</h2>';
 	if ( null === $status ) {
 		echo '<p>' . esc_html__( 'AJ Core is not ready.', 'ajcore-ra' ) . '</p>';
 		return;

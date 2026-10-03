@@ -79,6 +79,11 @@ class AJCore_RA_Compliance_Tasks {
 
 	/** Idempotent: safe to run any number of times. */
 	public static function reconcile() {
+		// One site only: the compliance data is shared, but the filing->task list is kept per site,
+		// so a second site running this would create every task again. Same rule as the reminders.
+		if ( function_exists( 'ajcore_is_stripe_sync_owner' ) && ! ajcore_is_stripe_sync_owner() ) {
+			return;
+		}
 		$tasks = self::toolkit();
 		if ( ! $tasks || ! class_exists( 'AJCore_Extensions' ) ) {
 			return;

@@ -40,6 +40,12 @@ class AJCore_RA_Compliance_Schema {
 		return $kit['portal_db']();
 	}
 
+	/** Name of the database the tables live in (the shared DB when the shared portal is on). */
+	public static function db_name() {
+		$db = self::db();
+		return $db && ! empty( $db->dbname ) ? (string) $db->dbname : '';
+	}
+
 	/** @return array<string,bool>|null table (with prefix) => exists, or null when AJCore isn't ready. */
 	public static function status() {
 		$db = self::db();
