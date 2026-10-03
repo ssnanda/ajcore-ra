@@ -5,7 +5,8 @@
  *
  * - Templates appear under "Start from template" when adding a task in AJCore.
  * - For every Active compliance record with a customer, a task "File your {year} annual report"
- *   is created in the customer's portal Tasks list once the filing is due within 90 days.
+ *   is created in the customer's portal Tasks list as soon as the filing exists. It shows as
+ *   Upcoming until the due date is within 90 days, then Open.
  *   Filed -> completed; waived or record made inactive -> cancelled; pending -> open (or
  *   completed once the customer marked the filing done). If the customer completes the task
  *   themselves, the filing is flagged "client completed" (ops still confirm it as filed).
@@ -23,7 +24,8 @@ class AJCore_RA_Compliance_Tasks {
 
 	const OPTION   = 'ajcore_ra_filing_tasks';
 	const WANTED   = 'ajcore_ra_filing_task_status'; // filing_id => status we last applied
-	const HORIZON  = 90; // days before the due date that the task appears.
+	const HORIZON  = 90;  // days before the due date that an Upcoming task becomes Open.
+	const LOOKAHEAD = 400; // only filings due within this many days get a task (about next year's).
 	const GUARD    = 'ajcore_ra_filing_tasks_sync';
 
 	public static function init() {
@@ -101,7 +103,8 @@ class AJCore_RA_Compliance_Tasks {
 		$applied = get_option( self::WANTED, array() );
 		$applied = is_array( $applied ) ? $applied : array();
 		$mapped  = array_map( 'absint', array_keys( $map ) );
-		$horizon = gmdate( 'Y-m-d', time() + self::HORIZON * DAY_IN_SECONDS );
+		$horizon = gmdate( 'Y-m-d', time() + self::LOOKAHEAD * DAY_IN_SECONDS );
+		$open_from = gmdate( 'Y-m-d', time() + self::HORIZON * DAY_IN_SECONDS );
 
 		$where_mapped = $mapped ? ' OR f.id IN (' . implode( ',', $mapped ) . ')' : '';
 		$rows         = $pdb->get_results( $pdb->prepare(
@@ -131,7 +134,7 @@ class AJCore_RA_Compliance_Tasks {
 			} elseif ( 'waived' === $row->status || 'active' !== $row->entity_status ) {
 				$want = 'cancelled';
 			} else {
-				$want = ! empty( $row->client_completed ) ? 'completed' : 'open';
+				$want = ! empty( $row->client_completed ) ? 'completed' : ( (string) $row->due_date <= $open_from ? 'open' : 'upcoming' );
 			}
 
 			if ( ! $task_id ) {
