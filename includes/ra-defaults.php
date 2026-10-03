@@ -20,6 +20,8 @@ add_filter( 'ajcore_email_powered_by', 'ajcore_ra_email_powered_by' );
 add_filter( 'ajcore_ra_authorization_enabled', '__return_true' );
 add_filter( 'ajcore_default_brand', 'ajcore_ra_default_brand' );
 add_filter( 'ajcore_customer_brand', 'ajcore_ra_customer_brand', 10, 2 );
+// Stored university_* settings belong to RA's University Place brand; AJCore's save leaves them alone.
+add_filter( 'ajcore_brand_setting_prefixes', 'ajcore_ra_brand_setting_prefixes' );
 add_filter( 'ajcore_business_contact', 'ajcore_ra_business_contact' );
 add_filter( 'ajcore_ra_authorization_default_body_lines', 'ajcore_ra_authorization_body_lines' );
 add_filter( 'ajcore_ra_authorization_default_address', 'ajcore_ra_authorization_address' );
@@ -58,7 +60,44 @@ function ajcore_ra_mark_defaults( $defaults ) {
 	return $defaults;
 }
 
+function ajcore_ra_brand_setting_prefixes( $prefixes ) {
+	$prefixes[] = 'university_';
+	return $prefixes;
+}
+
+/**
+ * University Place Office Suites defaults (moved out of AJCore). Used for customers and leads
+ * claimed by ajcore_ra_customer_brand(). The footer address is blank on purpose: the business's
+ * postal address was never provided, and a wrong address in a customer email is a real error.
+ */
+function ajcore_ra_university_defaults() {
+	return array(
+			'university_wp_password_reset_subject'    => 'Password reset for your University Place Office Suites LLC portal login',
+			'university_wp_password_reset_heading'    => 'Set your client portal password',
+			'university_wp_password_reset_body'       => "Hi {name},\nUse the secure button below to create a new password for your client portal account. This link is private and should only be used by you.",
+			'university_wp_password_reset_from_email' => 'donotreply@universityofficesuites.com',
+			'university_wp_password_reset_from_name'  => 'University Place Office Suites LLC',
+			'university_wp_welcome_email_subject'     => 'Welcome : Your portal access is enabled to University Place Office Suites LLC',
+			'university_wp_welcome_heading'           => 'Welcome to your client portal',
+			'university_wp_welcome_body'              => "Hi {name},\nYour client portal access has been enabled. Use the button below to set your password and sign in securely.",
+			'university_wp_welcome_from_email'        => 'donotreply@universityofficesuites.com',
+			'university_wp_welcome_from_name'         => 'University Place Office Suites LLC',
+			'university_wp_service_status_subject'    => 'Update on {service_name}: {status_label}',
+			'university_wp_service_status_heading'    => 'Your service request was updated',
+			'university_wp_service_status_body'       => "Hi {name},\nThe status of \"{service_name}\" has changed.",
+			'university_wp_service_status_from_email' => 'donotreply@universityofficesuites.com',
+			'university_wp_service_status_from_name'  => 'University Place Office Suites LLC',
+			'university_lead_followup_email_subject'  => 'Following up from University Place Office Suites LLC',
+			'university_lead_followup_heading'        => "We'd love to hear from you",
+			'university_lead_followup_body'           => "Hi {name},\nWe wanted to follow up on your recent inquiry with University Place Office Suites LLC. If you have any questions or would like to talk through your options, give us a call — we are happy to help.\nReady to get started? You can review our services and pricing anytime on our website.",
+			'university_lead_followup_from_email'     => 'donotreply@universityofficesuites.com',
+			'university_lead_followup_from_name'      => 'University Place Office Suites LLC',
+			'university_email_footer_address' => '',
+	);
+}
+
 function ajcore_ra_settings_defaults( $defaults ) {
+	$defaults = array_merge( $defaults, ajcore_ra_university_defaults() );
 	$defaults['ra_authorization_subject'] = 'Registered Agent Authorization and Address Use for {company}';
 	$defaults['ra_authorization_heading'] = 'Registered Agent Authorization';
 	$defaults['ra_authorization_body']    = implode( "\n", ajcore_ra_authorization_body_lines() );
