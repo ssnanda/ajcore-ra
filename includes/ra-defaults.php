@@ -19,6 +19,7 @@ add_filter( 'ajcore_email_powered_by', 'ajcore_ra_email_powered_by' );
 // Turns on the Registered Agent Authorization email template (tab + ops send/preview).
 add_filter( 'ajcore_ra_authorization_enabled', '__return_true' );
 add_filter( 'ajcore_default_brand', 'ajcore_ra_default_brand' );
+add_filter( 'ajcore_customer_brand', 'ajcore_ra_customer_brand', 10, 2 );
 add_filter( 'ajcore_business_contact', 'ajcore_ra_business_contact' );
 add_filter( 'ajcore_ra_authorization_default_body_lines', 'ajcore_ra_authorization_body_lines' );
 add_filter( 'ajcore_ra_authorization_default_address', 'ajcore_ra_authorization_address' );
@@ -138,8 +139,42 @@ function ajcore_ra_default_brand( $brand ) {
 	return $brand;
 }
 
-/** Contact details shown in email footers and info boxes. */
+/**
+ * University Place Office Suites brand (moved out of AJCore). Claims a customer or lead for
+ * University Place when its site is universityofficesuites.com or, for customers, when it is
+ * partner-billed (opus / alliance_vo). 'settings_prefix' makes AJCore read that brand's own
+ * university_* saved settings.
+ *
+ * @param array|null $brand   Null unless another extension already claimed it.
+ * @param array      $context kind (customer|lead), site_domain, partner_key.
+ */
+function ajcore_ra_customer_brand( $brand, $context ) {
+	if ( is_array( $brand ) ) {
+		return $brand;
+	}
+	$domain  = isset( $context['site_domain'] ) ? (string) $context['site_domain'] : '';
+	$partner = isset( $context['partner_key'] ) ? (string) $context['partner_key'] : '';
+	$is_customer = isset( $context['kind'] ) && 'customer' === $context['kind'];
+
+	if ( false === strpos( $domain, 'universityofficesuites.com' ) && ! ( $is_customer && in_array( $partner, array( 'opus', 'alliance_vo' ), true ) ) ) {
+		return $brand;
+	}
+
+	return array(
+		'entity_name'     => 'University Place Office Suites LLC',
+		'site_name'       => 'University Place Office Suites LLC',
+		'site_url'        => 'https://universityofficesuites.com/',
+		'from_email'      => 'donotreply@universityofficesuites.com',
+		'settings_prefix' => 'university_',
+	);
+}
+
+/** Contact details shown in email footers and info boxes. None on the University Place site,
+ *  which has no phone/link of its own to show. */
 function ajcore_ra_business_contact( $contact ) {
+	if ( ajcore_ra_is_university_site() ) {
+		return $contact;
+	}
 	return array(
 		'phone'       => '(704) 307-2135',
 		'email'       => 'contactus@ncllcagents.com',
