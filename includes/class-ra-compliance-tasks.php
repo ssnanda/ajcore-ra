@@ -43,14 +43,6 @@ class AJCore_RA_Compliance_Tasks {
 			'task_scope'      => 'client',
 			'client_visible'  => true,
 		);
-		$templates['ra_boi_report']      = array(
-			'label'           => __( 'Beneficial ownership (BOI) report', 'ajcore-ra' ),
-			'title'           => __( 'Review your Beneficial Ownership Information (BOI) report', 'ajcore-ra' ),
-			'action_required' => __( 'Confirm whether your company must file a BOI report with FinCEN and let us know if you need help.', 'ajcore-ra' ),
-			'task_frequency'  => 'one_time',
-			'task_scope'      => 'client',
-			'client_visible'  => true,
-		);
 		$templates['ra_confirm_address'] = array(
 			'label'           => __( 'Confirm registered agent address', 'ajcore-ra' ),
 			'title'           => __( 'Confirm your registered agent address is current', 'ajcore-ra' ),

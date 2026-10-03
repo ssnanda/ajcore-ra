@@ -137,20 +137,9 @@ function ajcore_ra_brand_defaults( $defaults ) {
 
 function ajcore_ra_overview_defaults( $defaults ) {
 	if ( ajcore_ra_is_university_site() ) {
-		return $defaults; // BOI / NC LLC content is NC LLC Agents Inc only.
+		return $defaults; // These links are NC LLC Agents' own.
 	}
-	$defaults['banner_enabled'] = true;
-	$defaults['banner_heading'] = __( 'Beneficial Ownership Information (BOI) Report:', 'ajcore-ra' );
-	$defaults['banner_message'] = __( 'a federal filing most LLCs and corporations must submit to FinCEN — significant penalties can apply if you miss the deadline.', 'ajcore-ra' );
-	$defaults['banner_button']  = __( 'Learn More', 'ajcore-ra' );
-	$defaults['banner_url']     = home_url( '/do-you-need-to-file-a-beneficial-ownership-information-boi-report/' );
-	$defaults['resources']      = array(
-		array(
-			'url'     => home_url( '/do-you-need-to-file-a-beneficial-ownership-information-boi-report/' ),
-			'enabled' => true,
-			'title'   => __( 'Do You Need to File a Beneficial Ownership Information (BOI) Report?', 'ajcore-ra' ),
-			'blurb'   => __( 'A federal filing with FinCEN, separate from anything you file with NC — significant penalties can apply if you miss it.', 'ajcore-ra' ),
-		),
+	$defaults['resources'] = array(
 		array(
 			'url'     => home_url( '/beware-misleading-mailings-targeting-new-nc-companies/' ),
 			'enabled' => true,
