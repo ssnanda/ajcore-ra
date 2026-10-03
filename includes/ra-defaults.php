@@ -1,6 +1,6 @@
 <?php
 /**
- * NC LLC Agents / Registered Agent defaults that used to be hard-coded in AJCore.
+ * NC LLC Agents Inc / Registered Agent defaults that used to be hard-coded in AJCore.
  * AJCore now ships neutral defaults and exposes two filters; these callbacks restore the
  * original values while AJCore-RA is active. Saved site settings still override both, so a
  * site that has customized any of these is unaffected.
@@ -26,7 +26,7 @@ add_filter( 'ajcore_ra_authorization_default_address', 'ajcore_ra_authorization_
 
 /**
  * True on the University Place Office Suites site. That site gets its own brand defaults
- * (AJCore already carries them as university_* keys) and none of the NC LLC Agents content,
+ * (AJCore already carries them as university_* keys) and none of the NC LLC Agents Inc content,
  * whether or not RA is enabled elsewhere. Filterable for other hosts/local domains.
  */
 function ajcore_ra_is_university_site() {
@@ -88,8 +88,8 @@ function ajcore_ra_brand_defaults( $defaults ) {
 		array(
 			'wp_password_reset_subject'   => 'Password reset for your Portal Login for NC LLC Agents Inc',
 			'wp_welcome_email_subject'    => 'Welcome : Your portal access is enabled to NC LLC Agents Inc',
-			'lead_followup_email_subject' => 'Following up from NC LLC Agents',
-			'lead_followup_body'          => "Hi {name},\nWe wanted to follow up on your recent inquiry with NC LLC Agents. If you have any questions or would like to talk through your options, give us a call — we are happy to help.\nReady to get started? You can review our services and pricing anytime on our website.",
+			'lead_followup_email_subject' => 'Following up from NC LLC Agents Inc',
+			'lead_followup_body'          => "Hi {name},\nWe wanted to follow up on your recent inquiry with NC LLC Agents Inc. If you have any questions or would like to talk through your options, give us a call — we are happy to help.\nReady to get started? You can review our services and pricing anytime on our website.",
 			'email_footer_address'        => "NC LLC Agents Inc.\n1914 J N Pease Pl., Charlotte, NC 28262\n(704) 307-2135 \xc2\xb7 contactus@ncllcagents.com",
 		)
 	);
@@ -97,7 +97,7 @@ function ajcore_ra_brand_defaults( $defaults ) {
 
 function ajcore_ra_overview_defaults( $defaults ) {
 	if ( ajcore_ra_is_university_site() ) {
-		return $defaults; // BOI / NC LLC content is NC LLC Agents only.
+		return $defaults; // BOI / NC LLC content is NC LLC Agents Inc only.
 	}
 	$defaults['banner_enabled'] = true;
 	$defaults['banner_heading'] = __( 'Beneficial Ownership Information (BOI) Report:', 'ajcore-ra' );
@@ -132,7 +132,7 @@ function ajcore_ra_email_powered_by( $text ) {
 	return '' === trim( (string) $text ) ? $text : $text . ' + AJ Core RA';
 }
 
-/** NC LLC Agents identity for emails sent to non-University customers. */
+/** NC LLC Agents Inc identity for emails sent to non-University customers. */
 function ajcore_ra_default_brand( $brand ) {
 	$brand['entity_name'] = 'NC LLC Agents Inc';
 	$brand['from_email']  = 'donotreply@ncllcagents.com';
