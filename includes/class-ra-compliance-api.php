@@ -16,6 +16,9 @@ if ( ! defined( 'WPINC' ) ) {
 
 class AJCore_RA_Compliance_API {
 
+	const AUTO_OPTION    = 'ajcore_ra_entity_auto_status';  // entity_id => status RA last set (auto-managed records)
+	const MISSING_OPTION = 'ajcore_ra_entity_ra_missing';   // entity_id => when the RA subscription was first missing
+
 	/** @var array<string,callable> */
 	private $kit;
 
@@ -159,6 +162,22 @@ class AJCore_RA_Compliance_API {
 			)
 		);
 
+		// Every customer is a compliance record; this creates any that are missing (dry_run=1 only counts).
+		register_rest_route(
+			$ns,
+			'/ops/compliance/sync-customers',
+			array(
+				array(
+					'methods'             => WP_REST_Server::CREATABLE,
+					'callback'            => array( $this, 'sync_customers_to_entities_route' ),
+					'permission_callback' => $ops,
+					'args'                => array(
+						'dry_run' => array( 'required' => false, 'sanitize_callback' => 'absint' ),
+					),
+				),
+			)
+		);
+
 		// Read endpoints (were in AJCore's route map).
 		register_rest_route(
 			$ns,
@@ -255,7 +274,186 @@ class AJCore_RA_Compliance_API {
 		);
 	}
 
+	// ── Customers are the entities ──────────────────────────────────────────────
+
+	/** @return array<string,int>|null customer id => index for active Registered Agent subscriptions; null if unavailable. */
+	private function get_registered_agent_customer_set() {
+		if ( ! class_exists( 'AJForms_Admin' ) ) {
+			return null;
+		}
+		$admin = AJForms_Admin::$instance ? AJForms_Admin::$instance : new AJForms_Admin();
+		if ( ! method_exists( $admin, 'get_portal_core_subscription_product_counts' ) ) {
+			return null;
+		}
+		$counts = $admin->get_portal_core_subscription_product_counts();
+		return array_flip( (array) $counts['registered_agent_subscription_customers'] );
+	}
+
+	/**
+	 * Gives every customer a compliance record, so nobody has to "add an entity" by hand.
+	 *
+	 * - Active record (annual-report filings + reminders) for customers with an active Registered
+	 *   Agent subscription; inactive for everyone else, so no one gets reminders by surprise.
+	 * - Name is the customer's business name when they have one, else their name, else email.
+	 * - First report year is the next April 15 that has not passed yet, so a record created now
+	 *   never starts out overdue and the daily job cannot send an "OVERDUE" email on day one.
+	 * - Existing records are never touched; archived customers are skipped.
+	 *
+	 * @return array{created:int,active:int,inactive:int}
+	 */
+	private function sync_customers_to_entities( $dry_run = false ) {
+		$result = array( 'created' => 0, 'active' => 0, 'inactive' => 0 );
+
+		$pdb         = $this->get_portal_db();
+		$t_entities  = $this->portal_table( 'aj_portal_compliance_entities' );
+		$t_customers = $this->portal_table( 'aj_portal_stripe_customers' );
+		if ( ! $this->table_exists( $pdb, $t_entities ) || ! $this->table_exists( $pdb, $t_customers ) ) {
+			return $result;
+		}
+
+		$linked = array_flip( (array) $pdb->get_col( "SELECT DISTINCT stripe_customer_id FROM `{$t_entities}` WHERE stripe_customer_id <> ''" ) );
+
+		$ra_customers = (array) $this->get_registered_agent_customer_set();
+
+		$year  = (int) gmdate( 'Y' );
+		$first = ( gmdate( 'Y-m-d' ) <= sprintf( '%04d-04-15', $year ) ) ? $year : $year + 1;
+
+		$customers = $pdb->get_results( "SELECT stripe_customer_id, name, email, metadata FROM `{$t_customers}` WHERE portal_status IS NULL OR portal_status <> 'archived'" );
+		foreach ( (array) $customers as $c ) {
+			$cid = (string) $c->stripe_customer_id;
+			if ( '' === $cid || isset( $linked[ $cid ] ) ) {
+				continue;
+			}
+
+			$business = '';
+			$meta     = json_decode( (string) $c->metadata, true );
+			if ( is_array( $meta ) ) {
+				foreach ( array( 'business_name', 'business', 'company', 'company_name' ) as $key ) {
+					if ( ! empty( $meta[ $key ] ) && is_string( $meta[ $key ] ) ) {
+						$business = trim( $meta[ $key ] );
+						break;
+					}
+				}
+			}
+			$name = '' !== $business ? $business : ( '' !== trim( (string) $c->name ) ? trim( (string) $c->name ) : trim( (string) $c->email ) );
+			if ( '' === $name ) {
+				continue;
+			}
+
+			$status = isset( $ra_customers[ $cid ] ) ? 'active' : 'inactive';
+			if ( ! $dry_run ) {
+				$ok = $pdb->insert( $t_entities, array(
+					'stripe_customer_id' => $cid,
+					'entity_name'        => sanitize_text_field( $name ),
+					'entity_type'        => 'llc',
+					'jurisdiction'       => 'NC',
+					'first_report_year'  => $first,
+					'due_month'          => 4,
+					'due_day'            => 15,
+					'entity_status'      => $status,
+					'created_by'         => get_current_user_id(),
+				), array( '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%s', '%d' ) );
+				if ( ! $ok ) {
+					continue;
+				}
+				$auto                    = get_option( self::AUTO_OPTION, array() );
+				$auto                    = is_array( $auto ) ? $auto : array();
+				$auto[ (int) $pdb->insert_id ] = $status;
+				update_option( self::AUTO_OPTION, $auto, false );
+			}
+			$result['created']++;
+			$result[ $status ]++;
+		}
+
+		return $result;
+	}
+
+	/**
+	 * Keeps auto-created records in step with the Registered Agent subscription: Active while
+	 * the customer has one, Inactive after it has been gone for 14 days (a failed payment must
+	 * not switch reminders off), Active again as soon as it returns. A record whose status was
+	 * changed by hand is never touched, and neither is a dissolved one.
+	 */
+	private function follow_subscriptions() {
+		$ra = $this->get_registered_agent_customer_set();
+		if ( null === $ra || empty( $ra ) ) {
+			return; // unknown or empty: never mass-deactivate on a bad read
+		}
+
+		$pdb        = $this->get_portal_db();
+		$t_entities = $this->portal_table( 'aj_portal_compliance_entities' );
+		if ( ! $this->table_exists( $pdb, $t_entities ) ) {
+			return;
+		}
+
+		$auto    = get_option( self::AUTO_OPTION, array() );
+		$auto    = is_array( $auto ) ? $auto : array();
+		$missing = get_option( self::MISSING_OPTION, array() );
+		$missing = is_array( $missing ) ? $missing : array();
+		$changed = false;
+		$now     = time();
+
+		foreach ( (array) $pdb->get_results( "SELECT id, stripe_customer_id, entity_status FROM `{$t_entities}` WHERE stripe_customer_id <> '' AND entity_status IN ('active','inactive')" ) as $e ) {
+			$id = (int) $e->id;
+			if ( ! isset( $auto[ $id ] ) || $auto[ $id ] !== $e->entity_status ) {
+				continue; // not auto-managed, or changed by hand
+			}
+			$has = isset( $ra[ (string) $e->stripe_customer_id ] );
+
+			if ( $has ) {
+				if ( isset( $missing[ $id ] ) ) {
+					unset( $missing[ $id ] );
+					$changed = true;
+				}
+				if ( 'inactive' === $e->entity_status ) {
+					$pdb->update( $t_entities, array( 'entity_status' => 'active' ), array( 'id' => $id ), array( '%s' ), array( '%d' ) );
+					$auto[ $id ] = 'active';
+					$changed     = true;
+				}
+				continue;
+			}
+
+			if ( 'active' === $e->entity_status ) {
+				if ( ! isset( $missing[ $id ] ) ) {
+					$missing[ $id ] = $now;
+					$changed        = true;
+				} elseif ( $now - (int) $missing[ $id ] >= 14 * DAY_IN_SECONDS ) {
+					$pdb->update( $t_entities, array( 'entity_status' => 'inactive' ), array( 'id' => $id ), array( '%s' ), array( '%d' ) );
+					$auto[ $id ] = 'inactive';
+					unset( $missing[ $id ] );
+					$changed = true;
+				}
+			}
+		}
+
+		if ( $changed ) {
+			update_option( self::AUTO_OPTION, $auto, false );
+			update_option( self::MISSING_OPTION, $missing, false );
+		}
+	}
+
+	/** At most hourly, so the list screen stays quick. */
+	private function maybe_sync_customers() {
+		if ( get_transient( 'ajcore_ra_compliance_customer_sync' ) ) {
+			return;
+		}
+		$this->sync_customers_to_entities( false );
+		$this->follow_subscriptions();
+		set_transient( 'ajcore_ra_compliance_customer_sync', 1, HOUR_IN_SECONDS );
+	}
+
+	public function sync_customers_to_entities_route( WP_REST_Request $request ) {
+		$dry = (bool) absint( $request->get_param( 'dry_run' ) );
+		$out = $this->sync_customers_to_entities( $dry );
+		if ( ! $dry ) {
+			set_transient( 'ajcore_ra_compliance_customer_sync', 1, HOUR_IN_SECONDS );
+		}
+		return rest_ensure_response( array_merge( array( 'success' => true, 'dry_run' => $dry ), $out ) );
+	}
+
 	public function get_ops_compliance( WP_REST_Request $request ) {
+		$this->maybe_sync_customers();
+		AJCore_RA_Compliance_Tasks::maybe_reconcile();
 		$pdb         = $this->get_portal_db();
 		$t_entities  = $this->portal_table( 'aj_portal_compliance_entities' );
 		$t_filings   = $this->portal_table( 'aj_portal_compliance_filings' );
@@ -610,6 +808,7 @@ class AJCore_RA_Compliance_API {
 			return new WP_Error( 'bad_request', 'Unknown filing action.', array( 'status' => 400 ) );
 		}
 
+		AJCore_RA_Compliance_Tasks::reconcile();
 		return rest_ensure_response( array( 'success' => true ) );
 	}
 
@@ -741,6 +940,7 @@ class AJCore_RA_Compliance_API {
 		$pdb->update( $t_filings, $data, array( 'id' => $id ), $formats, array( '%d' ) );
 
 		$fresh = $pdb->get_row( $pdb->prepare( "SELECT * FROM `{$t_filings}` WHERE id = %d", $id ) );
+		AJCore_RA_Compliance_Tasks::reconcile();
 		return rest_ensure_response( array( 'success' => true, 'filing' => $this->format_compliance_filing_row( $fresh ) ) );
 	}
 }
