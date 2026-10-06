@@ -1,6 +1,6 @@
 <?php
 /**
- * Website tab for the client portal: the customer's hosted site (e.g. tav.itspector.com) plus a
+ * Website tab for the client portal: the customer's hosted site (e.g. nc.itspector.com) plus a
  * landing page for web services (custom-domain packages).
  *
  * - Tab: added through AJCore's 'ajcore_portal_menu_default_items' / 'ajcore_portal_tab_content'
@@ -100,7 +100,7 @@ class AJCore_RA_Website {
 		return ( strlen( $value ) >= 2 && strlen( $value ) <= 30 ) ? $value : '';
 	}
 
-	/** "Trident Audio Video, Inc" -> "tav". */
+	/** "Trident Audio Video, Inc" -> "tav" (example of how initials are suggested). */
 	public static function suggest_subdomain( $business ) {
 		$words = preg_split( '/[^A-Za-z0-9]+/', (string) $business, -1, PREG_SPLIT_NO_EMPTY );
 		$skip  = array( 'inc', 'llc', 'corp', 'co', 'ltd', 'company', 'corporation', 'incorporated', 'the', 'and', 'of' );
@@ -408,8 +408,8 @@ class AJCore_RA_Website {
 			echo '<option value="' . esc_attr( $cid ) . '">' . esc_html( $c['name'] . ( '' !== $c['business'] && $c['business'] !== $c['name'] ? ' — ' . $c['business'] : '' ) ) . '</option>';
 		}
 		echo '</select></label>';
-		echo '<label>' . esc_html__( 'Address', 'ajcore-ra' ) . '<br><input type="text" name="subdomain" id="ajcore-ra-subdomain" placeholder="tav" size="14"> <code>.' . esc_html( $base ) . '</code></label>';
-		echo '<label>' . esc_html__( 'Name shown', 'ajcore-ra' ) . '<br><input type="text" name="label" placeholder="Trident Audio Video"></label>';
+		echo '<label>' . esc_html__( 'Address', 'ajcore-ra' ) . '<br><input type="text" name="subdomain" id="ajcore-ra-subdomain" placeholder="nc" size="14"> <code>.' . esc_html( $base ) . '</code></label>';
+		echo '<label>' . esc_html__( 'Name shown', 'ajcore-ra' ) . '<br><input type="text" name="label" placeholder="NC LLC Agents Inc"></label>';
 		echo '<label>' . esc_html__( 'Status', 'ajcore-ra' ) . '<br><select name="status">';
 		foreach ( $statuses as $k => $v ) {
 			echo '<option value="' . esc_attr( $k ) . '">' . esc_html( $v ) . '</option>';
