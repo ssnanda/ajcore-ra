@@ -31,6 +31,8 @@ function ajcore_ra_features() {
 			'Compliance portal tab and admin screens'         => false,
 			'Compliance reminder job and emails'                 => true,
 			'Task templates and filing tasks'                    => true,
+			'Website tab and customer websites'                  => true,
+			'Business Profile tab (editable, with history)'      => true,
 		),
 		'Mail & documents'   => array(
 			'Mail items and mail routes'                  => false,
