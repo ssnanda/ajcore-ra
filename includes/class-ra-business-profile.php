@@ -94,7 +94,7 @@ class AJCore_RA_Business_Profile {
 		add_action( 'admin_post_ajcore_ra_save_business_profile', array( __CLASS__, 'handle_save' ) );
 		add_action( 'admin_post_ajcore_ra_staff_save_profile', array( __CLASS__, 'handle_staff_save' ) );
 		add_action( 'admin_post_ajcore_ra_profile_reviewed', array( __CLASS__, 'handle_reviewed' ) );
-		add_action( 'admin_menu', array( __CLASS__, 'add_menu' ), 34 );
+		add_action( 'ajcore_admin_portal_tab_render', array( __CLASS__, 'render_admin_tab' ) );
 	}
 
 	// ── data ────────────────────────────────────────────────────────────────────
@@ -396,12 +396,13 @@ class AJCore_RA_Business_Profile {
 		return $items;
 	}
 
+	/**
+	 * The logged-in portal customer, resolved by AJCore the same way the portal pages do it. (The
+	 * REST toolkit's lookup uses a different mapping table, which is why it must not be used here:
+	 * the form would be drawn for one customer and saved for none.)
+	 */
 	private static function customer_id() {
-		if ( ! class_exists( 'AJCore_Extensions' ) ) {
-			return '';
-		}
-		$kit = AJCore_Extensions::rest_toolkit();
-		return (string) $kit['current_customer_id']();
+		return (string) apply_filters( 'ajcore_current_portal_customer_id', '' );
 	}
 
 	public static function render_tab( $html, $tab, $context ) {
@@ -465,14 +466,20 @@ class AJCore_RA_Business_Profile {
 
 	// ── staff: AJCore admin ─────────────────────────────────────────────────────
 
-	public static function add_menu() {
-		add_submenu_page( 'ajforms', __( 'Business Profiles', 'ajcore-ra' ), __( 'Business Profiles', 'ajcore-ra' ), 'manage_options', 'ajcore-ra-profiles', array( __CLASS__, 'render_admin' ) );
+	/** "Business Profiles" in the Client Portal tab bar of AJCore admin (opens in that page). */
+	public static function admin_tab( $tabs ) {
+		$tabs['ra-profiles'] = array( 'label' => __( 'Business Profiles', 'ajcore-ra' ) );
+		return $tabs;
 	}
 
-	/** Adds "Business Profiles" to the Client Portal tab bar in AJCore admin. */
-	public static function admin_tab( $tabs ) {
-		$tabs['ra-profiles'] = array( 'label' => __( 'Business Profiles', 'ajcore-ra' ), 'url' => add_query_arg( array( 'page' => 'ajcore-ra-profiles' ), admin_url( 'admin.php' ) ) );
-		return $tabs;
+	public static function render_admin_tab( $tab ) {
+		if ( 'ra-profiles' === $tab ) {
+			self::render_admin();
+		}
+	}
+
+	private static function tab_url( array $args = array() ) {
+		return add_query_arg( array_merge( array( 'page' => 'ajforms-client-portal', 'tab' => 'ra-profiles' ), $args ), admin_url( 'admin.php' ) );
 	}
 
 	/** Plain-text brief of one profile, for pasting into a website build. */
@@ -581,7 +588,7 @@ class AJCore_RA_Business_Profile {
 		if ( $result['ok'] ) {
 			self::process_files( $customer, $who );
 		}
-		wp_safe_redirect( add_query_arg( array( 'page' => 'ajcore-ra-profiles', 'customer' => $customer, 'ra_msg' => $result['ok'] ? 'saved' : 'fail' ), admin_url( 'admin.php' ) ) );
+		wp_safe_redirect( self::tab_url( array( 'customer' => $customer, 'ra_msg' => $result['ok'] ? 'saved' : 'fail' ) ) );
 		exit;
 	}
 
@@ -593,7 +600,7 @@ class AJCore_RA_Business_Profile {
 		$customer = isset( $_POST['customer'] ) ? sanitize_text_field( wp_unslash( $_POST['customer'] ) ) : '';
 		$user     = wp_get_current_user();
 		self::mark_reviewed( $customer, 'staff: ' . $user->user_login );
-		wp_safe_redirect( add_query_arg( array( 'page' => 'ajcore-ra-profiles', 'customer' => $customer, 'ra_msg' => 'reviewed' ), admin_url( 'admin.php' ) ) );
+		wp_safe_redirect( self::tab_url( array( 'customer' => $customer, 'ra_msg' => 'reviewed' ) ) );
 		exit;
 	}
 
@@ -601,7 +608,7 @@ class AJCore_RA_Business_Profile {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			return;
 		}
-		echo '<div class="wrap"><h1>' . esc_html__( 'Business Profiles', 'ajcore-ra' ) . '</h1>';
+		echo '<div class="ajforms-settings-card"><h2>' . esc_html__( 'Business Profiles', 'ajcore-ra' ) . '</h2>';
 		if ( ! AJCore_RA_Website::db() ) {
 			echo '<p>' . esc_html__( 'AJ Core is not ready.', 'ajcore-ra' ) . '</p></div>';
 			return;
@@ -620,7 +627,7 @@ class AJCore_RA_Business_Profile {
 		}
 		echo '<table class="widefat striped" style="max-width:960px"><thead><tr><th>' . esc_html__( 'Customer', 'ajcore-ra' ) . '</th><th>' . esc_html__( 'Business', 'ajcore-ra' ) . '</th><th>' . esc_html__( 'Complete', 'ajcore-ra' ) . '</th><th>' . esc_html__( 'Updated', 'ajcore-ra' ) . '</th><th></th></tr></thead><tbody>';
 		foreach ( $rows as $r ) {
-			$url = add_query_arg( array( 'page' => 'ajcore-ra-profiles', 'customer' => $r['customer_id'] ), admin_url( 'admin.php' ) );
+			$url = self::tab_url( array( 'customer' => $r['customer_id'] ) );
 			echo '<tr><td><a href="' . esc_url( $url ) . '">' . esc_html( $r['customer_name'] ) . '</a></td><td>' . esc_html( $r['business'] ) . '</td><td>' . esc_html( $r['completeness'] . '%' ) . '</td><td>' . esc_html( mysql2date( get_option( 'date_format' ), $r['updated'] ) ) . '</td><td>' . ( $r['needs_review'] ? '<span style="background:#fef3c7;color:#92400e;padding:2px 10px;border-radius:10px;font-weight:700;font-size:12px">' . esc_html__( 'Needs review', 'ajcore-ra' ) . '</span>' : '' ) . '</td></tr>'; // phpcs:ignore WordPress.Security.EscapeOutput -- static markup.
 		}
 		echo '</tbody></table></div>';
@@ -629,7 +636,7 @@ class AJCore_RA_Business_Profile {
 	private static function render_detail( $customer ) {
 		$data = self::load( $customer );
 		$p    = self::api_profile( $customer );
-		$back = add_query_arg( array( 'page' => 'ajcore-ra-profiles' ), admin_url( 'admin.php' ) );
+		$back = self::tab_url();
 
 		echo '<p><a href="' . esc_url( $back ) . '">&larr; ' . esc_html__( 'All profiles', 'ajcore-ra' ) . '</a></p>';
 		if ( isset( $_GET['ra_msg'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification

@@ -40,7 +40,7 @@ class AJCore_RA_Website {
 		add_filter( 'ajcore_portal_menu_default_items', array( __CLASS__, 'add_tab' ) );
 		add_filter( 'ajcore_portal_tab_content', array( __CLASS__, 'render_tab' ), 10, 3 );
 		add_filter( 'ajcore_admin_portal_tabs', array( __CLASS__, 'admin_tab' ), 9 );
-		add_action( 'admin_menu', array( __CLASS__, 'add_menu' ), 33 );
+		add_action( 'ajcore_admin_portal_tab_render', array( __CLASS__, 'render_admin_tab' ) );
 		add_action( 'admin_post_ajcore_ra_save_website', array( __CLASS__, 'handle_save' ) );
 		add_action( 'admin_post_ajcore_ra_remove_website', array( __CLASS__, 'handle_remove' ) );
 		add_action( 'admin_post_ajcore_ra_save_website_packages', array( __CLASS__, 'handle_save_packages' ) );
@@ -284,14 +284,20 @@ class AJCore_RA_Website {
 
 	// ── staff page: AJCore > Websites ───────────────────────────────────────────
 
-	/** "Websites" in the Client Portal tab bar of AJCore admin. */
+	/** "Websites" in the Client Portal tab bar of AJCore admin (opens in that page). */
 	public static function admin_tab( $tabs ) {
-		$tabs['ra-websites'] = array( 'label' => __( 'Websites', 'ajcore-ra' ), 'url' => add_query_arg( array( 'page' => 'ajcore-ra-websites' ), admin_url( 'admin.php' ) ) );
+		$tabs['ra-websites'] = array( 'label' => __( 'Websites', 'ajcore-ra' ) );
 		return $tabs;
 	}
 
-	public static function add_menu() {
-		add_submenu_page( 'ajforms', __( 'Websites', 'ajcore-ra' ), __( 'Websites', 'ajcore-ra' ), 'manage_options', 'ajcore-ra-websites', array( __CLASS__, 'render_admin' ) );
+	public static function render_admin_tab( $tab ) {
+		if ( 'ra-websites' === $tab ) {
+			self::render_admin();
+		}
+	}
+
+	private static function tab_url( array $args = array() ) {
+		return add_query_arg( array_merge( array( 'page' => 'ajforms-client-portal', 'tab' => 'ra-websites' ), $args ), admin_url( 'admin.php' ) );
 	}
 
 	public static function customers() {
@@ -339,7 +345,7 @@ class AJCore_RA_Website {
 	}
 
 	private static function back( $notice, $ok = true ) {
-		wp_safe_redirect( add_query_arg( array( 'page' => 'ajcore-ra-websites', 'ra_notice' => rawurlencode( $notice ), 'ra_ok' => $ok ? 1 : 0 ), admin_url( 'admin.php' ) ) );
+		wp_safe_redirect( self::tab_url( array( 'ra_notice' => rawurlencode( $notice ), 'ra_ok' => $ok ? 1 : 0 ) ) );
 		exit;
 	}
 
@@ -389,10 +395,11 @@ class AJCore_RA_Website {
 		$base      = self::base_domain();
 		$suggest   = array();
 		foreach ( $customers as $cid => $c ) {
-			$suggest[ $cid ] = self::suggest_subdomain( '' !== $c['business'] ? $c['business'] : $c['name'] );
+			$business        = '' !== $c['business'] ? $c['business'] : $c['name'];
+			$suggest[ $cid ] = array( 'sub' => self::suggest_subdomain( $business ), 'name' => $business );
 		}
 
-		echo '<div class="wrap"><h1>' . esc_html__( 'Websites', 'ajcore-ra' ) . '</h1>';
+		echo '<div class="ajforms-settings-card"><h2>' . esc_html__( 'Websites', 'ajcore-ra' ) . '</h2>';
 		if ( isset( $_GET['ra_notice'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
 			$ok = ! empty( $_GET['ra_ok'] ); // phpcs:ignore WordPress.Security.NonceVerification
 			echo '<div class="notice notice-' . ( $ok ? 'success' : 'error' ) . ' is-dismissible"><p>' . esc_html( sanitize_text_field( wp_unslash( $_GET['ra_notice'] ) ) ) . '</p></div>'; // phpcs:ignore WordPress.Security.NonceVerification
@@ -409,7 +416,7 @@ class AJCore_RA_Website {
 		}
 		echo '</select></label>';
 		echo '<label>' . esc_html__( 'Address', 'ajcore-ra' ) . '<br><input type="text" name="subdomain" id="ajcore-ra-subdomain" placeholder="nc" size="14"> <code>.' . esc_html( $base ) . '</code></label>';
-		echo '<label>' . esc_html__( 'Name shown', 'ajcore-ra' ) . '<br><input type="text" name="label" placeholder="NC LLC Agents Inc"></label>';
+		echo '<label>' . esc_html__( 'Business name', 'ajcore-ra' ) . '<br><input type="text" name="label" id="ajcore-ra-label" placeholder="NC LLC Agents Inc"></label>';
 		echo '<label>' . esc_html__( 'Status', 'ajcore-ra' ) . '<br><select name="status">';
 		foreach ( $statuses as $k => $v ) {
 			echo '<option value="' . esc_attr( $k ) . '">' . esc_html( $v ) . '</option>';
@@ -417,7 +424,8 @@ class AJCore_RA_Website {
 		echo '</select></label>';
 		echo '<label>' . esc_html__( 'Note for the customer', 'ajcore-ra' ) . '<br><input type="text" name="note" size="34"></label>';
 		echo '<button type="submit" class="button button-primary">' . esc_html__( 'Save', 'ajcore-ra' ) . '</button></form>';
-		echo '<script>(function(){var s=' . wp_json_encode( $suggest ) . ';var c=document.getElementById("ajcore-ra-customer"),a=document.getElementById("ajcore-ra-subdomain");if(c&&a){c.addEventListener("change",function(){if(!a.value){a.value=s[c.value]||"";}});}})();</script>';
+		// Picking a customer fills the address and the business name; a field you typed in yourself is left alone.
+		echo '<script>(function(){var s=' . wp_json_encode( $suggest ) . ';var c=document.getElementById("ajcore-ra-customer"),a=document.getElementById("ajcore-ra-subdomain"),n=document.getElementById("ajcore-ra-label");if(!c||!a||!n){return;}[a,n].forEach(function(el){el.addEventListener("input",function(){el.dataset.touched="1";});});c.addEventListener("change",function(){var v=s[c.value]||{sub:"",name:""};if(!a.dataset.touched){a.value=v.sub;}if(!n.dataset.touched){n.value=v.name;}});})();</script>';
 
 		// Current sites.
 		echo '<h2 style="margin-top:24px">' . esc_html__( 'Customer websites', 'ajcore-ra' ) . ' <small>· ' . esc_html( (string) count( $sites ) ) . '</small></h2>';
