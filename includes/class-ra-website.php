@@ -10,7 +10,8 @@
  *   (portal DB, so shared across connected sites): entity_type 'website', entity_key = host,
  *   entity_label = display name, metadata = JSON { status, note }. AJCore's customer view already
  *   lists these rows.
- * - Staff only for now: customers see their site(s); AJCore > Websites assigns them.
+ * - Staff assign sites in AJCore > Websites. Customers can also request an address themselves
+ *   (saved as a Planned site with metadata by=customer, changeable until staff start building).
  * - Packages: edited on the same staff page (one per line: Name | Price | Description).
  */
 
@@ -41,6 +42,11 @@ class AJCore_RA_Website {
 		add_filter( 'ajcore_portal_tab_content', array( __CLASS__, 'render_tab' ), 10, 3 );
 		add_filter( 'ajcore_admin_portal_tabs', array( __CLASS__, 'admin_tab' ), 9 );
 		add_action( 'ajcore_admin_portal_tab_render', array( __CLASS__, 'render_admin_tab' ) );
+		add_action( 'admin_post_ajcore_ra_request_website', array( __CLASS__, 'handle_request_site' ) );
+		add_filter( 'ajcore_portal_admin_post_actions', static function ( $actions ) {
+			$actions[] = 'ajcore_ra_request_website'; // portal customers post here; AJCore otherwise bounces them out of wp-admin
+			return $actions;
+		} );
 		add_action( 'admin_post_ajcore_ra_save_website', array( __CLASS__, 'handle_save' ) );
 		add_action( 'admin_post_ajcore_ra_remove_website', array( __CLASS__, 'handle_remove' ) );
 		add_action( 'admin_post_ajcore_ra_save_website_packages', array( __CLASS__, 'handle_save_packages' ) );
@@ -86,6 +92,7 @@ class AJCore_RA_Website {
 				'label'    => (string) $r->entity_label,
 				'status'   => isset( $meta['status'] ) && isset( self::statuses()[ $meta['status'] ] ) ? $meta['status'] : 'planned',
 				'note'     => isset( $meta['note'] ) ? (string) $meta['note'] : '',
+				'by'       => isset( $meta['by'] ) ? (string) $meta['by'] : '',
 			);
 		}
 		return $out;
@@ -134,7 +141,7 @@ class AJCore_RA_Website {
 	}
 
 	/** @return array{ok:bool,message:string,host:string} */
-	public static function save_site( $customer, $subdomain, $status, $note, $label ) {
+	public static function save_site( $customer, $subdomain, $status, $note, $label, array $meta_extra = array() ) {
 		$ctx = self::db();
 		if ( ! $ctx ) {
 			return array( 'ok' => false, 'message' => __( 'AJ Core is not ready.', 'ajcore-ra' ), 'host' => '' );
@@ -160,7 +167,7 @@ class AJCore_RA_Website {
 			'entity_key'         => $host,
 			'entity_label'       => sanitize_text_field( (string) $label ),
 			'entity_type'        => self::TYPE,
-			'metadata'           => wp_json_encode( array( 'status' => $status, 'note' => sanitize_text_field( (string) $note ) ) ),
+			'metadata'           => wp_json_encode( array_merge( array( 'status' => $status, 'note' => sanitize_text_field( (string) $note ) ), $meta_extra ) ),
 		);
 		$fmt    = array( '%s', '%s', '%s', '%s', '%s' );
 		$exists = $db->get_var( $db->prepare( "SELECT id FROM `{$t}` WHERE stripe_customer_id = %s AND entity_key = %s LIMIT 1", $customer, $host ) );
@@ -209,54 +216,117 @@ class AJCore_RA_Website {
 		return $items;
 	}
 
+	/** Where customers send website questions: the portal support email, else contactus@<this site>. */
+	private static function support_email() {
+		$settings = function_exists( 'ajforms_get_settings' ) ? ajforms_get_settings() : get_option( 'ajforms_settings', array() );
+		$settings = is_array( $settings ) ? $settings : array();
+		if ( ! empty( $settings['portal_support_email'] ) && is_email( $settings['portal_support_email'] ) ) {
+			return sanitize_email( (string) $settings['portal_support_email'] );
+		}
+		$host = wp_parse_url( home_url(), PHP_URL_HOST );
+		$host = is_string( $host ) ? preg_replace( '/^www\./i', '', strtolower( $host ) ) : '';
+		return ( '' !== $host && false !== strpos( $host, '.' ) ) ? 'contactus@' . $host : '';
+	}
+
+	/** mailto link with a prefilled subject (no dependency on a contact page existing on this site). */
+	private static function mailto( $subject ) {
+		$email = self::support_email();
+		return '' === $email ? '' : 'mailto:' . $email . '?subject=' . rawurlencode( $subject );
+	}
+
+	private static function customer_id() {
+		return (string) apply_filters( 'ajcore_current_portal_customer_id', '' );
+	}
+
+	/** Subdomains customers cannot claim. */
+	private static function reserved_subdomains() {
+		return (array) apply_filters( 'ajcore_ra_website_reserved_subdomains', array( 'www', 'mail', 'smtp', 'ftp', 'admin', 'api', 'ns1', 'ns2', 'webmail', 'cpanel', 'portal', 'autodiscover' ) );
+	}
+
 	public static function render_tab( $html, $tab, $context ) {
 		if ( 'website' !== $tab ) {
 			return $html;
 		}
 		$customer = isset( $context['stripe_customer_id'] ) ? (string) $context['stripe_customer_id'] : '';
 		$sites    = self::sites_for( $customer );
-		$contact  = home_url( '/email-us/' );
 		$statuses = self::statuses();
 		$base     = self::base_domain();
+		$saved    = isset( $_GET['website_saved'] ) ? sanitize_key( wp_unslash( $_GET['website_saved'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
+		$messages = array(
+			'ok'       => array( 'is-success', __( 'Thanks. We saved your address request and will be in touch.', 'ajcore-ra' ) ),
+			'invalid'  => array( 'is-error', __( 'Use 2-30 letters, numbers or hyphens, with no spaces.', 'ajcore-ra' ) ),
+			'reserved' => array( 'is-error', __( 'That address is not available. Please choose another.', 'ajcore-ra' ) ),
+			'taken'    => array( 'is-error', __( 'That address is already taken. Please choose another.', 'ajcore-ra' ) ),
+			'fail'     => array( 'is-error', __( 'We could not save your request. Please try again.', 'ajcore-ra' ) ),
+		);
+
+		// A request the customer made themselves can be changed until we start building it.
+		$editable = null;
+		foreach ( $sites as $site ) {
+			if ( 'customer' === $site['by'] && 'planned' === $site['status'] ) {
+				$editable = $site;
+				break;
+			}
+		}
 
 		ob_start();
 		?>
 		<section class="aj-customer-portal-panel aj-ra-website">
 			<h2><?php esc_html_e( 'Website', 'ajcore-ra' ); ?></h2>
 
-			<?php if ( $sites ) : ?>
-				<?php foreach ( $sites as $site ) : ?>
-					<?php $url = 'https://' . $site['key']; ?>
-					<div class="aj-portal-account-summary" style="margin:0 0 14px;">
-						<h3 style="margin:0 0 6px;"><?php echo esc_html( '' !== $site['label'] ? $site['label'] : $site['key'] ); ?></h3>
-						<p style="margin:0 0 8px;">
-							<?php if ( 'live' === $site['status'] ) : ?>
-								<a href="<?php echo esc_url( $url ); ?>" target="_blank" rel="noopener" style="font-weight:800;font-size:18px;"><?php echo esc_html( $site['key'] ); ?></a>
-							<?php else : ?>
-								<strong style="font-size:18px;"><?php echo esc_html( $site['key'] ); ?></strong>
-							<?php endif; ?>
-							<span class="aj-ra-status" style="margin-left:8px;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:700;background:<?php echo 'live' === $site['status'] ? '#dcfce7;color:#166534' : '#fef3c7;color:#92400e'; ?>"><?php echo esc_html( $statuses[ $site['status'] ] ); ?></span>
-						</p>
-						<?php if ( '' !== $site['note'] ) : ?>
-							<p style="margin:0 0 8px;"><?php echo esc_html( $site['note'] ); ?></p>
-						<?php endif; ?>
-						<p style="margin:0;">
-							<?php if ( 'live' === $site['status'] ) : ?>
-								<a class="button" href="<?php echo esc_url( $url ); ?>" target="_blank" rel="noopener"><?php esc_html_e( 'Visit website', 'ajcore-ra' ); ?></a>
-							<?php endif; ?>
-							<a class="button" href="<?php echo esc_url( $contact ); ?>"><?php esc_html_e( 'Request a change', 'ajcore-ra' ); ?></a>
-						</p>
-					</div>
-				<?php endforeach; ?>
-			<?php else : ?>
+			<div style="margin:0 0 16px;padding:12px 16px;border-radius:12px;background:#fef3c7;color:#92400e;font-weight:700;">
+				<?php esc_html_e( 'Under development', 'ajcore-ra' ); ?>
+				<span style="font-weight:500;"> &mdash; <?php esc_html_e( 'we are still building this area, but you are welcome to inquire about a website for your business.', 'ajcore-ra' ); ?></span>
+			</div>
+
+			<?php if ( isset( $messages[ $saved ] ) ) : ?>
+				<div class="aj-portal-add-service-message <?php echo esc_attr( $messages[ $saved ][0] ); ?>"><?php echo esc_html( $messages[ $saved ][1] ); ?></div>
+			<?php endif; ?>
+
+			<?php foreach ( $sites as $site ) : ?>
+				<?php $url = 'https://' . $site['key']; ?>
 				<div class="aj-portal-account-summary" style="margin:0 0 14px;">
-					<h3 style="margin:0 0 6px;"><?php esc_html_e( 'A website for your business', 'ajcore-ra' ); ?></h3>
-					<p style="margin:0 0 10px;"><?php echo esc_html( sprintf( /* translators: %s: domain */ __( 'We design, host and maintain your website for you, at your own address on %s, such as yourname.%s.', 'ajcore-ra' ), $base, $base ) ); ?></p>
-					<p style="margin:0;"><a class="button button-primary" href="<?php echo esc_url( $contact ); ?>"><?php esc_html_e( 'Ask about a website', 'ajcore-ra' ); ?></a></p>
+					<h3 style="margin:0 0 6px;"><?php echo esc_html( '' !== $site['label'] ? $site['label'] : $site['key'] ); ?></h3>
+					<p style="margin:0 0 8px;">
+						<?php if ( 'live' === $site['status'] ) : ?>
+							<a href="<?php echo esc_url( $url ); ?>" target="_blank" rel="noopener" style="font-weight:800;font-size:18px;"><?php echo esc_html( $site['key'] ); ?></a>
+						<?php else : ?>
+							<strong style="font-size:18px;"><?php echo esc_html( $site['key'] ); ?></strong>
+						<?php endif; ?>
+						<span class="aj-ra-status" style="margin-left:8px;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:700;background:<?php echo 'live' === $site['status'] ? '#dcfce7;color:#166534' : '#fef3c7;color:#92400e'; ?>"><?php echo esc_html( $statuses[ $site['status'] ] ); ?></span>
+					</p>
+					<?php if ( '' !== $site['note'] ) : ?>
+						<p style="margin:0 0 8px;"><?php echo esc_html( $site['note'] ); ?></p>
+					<?php endif; ?>
+					<p style="margin:0;">
+						<?php if ( 'live' === $site['status'] ) : ?>
+							<a class="button" href="<?php echo esc_url( $url ); ?>" target="_blank" rel="noopener"><?php esc_html_e( 'Visit website', 'ajcore-ra' ); ?></a>
+						<?php endif; ?>
+						<?php $change_url = self::mailto( 'Website change: ' . $site['key'] ); ?>
+						<?php if ( '' !== $change_url ) : ?>
+							<a class="button" href="<?php echo esc_url( $change_url, array( 'mailto' ) ); ?>"><?php esc_html_e( 'Request a change', 'ajcore-ra' ); ?></a>
+						<?php endif; ?>
+					</p>
+				</div>
+			<?php endforeach; ?>
+
+			<?php if ( ! $sites || $editable ) : ?>
+				<div class="aj-portal-account-summary" style="margin:0 0 14px;">
+					<h3 style="margin:0 0 6px;"><?php echo $editable ? esc_html__( 'Change your requested address', 'ajcore-ra' ) : esc_html__( 'Request a website', 'ajcore-ra' ); ?></h3>
+					<p style="margin:0 0 10px;"><?php echo esc_html( sprintf( /* translators: %s: base domain */ __( 'We design, host and maintain websites for our customers. Choose the address you would like. Your website will be at <name>.%s. You can change it until we start building.', 'ajcore-ra' ), $base ) ); ?></p>
+					<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+						<input type="hidden" name="action" value="ajcore_ra_request_website">
+						<?php wp_nonce_field( 'ajcore_ra_request_website' ); ?>
+						<label for="aj-ra-subdomain" class="screen-reader-text"><?php esc_html_e( 'Website address', 'ajcore-ra' ); ?></label>
+						<input type="text" id="aj-ra-subdomain" name="subdomain" required minlength="2" maxlength="30" pattern="[A-Za-z0-9\-]{2,30}" placeholder="yourname" value="<?php echo $editable ? esc_attr( preg_replace( '/\.' . preg_quote( $base, '/' ) . '$/', '', $editable['key'] ) ) : ''; ?>" style="min-width:180px;">
+						<strong>.<?php echo esc_html( $base ); ?></strong>
+						<button type="submit" class="button button-primary"><?php echo $editable ? esc_html__( 'Save address', 'ajcore-ra' ) : esc_html__( 'Request this address', 'ajcore-ra' ); ?></button>
+					</form>
+					<p class="description" style="margin:8px 0 0;"><?php esc_html_e( '2-30 letters, numbers or hyphens.', 'ajcore-ra' ); ?></p>
 				</div>
 			<?php endif; ?>
 
-			<h3 style="margin:22px 0 8px;"><?php esc_html_e( 'Your own domain', 'ajcore-ra' ); ?></h3>
+			<h3 style="margin:22px 0 8px;"><?php esc_html_e( 'Use your own domain', 'ajcore-ra' ); ?></h3>
 			<?php $packages = self::packages(); ?>
 			<?php if ( $packages ) : ?>
 				<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;">
@@ -265,21 +335,73 @@ class AJCore_RA_Website {
 							<h3 style="margin:0 0 4px;"><?php echo esc_html( $pkg['name'] ); ?></h3>
 							<?php if ( '' !== $pkg['price'] ) : ?><p style="margin:0 0 6px;font-size:20px;font-weight:800;"><?php echo esc_html( $pkg['price'] ); ?></p><?php endif; ?>
 							<?php if ( '' !== $pkg['desc'] ) : ?><p style="margin:0 0 10px;"><?php echo esc_html( $pkg['desc'] ); ?></p><?php endif; ?>
-							<a class="button" href="<?php echo esc_url( add_query_arg( 'subject', rawurlencode( 'Website: ' . $pkg['name'] ), $contact ) ); ?>"><?php esc_html_e( 'Request this', 'ajcore-ra' ); ?></a>
+							<?php $pkg_url = self::mailto( 'Website: ' . $pkg['name'] ); ?>
+							<?php if ( '' !== $pkg_url ) : ?><a class="button" href="<?php echo esc_url( $pkg_url, array( 'mailto' ) ); ?>"><?php esc_html_e( 'Email us about this', 'ajcore-ra' ); ?></a><?php endif; ?>
 						</div>
 					<?php endforeach; ?>
 				</div>
 			<?php else : ?>
 				<div class="aj-portal-account-summary">
-					<p style="margin:0 0 10px;"><?php esc_html_e( 'Want your website on your own domain, such as yourcompany.com? We can build and host it. Contact us for pricing.', 'ajcore-ra' ); ?></p>
-					<a class="button" href="<?php echo esc_url( $contact ); ?>"><?php esc_html_e( 'Get a quote', 'ajcore-ra' ); ?></a>
+					<p style="margin:0 0 10px;"><?php esc_html_e( 'Prefer your own domain, such as yourcompany.com? We can build and host that too. Email us for a quote.', 'ajcore-ra' ); ?></p>
+					<?php $quote_url = self::mailto( 'Website on my own domain' ); ?>
+					<?php if ( '' !== $quote_url ) : ?><a class="button" href="<?php echo esc_url( $quote_url, array( 'mailto' ) ); ?>"><?php esc_html_e( 'Email us for a quote', 'ajcore-ra' ); ?></a><?php endif; ?>
 				</div>
 			<?php endif; ?>
-
-			<p class="description" style="margin-top:16px;"><?php esc_html_e( 'Coming soon: edit your blog posts and manage your site from here.', 'ajcore-ra' ); ?></p>
 		</section>
 		<?php
 		return (string) ob_get_clean();
+	}
+
+	/** Customer submits (or changes) the address they want. Saved as a Planned site marked by=customer. */
+	public static function handle_request_site() {
+		if ( ! is_user_logged_in() ) {
+			wp_die( esc_html__( 'Please log in.', 'ajcore-ra' ), '', array( 'response' => 403 ) );
+		}
+		check_admin_referer( 'ajcore_ra_request_website' );
+		$customer = self::customer_id();
+		$back     = wp_get_referer() ? remove_query_arg( 'website_saved', wp_get_referer() ) : home_url( '/' );
+		$go       = static function ( $flag ) use ( $back ) {
+			wp_safe_redirect( add_query_arg( 'website_saved', $flag, $back ) );
+			exit;
+		};
+		if ( '' === $customer ) {
+			$go( 'fail' );
+		}
+		$sub = self::clean_subdomain( isset( $_POST['subdomain'] ) ? wp_unslash( $_POST['subdomain'] ) : '' );
+		if ( '' === $sub ) {
+			$go( 'invalid' );
+		}
+		if ( in_array( $sub, self::reserved_subdomains(), true ) ) {
+			$go( 'reserved' );
+		}
+		$host = $sub . '.' . self::base_domain();
+
+		// Only a customer-made, still-planned request may be replaced; staff-assigned sites are left alone.
+		$previous = null;
+		foreach ( self::sites_for( $customer ) as $site ) {
+			if ( 'customer' === $site['by'] && 'planned' === $site['status'] ) {
+				$previous = $site;
+				break;
+			}
+		}
+		$user  = wp_get_current_user();
+		$label = $previous ? $previous['label'] : '';
+		$result = self::save_site( $customer, $sub, 'planned', __( 'Requested by the customer in the portal.', 'ajcore-ra' ), $label, array( 'by' => 'customer' ) );
+		if ( ! $result['ok'] ) {
+			$go( false !== strpos( $result['message'], 'already assigned' ) ? 'taken' : 'fail' );
+		}
+		if ( $previous && $previous['key'] !== $host ) {
+			self::remove_site( $customer, $previous['key'] );
+		}
+		$to = self::support_email();
+		if ( '' !== $to && ( ! $previous || $previous['key'] !== $host ) ) {
+			wp_mail(
+				$to,
+				sprintf( /* translators: %s: host */ __( 'Website address requested: %s', 'ajcore-ra' ), $host ),
+				sprintf( "%s (%s) asked for %s in the client portal.\nCustomer: %s", $user->display_name, $user->user_email, $host, $customer )
+			);
+		}
+		$go( 'ok' );
 	}
 
 	// ── staff page: AJCore > Websites ───────────────────────────────────────────
