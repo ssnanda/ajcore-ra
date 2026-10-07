@@ -92,6 +92,10 @@ class AJCore_RA_Business_Profile {
 		add_filter( 'ajcore_portal_tab_content', array( __CLASS__, 'render_tab' ), 10, 3 );
 		add_filter( 'ajcore_admin_portal_tabs', array( __CLASS__, 'admin_tab' ) );
 		add_action( 'admin_post_ajcore_ra_save_business_profile', array( __CLASS__, 'handle_save' ) );
+		add_filter( 'ajcore_portal_admin_post_actions', static function ( $actions ) {
+			$actions[] = 'ajcore_ra_save_business_profile'; // portal customers post here; AJCore otherwise bounces them out of wp-admin
+			return $actions;
+		} );
 		add_action( 'admin_post_ajcore_ra_staff_save_profile', array( __CLASS__, 'handle_staff_save' ) );
 		add_action( 'admin_post_ajcore_ra_profile_reviewed', array( __CLASS__, 'handle_reviewed' ) );
 		add_action( 'ajcore_admin_portal_tab_render', array( __CLASS__, 'render_admin_tab' ) );
