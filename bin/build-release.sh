@@ -98,6 +98,8 @@ build_zip() {
     --exclude='.git' --exclude='.gitignore' --exclude='.DS_Store' \
     --exclude='node_modules' --exclude='vendor' --exclude='releases' --exclude='bin' \
     --exclude='README.md' --exclude='*.zip' --exclude='.vscode' --exclude='.idea' \
+    --exclude='/CLAUDE.local.md' --exclude='/CLAUDE.md' --exclude='/AGENTS.md' \
+    --exclude='/tests' --exclude='/phpunit-*.xml' --exclude='/docs' \
     --exclude='__MACOSX' --exclude='*.swp' --exclude='*.swo' --exclude='*~' \
     "$ROOT_DIR/" "$tmp_dir/$PLUGIN_SLUG/"
 
