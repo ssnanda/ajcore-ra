@@ -347,24 +347,56 @@ class AJCore_RA_Business_Profile {
 
 	// ── shared form ─────────────────────────────────────────────────────────────
 
+	/** Column span (of 12) per field; textareas default to full width, everything else to half. */
+	private static function span( $key, $type ) {
+		$spans = array(
+			'business_name' => 6, 'tagline' => 6, 'industry' => 8, 'founded_year' => 4,
+			'customers' => 12, 'street' => 12, 'city' => 5, 'state' => 3, 'zip' => 4, 'service_area' => 12,
+			'phone' => 6, 'email' => 6,
+			'facebook' => 4, 'instagram' => 4, 'linkedin' => 4, 'x_twitter' => 4, 'youtube' => 4, 'tiktok' => 4,
+			'google_maps' => 4, 'google_business' => 4, 'yelp' => 4,
+			'existing_site' => 4, 'domain_wanted' => 4, 'style' => 4,
+		);
+		return isset( $spans[ $key ] ) ? $spans[ $key ] : ( 'textarea' === $type ? 12 : 6 );
+	}
+
+	private static function form_css() {
+		return '<style>
+.aj-ra-form{max-width:960px}
+.aj-ra-form .aj-ra-sec{margin:0 0 14px;padding:14px 16px}
+.aj-ra-form .aj-ra-sec h3{margin:0 0 10px;font-size:16px}
+.aj-ra-form .aj-ra-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:10px 14px}
+.aj-ra-form .aj-ra-f{display:block;grid-column:span 6;min-width:0;margin:0}
+.aj-ra-form .aj-ra-lbl{display:block;font-weight:600;font-size:13px;margin:0 0 4px}
+.aj-ra-form input[type=text],.aj-ra-form input[type=email],.aj-ra-form input[type=url],.aj-ra-form input[type=number],.aj-ra-form textarea{display:block;width:100%;box-sizing:border-box;margin:0;padding:8px 10px;font-size:15px;line-height:1.3;border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:inherit}
+.aj-ra-form textarea{resize:vertical;min-height:70px}
+.aj-ra-form input:focus,.aj-ra-form textarea:focus{outline:2px solid #6366f1;outline-offset:0;border-color:#6366f1}
+.aj-ra-form small{display:block;margin-top:3px;color:#64748b;font-size:12px}
+.aj-ra-form .aj-ra-files{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 12px}
+@media(max-width:640px){.aj-ra-form .aj-ra-f{grid-column:1/-1!important}}
+</style>';
+	}
+
 	/** The sections, fields and file inputs, used by the customer tab and the staff page. */
 	private static function render_form_body( array $values, array $files ) {
+		echo self::form_css(); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- static CSS.
+		echo '<div class="aj-ra-form">';
 		foreach ( self::sections() as $section_key => $section_label ) :
 			?>
-			<div class="aj-portal-account-summary" style="margin:0 0 14px;">
-				<h3 style="margin:0 0 10px;"><?php echo esc_html( $section_label ); ?></h3>
-				<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px 14px;">
+			<div class="aj-portal-account-summary aj-ra-sec">
+				<h3><?php echo esc_html( $section_label ); ?></h3>
+				<div class="aj-ra-grid">
 					<?php foreach ( self::fields() as $key => $def ) : ?>
 						<?php if ( $def['section'] !== $section_key ) { continue; } ?>
 						<?php $val = isset( $values[ $key ] ) ? (string) $values[ $key ] : ''; ?>
-						<label style="display:block;<?php echo 'textarea' === $def['type'] ? 'grid-column:1/-1;' : ''; ?>">
-							<span style="display:block;font-weight:700;margin-bottom:3px;"><?php echo esc_html( $def['label'] ); ?></span>
+						<label class="aj-ra-f" style="grid-column:span <?php echo (int) self::span( $key, $def['type'] ); ?>;">
+							<span class="aj-ra-lbl"><?php echo esc_html( $def['label'] ); ?></span>
 							<?php if ( 'textarea' === $def['type'] ) : ?>
-								<textarea name="<?php echo esc_attr( $key ); ?>" rows="3" style="width:100%;"><?php echo esc_textarea( $val ); ?></textarea>
+								<textarea name="<?php echo esc_attr( $key ); ?>" rows="<?php echo in_array( $key, array( 'offerings', 'story' ), true ) ? 4 : 3; ?>"><?php echo esc_textarea( $val ); ?></textarea>
 							<?php else : ?>
-								<input type="<?php echo esc_attr( 'year' === $def['type'] ? 'number' : $def['type'] ); ?>" name="<?php echo esc_attr( $key ); ?>" value="<?php echo esc_attr( $val ); ?>" style="width:100%;" <?php echo 'year' === $def['type'] ? 'min="1800" max="' . esc_attr( gmdate( 'Y' ) ) . '"' : ''; ?>>
+								<input type="<?php echo esc_attr( 'year' === $def['type'] ? 'number' : $def['type'] ); ?>" name="<?php echo esc_attr( $key ); ?>" value="<?php echo esc_attr( $val ); ?>" <?php echo 'year' === $def['type'] ? 'min="1800" max="' . esc_attr( gmdate( 'Y' ) ) . '"' : ''; ?>>
 							<?php endif; ?>
-							<?php if ( ! empty( $def['hint'] ) ) : ?><small style="color:#64748b;"><?php echo esc_html( $def['hint'] ); ?></small><?php endif; ?>
+							<?php if ( ! empty( $def['hint'] ) ) : ?><small><?php echo esc_html( $def['hint'] ); ?></small><?php endif; ?>
 						</label>
 					<?php endforeach; ?>
 				</div>
@@ -372,10 +404,10 @@ class AJCore_RA_Business_Profile {
 			<?php
 		endforeach;
 		?>
-		<div class="aj-portal-account-summary" style="margin:0 0 14px;">
-			<h3 style="margin:0 0 10px;"><?php esc_html_e( 'Logo and photos', 'ajcore-ra' ); ?></h3>
+		<div class="aj-portal-account-summary aj-ra-sec">
+			<h3><?php esc_html_e( 'Logo and photos', 'ajcore-ra' ); ?></h3>
 			<?php if ( $files ) : ?>
-				<div style="display:flex;gap:12px;flex-wrap:wrap;margin:0 0 12px;">
+				<div class="aj-ra-files">
 					<?php foreach ( $files as $f ) : ?>
 						<div style="width:120px;text-align:center;font-size:12px;">
 							<a href="<?php echo esc_url( $f['url'] ); ?>" target="_blank" rel="noopener"><img src="<?php echo esc_url( $f['url'] ); ?>" alt="" style="width:120px;height:90px;object-fit:contain;background:#f1f5f9;border-radius:8px;"></a>
@@ -385,12 +417,13 @@ class AJCore_RA_Business_Profile {
 					<?php endforeach; ?>
 				</div>
 			<?php endif; ?>
-			<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px 14px;">
-				<label style="display:block;"><span style="display:block;font-weight:700;margin-bottom:3px;"><?php esc_html_e( 'Logo', 'ajcore-ra' ); ?></span><input type="file" name="logo" accept="image/jpeg,image/png,image/gif,image/webp"><small style="color:#64748b;"><?php esc_html_e( 'A new logo replaces the old one', 'ajcore-ra' ); ?></small></label>
-				<label style="display:block;"><span style="display:block;font-weight:700;margin-bottom:3px;"><?php echo esc_html( sprintf( /* translators: %d: max photos */ __( 'Photos (up to %d)', 'ajcore-ra' ), self::MAX_PHOTOS ) ); ?></span><input type="file" name="photos[]" multiple accept="image/jpeg,image/png,image/gif,image/webp"><small style="color:#64748b;"><?php esc_html_e( 'JPG, PNG, GIF or WebP, up to 8 MB each', 'ajcore-ra' ); ?></small></label>
+			<div class="aj-ra-grid">
+				<label class="aj-ra-f"><span class="aj-ra-lbl"><?php esc_html_e( 'Logo', 'ajcore-ra' ); ?></span><input type="file" name="logo" accept="image/jpeg,image/png,image/gif,image/webp"><small><?php esc_html_e( 'A new logo replaces the old one', 'ajcore-ra' ); ?></small></label>
+				<label class="aj-ra-f"><span class="aj-ra-lbl"><?php echo esc_html( sprintf( /* translators: %d: max photos */ __( 'Photos (up to %d)', 'ajcore-ra' ), self::MAX_PHOTOS ) ); ?></span><input type="file" name="photos[]" multiple accept="image/jpeg,image/png,image/gif,image/webp"><small><?php esc_html_e( 'JPG, PNG, GIF or WebP, up to 8 MB each', 'ajcore-ra' ); ?></small></label>
 			</div>
 		</div>
 		<?php
+		echo '</div>';
 	}
 
 	// ── customer tab ────────────────────────────────────────────────────────────
