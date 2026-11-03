@@ -45,6 +45,7 @@ function ajcore_ra_features() {
 			'UPOS Temps (Honeywell)'           => false,
 			'AJPhone'                          => false,
 			'Zoho Calendar and Zoho Mail'      => false,
+			'E-Signatures (BreezeDoc): templates, PDF upload, webhooks' => true,
 			'Expense invoices, accounting catalog' => false,
 		),
 	);
