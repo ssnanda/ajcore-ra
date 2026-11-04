@@ -26,7 +26,7 @@
 	var CSS = '' +
 		'.ajfe-root{display:flex;gap:12px;align-items:flex-start;font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a;min-width:0}' +
 		'.ajfe-main{flex:1;min-width:0;display:flex;flex-direction:column;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#fff}' +
-		'.ajfe-side{width:250px;flex:none;border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:10px;display:flex;flex-direction:column;gap:8px}' +
+		'.ajfe-side{width:270px;flex:none;position:sticky;top:var(--ajfe-sticky,44px);max-height:calc(100vh - 70px);overflow:auto;border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:10px;display:flex;flex-direction:column;gap:8px}' +
 		'.ajfe-side h4{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#64748b}' +
 		'.ajfe-side button,.ajfe-side select,.ajfe-side input,.ajfe-bar button,.ajfe-bar select{height:30px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:0 10px;font:inherit;color:#0f172a;box-sizing:border-box}' +
 		'.ajfe-side input,.ajfe-side select{width:100%}' +
@@ -35,7 +35,7 @@
 		'.ajfe-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 10px;border-bottom:1px solid #e2e8f0;background:#f8fafc}' +
 		'.ajfe-bar button{cursor:pointer;font-weight:600;white-space:nowrap}.ajfe-bar button:hover,.ajfe-side button:hover{background:#f1f5f9}' +
 		'.ajfe-bar .dng,.ajfe-side .dng{color:#b91c1c}.ajfe-bar .sp{flex:1}.ajfe-hint{color:#64748b;font-size:12px}' +
-		'.ajfe-stage{overflow:auto;background:#e2e8f0;padding:14px;text-align:center;max-height:78vh;min-height:360px}' +
+		'.ajfe-stage{overflow:auto;background:#e2e8f0;padding:14px;text-align:center;height:calc(100vh - 230px);min-height:520px}' +
 		'.ajfe-wrap{position:relative;display:inline-block;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.25);text-align:left}' +
 		'.ajfe-wrap canvas{display:block}.ajfe-layer{position:absolute;inset:0}.ajfe-layer.tool{cursor:crosshair}.ajfe-layer.drop{outline:3px dashed #4f46e5;outline-offset:-3px}' +
 		'.ajfe-box{position:absolute;box-sizing:border-box;border:1.5px solid;border-radius:3px;font-size:10px;line-height:1.1;overflow:hidden;cursor:move;user-select:none;touch-action:none;display:flex;align-items:center;padding:0 3px;white-space:nowrap}' +
@@ -44,7 +44,7 @@
 		'.ajfe-box i{font-style:italic;opacity:.8;margin-left:4px;overflow:hidden;text-overflow:ellipsis}' +
 		'.ajfe-ov{position:fixed;inset:0;z-index:100000;background:rgba(15,23,42,.6);display:flex;padding:14px}' +
 		'.ajfe-pn{background:#fff;border-radius:12px;flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden}' +
-		'.ajfe-pn .ajfe-root{padding:12px;flex:1;overflow:auto}.ajfe-pn .ajfe-stage{max-height:none}' +
+		'.ajfe-pn .ajfe-root{padding:12px;flex:1;overflow:auto}.ajfe-pn .ajfe-stage{height:calc(100vh - 190px)}.ajfe-pn .ajfe-side{position:static}' +
 		'.ajfe-top{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid #e2e8f0}.ajfe-top .sp{flex:1}' +
 		'.ajfe-top button{height:30px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:0 12px;font:inherit;font-weight:600;cursor:pointer}.ajfe-top .pri{background:#4f46e5;border-color:#4f46e5;color:#fff}' +
 		'@media(max-width:900px){.ajfe-root{flex-direction:column}.ajfe-side{width:auto;align-self:stretch}}';
@@ -216,7 +216,7 @@
 			pageNo = Math.max( 1, Math.min( pdf.numPages, n ) ); rendering = true; sel = null;
 			pdf.getPage( pageNo ).then( function ( page ) {
 				var v1 = page.getViewport( { scale: 1 } ); pageW = v1.width; pageH = v1.height;
-				var scale = Math.min( 2, Math.max( 0.6, Math.min( stage.clientWidth - 30, 900 ) / v1.width ) ), vp = page.getViewport( { scale: scale } );
+				var scale = Math.min( 2, Math.max( 0.6, Math.min( stage.clientWidth - 30, 1100 ) / v1.width ) ), vp = page.getViewport( { scale: scale } );
 				canvas.width = Math.floor( vp.width ); canvas.height = Math.floor( vp.height );
 				wrap.style.width = canvas.width + 'px'; wrap.style.height = canvas.height + 'px';
 				return page.render( { canvasContext: canvas.getContext( '2d' ), viewport: vp } ).promise;
