@@ -2577,7 +2577,8 @@ class AJCore_RA_Esign {
 					row.innerHTML = '<div class="t">' + esc( t.title || t.id ) + '<span class="ajra-tag">' + src + '</span> <span class="ajra-muted">' + ( t.recipients ? t.recipients.length : 0 ) + ' signer(s)</span></div>' +
 						'<button type="button" class="button button-small" data-tpl-use>Use template</button>' +
 						'<button type="button" class="button button-small" data-tpl-detail>Details</button>' +
-						'<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" title="Open BreezeDoc, then Templates → Edit">Edit in BreezeDoc</a>';
+						'<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" title="Open BreezeDoc, then Templates → Edit">Edit in BreezeDoc</a>' +
+						'<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" style="color:#b32d2e" title="BreezeDoc has no delete for other apps: open BreezeDoc, then Templates → Delete">Delete in BreezeDoc</a>';
 					row.querySelector( '[data-tpl-use]' ).addEventListener( 'click', function () {
 						var form = $( 'ajra-es-template' ); if ( ! form ) { return; }
 						setView( 'new' );
