@@ -26,6 +26,9 @@ class AJCore_RA_Esign {
 	const TAB        = 'ra-esign';
 	const WEBHOOK_OPTION = 'ajcore_breezedoc_webhook';
 	const SHARED_ROW     = 'ajcore_breezedoc_settings'; // shared-DB row: master publishes, other sites read
+	const IGNORED_ROW    = 'ajcore_breezedoc_ignored';  // BreezeDoc ids deleted from the local log (imports skip them)
+	const CRON_HOOK      = 'ajcore_ra_esign_auto_import';
+	const SIGNED_DONE_ROW = 'ajcore_breezedoc_signed_done'; // documents whose signed copy was already emailed / filed
 
 	/** @var array<string,callable> */
 	private $kit;
@@ -48,6 +51,10 @@ class AJCore_RA_Esign {
 		add_action( 'ajcore_admin_portal_tab_render', array( __CLASS__, 'render_admin_tab' ) );
 		add_action( 'admin_post_ajcore_ra_save_esign', array( __CLASS__, 'handle_save' ) );
 		add_action( 'admin_init', array( __CLASS__, 'maybe_publish_shared' ) );
+		add_action( self::CRON_HOOK, array( __CLASS__, 'run_auto_import' ) );
+		add_action( 'init', array( __CLASS__, 'sync_schedule' ) );
+		add_filter( 'ajcore_additional_branded_email_templates', array( __CLASS__, 'add_templates' ) );
+		add_filter( 'ajcore_preserved_setting_prefixes', array( __CLASS__, 'preserved_prefixes' ) );
 	}
 
 	public static function boot_routes() {
@@ -185,9 +192,20 @@ class AJCore_RA_Esign {
 		if ( ! empty( $_POST['clear_api_token'] ) ) {
 			unset( $opt['api_token'] );
 		}
+		if ( isset( $_POST['esign_email_form'] ) ) { // checkboxes are absent when unticked
+			$opt['notify_on_send'] = ! empty( $_POST['esign_notify_on_send'] ) ? 1 : 0;
+			$opt['file_signed']    = ! empty( $_POST['esign_file_signed'] ) ? 1 : 0;
+			$mode                  = isset( $_POST['esign_signed_copy'] ) ? sanitize_key( wp_unslash( $_POST['esign_signed_copy'] ) ) : 'off';
+			$opt['signed_copy']    = in_array( $mode, array( 'off', 'customer', 'all' ), true ) ? $mode : 'off';
+		}
+		if ( isset( $_POST['esign_auto_import'] ) ) {
+			$freq             = sanitize_key( wp_unslash( $_POST['esign_auto_import'] ) );
+			$opt['auto_import'] = in_array( $freq, array( 'off', 'hourly', 'twicedaily', 'daily' ), true ) ? $freq : 'off';
+		}
 		$opt['migrated'] = 1;
 		update_option( self::OPTION, $opt, false );
 		self::instance()->write_shared();
+		self::sync_schedule();
 		wp_safe_redirect( self::tab_url( array( 'saved' => 1 ) ) );
 		exit;
 	}
@@ -455,8 +473,26 @@ class AJCore_RA_Esign {
 		return $recipients;
 	}
 
+	/** Compact field definitions (type, party, page, label) from a template's raw `fields`. */
+	private function breezedoc_map_fields( $raw_fields ) {
+		$out = array();
+		foreach ( (array) $raw_fields as $f ) {
+			if ( ! is_array( $f ) ) {
+				continue;
+			}
+			$out[] = array(
+				'type'  => (string) ( $f['type'] ?? $f['field_type'] ?? '' ),
+				'party' => (int) ( $f['party'] ?? $f['recipient_party'] ?? ( $f['recipient_field']['party'] ?? 0 ) ),
+				'page'  => (int) ( $f['page'] ?? $f['page_number'] ?? 0 ),
+				'label' => (string) ( $f['label'] ?? $f['name'] ?? $f['placeholder'] ?? '' ),
+			);
+		}
+		return $out;
+	}
+
 	private function breezedoc_map_template( $raw ) {
 		return array(
+			'fields'     => $this->breezedoc_map_fields( $raw['fields'] ?? array() ),
 			'id'         => isset( $raw['id'] ) ? (string) $raw['id'] : '',
 			'title'      => isset( $raw['title'] ) ? (string) $raw['title'] : ( isset( $raw['name'] ) ? (string) $raw['name'] : '' ),
 			'recipients' => $this->breezedoc_map_recipients( $raw['parties'] ?? $raw['recipients'] ?? array() ),
@@ -658,7 +694,9 @@ class AJCore_RA_Esign {
 			),
 			array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
 		);
-		return $this->format_esign_document_row( $pdb->get_row( $pdb->prepare( "SELECT * FROM `{$table}` WHERE id = %d", (int) $pdb->insert_id ) ) );
+		$logged = $this->format_esign_document_row( $pdb->get_row( $pdb->prepare( "SELECT * FROM `{$table}` WHERE id = %d", (int) $pdb->insert_id ) ) );
+		$this->maybe_notify_signers( $logged );
+		return $logged;
 	}
 
 	/**
@@ -884,6 +922,9 @@ class AJCore_RA_Esign {
 			$update_format[]             = '%s';
 		}
 		$pdb->update( $table, $update_data, array( 'id' => $row->id ), $update_format, array( '%d' ) );
+		if ( 'completed' === $status && 'completed' !== (string) $row->status ) {
+			$this->on_completed( $row, $recipients );
+		}
 
 		return $this->format_esign_document_row( $pdb->get_row( $pdb->prepare( "SELECT * FROM `{$table}` WHERE id = %d", $row->id ) ) );
 	}
@@ -898,6 +939,9 @@ class AJCore_RA_Esign {
 		$row = $this->get_esign_row( $local_id );
 		if ( is_wp_error( $row ) ) {
 			return $row;
+		}
+		if ( 'preview' === $action ) {
+			return $this->esign_preview( $row );
 		}
 		$doc_id = (string) $row->breezedoc_document_id;
 		if ( 0 !== strpos( $doc_id, 'doc_' ) ) {
@@ -926,6 +970,64 @@ class AJCore_RA_Esign {
 				return is_wp_error( $result ) ? $result : array( 'events' => (array) ( $result['data'] ?? array() ) );
 		}
 		return new WP_Error( 'bad_action', __( 'Unknown action.', 'ajcore-ra' ), array( 'status' => 400 ) );
+	}
+
+	/** Every http(s) URL found anywhere in a decoded API value. @return string[] */
+	private static function collect_urls( $value ) {
+		$urls = array();
+		if ( is_string( $value ) ) {
+			if ( preg_match( '#^https?://#i', $value ) ) {
+				$urls[] = $value;
+			}
+		} elseif ( is_array( $value ) ) {
+			foreach ( $value as $item ) {
+				$urls = array_merge( $urls, self::collect_urls( $item ) );
+			}
+		}
+		return $urls;
+	}
+
+	/**
+	 * What can be shown for a logged document. Team documents: the signed PDF (+ certificate) once
+	 * completed, via a 15-minute signed link. Personal-token documents: BreezeDoc's legacy API does not
+	 * document a file URL, so any page images it returns are shown and otherwise `openUrl` (BreezeDoc's
+	 * own viewer, needs a BreezeDoc login) is the fallback.
+	 * Returns: mode (pdf|images|none), url, certificateUrl, pages[], openUrl, message.
+	 */
+	private function esign_preview( $row ) {
+		$doc_id = (string) $row->breezedoc_document_id;
+		$base   = array( 'mode' => 'none', 'url' => '', 'certificateUrl' => '', 'pages' => array(), 'openUrl' => (string) $row->document_url, 'message' => '' );
+		if ( 0 === strpos( $doc_id, 'doc_' ) ) {
+			if ( 'completed' !== (string) $row->status ) {
+				$base['message'] = __( 'BreezeDoc provides the PDF once the document is fully signed.', 'ajcore-ra' );
+				return $base;
+			}
+			$result = $this->breezedoc_api_request( 'GET', '/v1/documents/' . rawurlencode( $doc_id ) . '/download' );
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+			$base['url']            = (string) ( $result['url'] ?? $result['pdf_url'] ?? $result['download_url'] ?? '' );
+			$base['certificateUrl'] = (string) ( $result['certificate_url'] ?? $result['certificate'] ?? '' );
+			$base['mode']           = '' !== $base['url'] ? 'pdf' : 'none';
+			if ( 'none' === $base['mode'] ) {
+				$base['message'] = __( 'BreezeDoc did not return a download link.', 'ajcore-ra' );
+			}
+			return $base;
+		}
+		$doc = $this->breezedoc_api_request( 'GET', '/documents/' . absint( $doc_id ) );
+		if ( is_wp_error( $doc ) ) {
+			return $doc;
+		}
+		$pages = array_values( array_unique( array_filter( self::collect_urls( $doc['document_files'] ?? array() ), static function ( $u ) {
+			return (bool) preg_match( '#\.(png|jpe?g|webp|gif|pdf)(\?|$)#i', $u );
+		} ) ) );
+		if ( $pages ) {
+			$base['mode']  = 'images';
+			$base['pages'] = $pages;
+			return $base;
+		}
+		$base['message'] = __( 'BreezeDoc\'s API does not provide a file for this document. Use "Open" to view it in BreezeDoc.', 'ajcore-ra' );
+		return $base;
 	}
 
 	// -----------------------------------------------------------------
@@ -1132,6 +1234,424 @@ class AJCore_RA_Esign {
 		return $map;
 	}
 
+	// ── automatic import ────────────────────────────────────────────────────────
+
+	/** Keeps the WP-Cron event in line with the saved frequency; runs on the master site only. */
+	public static function sync_schedule() {
+		$opt   = get_option( self::OPTION, array() );
+		$freq  = is_array( $opt ) && isset( $opt['auto_import'] ) ? (string) $opt['auto_import'] : 'off';
+		$next  = wp_next_scheduled( self::CRON_HOOK );
+		if ( ! in_array( $freq, array( 'hourly', 'twicedaily', 'daily' ), true ) || ! self::is_master() ) {
+			if ( $next ) {
+				wp_clear_scheduled_hook( self::CRON_HOOK );
+			}
+			return;
+		}
+		if ( $next && wp_get_schedule( self::CRON_HOOK ) === $freq ) {
+			return;
+		}
+		wp_clear_scheduled_hook( self::CRON_HOOK );
+		wp_schedule_event( time() + 300, $freq, self::CRON_HOOK );
+	}
+
+	/**
+	 * One scheduled pass: import (documents matching a portal customer only), then link a batch of
+	 * unlinked rows. Resumes where it stopped if BreezeDoc's 60/min limit is hit; the outcome is shown
+	 * in the Connection box.
+	 */
+	public static function run_auto_import() {
+		$esign = self::instance();
+		if ( ! $esign->breezedoc_is_connected() || ! self::is_master() ) {
+			return;
+		}
+		$opt      = get_option( self::OPTION, array() );
+		$opt      = is_array( $opt ) ? $opt : array();
+		$cursor   = (string) ( $opt['auto_cursor'] ?? '' );
+		$summary  = array( 'seen' => 0, 'imported' => 0, 'linked' => 0 );
+		$deadline = time() + 40;
+		for ( $i = 0; $i < 6 && time() < $deadline; $i++ ) {
+			$r = $esign->import_documents( $cursor, false );
+			if ( is_wp_error( $r ) ) {
+				$summary['error'] = $r->get_error_message();
+				break;
+			}
+			$summary['seen']     += (int) $r['seen'];
+			$summary['imported'] += (int) $r['imported'];
+			$cursor               = (string) $r['next_cursor'];
+			if ( ! empty( $r['wait'] ) || '' === $cursor ) {
+				break;
+			}
+		}
+		$link_after = (int) ( $opt['auto_link_after'] ?? 0 );
+		if ( empty( $summary['error'] ) ) {
+			$l = $esign->link_documents( $link_after );
+			if ( ! is_wp_error( $l ) ) {
+				$summary['linked'] = (int) $l['linked'];
+				$link_after        = ! empty( $l['done'] ) ? 0 : (int) $l['next_after'];
+			}
+		}
+		$opt                    = get_option( self::OPTION, array() );
+		$opt                    = is_array( $opt ) ? $opt : array();
+		$opt['auto_cursor']     = $cursor;
+		$opt['auto_link_after'] = $link_after;
+		$opt['auto_last']       = array( 'at' => current_time( 'mysql' ), 'summary' => $summary );
+		update_option( self::OPTION, $opt, false );
+	}
+
+	// ── emails sent from AJCore (your Zoho / SMTP profile) ──────────────────────
+
+	private function opt( $key, $default = '' ) {
+		$opt = get_option( self::OPTION, array() );
+		return is_array( $opt ) && isset( $opt[ $key ] ) ? $opt[ $key ] : $default;
+	}
+
+	private static function admin() {
+		if ( ! class_exists( 'AJForms_Admin' ) ) {
+			return null;
+		}
+		return AJForms_Admin::$instance ? AJForms_Admin::$instance : new AJForms_Admin();
+	}
+
+	private function email_kit() {
+		$admin = self::admin();
+		return $admin && method_exists( $admin, 'get_email_toolkit' ) ? $admin->get_email_toolkit() : null;
+	}
+
+	public static function preserved_prefixes( $prefixes ) {
+		$prefixes[] = 'wp_esign_';
+		return $prefixes;
+	}
+
+	public static function add_templates( $templates ) {
+		return array_merge( $templates, self::email_templates() );
+	}
+
+	/** Editable in AJCore's Email Templates screen (overrides saved as wp_esign_*). */
+	private static function email_templates() {
+		return array(
+			'esign_sent'   => array(
+				'label'           => __( 'E-Signature Request (heads-up)', 'ajcore-ra' ),
+				'key'             => 'wp_esign_sent',
+				'sender_key'      => 'wp_esign',
+				'brand_variants'  => false,
+				'to'              => __( 'Each signer on the request.', 'ajcore-ra' ),
+				'fixed'           => __( 'Sent from AJCore when "Email signers from AJCore" is on. BreezeDoc also sends its own signing email with the secure link.', 'ajcore-ra' ),
+				'default_subject' => __( 'Please sign: {title}', 'ajcore-ra' ),
+				'default_heading' => __( 'A document is waiting for your signature', 'ajcore-ra' ),
+				'default_body'    => array(
+					sprintf( __( 'Hi %s,', 'ajcore-ra' ), '{name}' ),
+					__( 'We have sent you "{title}" to sign electronically. Look for an email from BreezeDoc with your secure signing link; check your spam folder if you do not see it.', 'ajcore-ra' ),
+				),
+			),
+			'esign_signed' => array(
+				'label'           => __( 'E-Signature Completed (signed copy)', 'ajcore-ra' ),
+				'key'             => 'wp_esign_signed',
+				'sender_key'      => 'wp_esign',
+				'brand_variants'  => false,
+				'to'              => __( 'The customer (or every signer, per the E-Signatures setting).', 'ajcore-ra' ),
+				'fixed'           => __( 'The signed PDF is attached when BreezeDoc provides it.', 'ajcore-ra' ),
+				'default_subject' => __( 'Your signed copy: {title}', 'ajcore-ra' ),
+				'default_heading' => __( 'Your document has been signed', 'ajcore-ra' ),
+				'default_body'    => array(
+					sprintf( __( 'Hi %s,', 'ajcore-ra' ), '{name}' ),
+					__( '"{title}" has been signed by everyone. A copy is attached for your records.', 'ajcore-ra' ),
+				),
+			),
+		);
+	}
+
+	/** Sends one of the two emails through AJCore's branded-email toolkit. @return bool */
+	private function send_esign_email( $which, $to, $name, $stripe_customer_id, $title, array $attachments = array() ) {
+		$to  = sanitize_email( (string) $to );
+		$kit = $this->email_kit();
+		if ( ! is_email( $to ) || ! $kit ) {
+			return false;
+		}
+		$settings = $kit['settings']();
+		$brand    = $kit['brand']( (string) $stripe_customer_id, $to );
+		$sender   = $kit['sender']( $settings, 'wp_esign_from_email', 'wp_esign_from_name' );
+		if ( $kit['is_brand_variant']( $brand ) ) {
+			$sender['from_name'] = $brand['site_name'];
+		}
+		$key      = 'signed' === $which ? 'esign_signed' : 'esign_sent';
+		$prefix   = 'signed' === $which ? 'wp_esign_signed' : 'wp_esign_sent';
+		$template = self::email_templates()[ $key ];
+		$tokens   = array( '{name}' => '' !== trim( (string) $name ) ? $name : $to, '{title}' => '' !== trim( (string) $title ) ? $title : __( 'your document', 'ajcore-ra' ) );
+
+		$subject_template = ! empty( $settings[ $prefix . '_subject' ] ) ? sanitize_text_field( (string) $settings[ $prefix . '_subject' ] ) : $template['default_subject'];
+		$subject          = $kit['brand_subject']( strtr( $subject_template, $tokens ), $brand );
+		$copy             = $kit['copy_raw']( $settings, $prefix . '_heading', $prefix . '_body', $template['default_heading'], $template['default_body'], $tokens );
+		$message          = $kit['render'](
+			array(
+				'kicker'         => $brand['site_name'],
+				'heading'        => $copy['heading'],
+				'paragraphs'     => $copy['paragraphs'],
+				'info_box_label' => __( 'Document', 'ajcore-ra' ),
+				'info_box_value' => (string) $title,
+				'footer_note'    => 'signed' === $which ? __( 'Keep this copy with your records.', 'ajcore-ra' ) : __( 'The signing link is in BreezeDoc\'s email to you.', 'ajcore-ra' ),
+			)
+		);
+		$headers = array( 'Content-Type: text/html; charset=UTF-8' );
+		if ( is_email( $sender['from_email'] ) ) {
+			$headers[] = 'From: ' . $sender['from_name'] . ' <' . $sender['from_email'] . '>';
+			$headers[] = 'Reply-To: ' . $sender['from_email'];
+		}
+		return (bool) $kit['send']( $to, $subject, $message, $headers, $sender['from_email'], $sender['from_name'], isset( $sender['profile'] ) ? $sender['profile'] : '', $attachments );
+	}
+
+	/** Optional heads-up to each signer right after a request is sent (BreezeDoc still sends the signing link). */
+	private function maybe_notify_signers( $row ) {
+		if ( ! $this->opt( 'notify_on_send', 0 ) || ! is_array( $row ) ) {
+			return;
+		}
+		foreach ( (array) $row['recipients'] as $r ) {
+			$this->send_esign_email( 'sent', $r['email'] ?? '', $r['name'] ?? '', $row['stripeCustomerId'] ?? '', $row['templateTitle'] ?? '' );
+		}
+	}
+
+	/**
+	 * Runs once when a refresh sees a Team-API document become completed (never for imported history):
+	 * downloads the signed PDF, optionally files it in the customer's portal Files, and optionally emails
+	 * it (customer only, or every signer) from AJCore's own sender with the PDF attached.
+	 */
+	private function on_completed( $row, array $recipients ) {
+		$doc_id = (string) $row->breezedoc_document_id;
+		if ( 0 !== strpos( $doc_id, 'doc_' ) ) {
+			return; // only the Team API offers the signed file
+		}
+		$mode = (string) $this->opt( 'signed_copy', 'off' );
+		$file = (bool) $this->opt( 'file_signed', 0 );
+		if ( 'off' === $mode && ! $file ) {
+			return;
+		}
+		if ( in_array( $doc_id, $this->id_list( self::SIGNED_DONE_ROW ), true ) ) {
+			return;
+		}
+		$this->add_ids( self::SIGNED_DONE_ROW, array( $doc_id ) ); // mark first: a failure must never re-send
+
+		$dl = $this->breezedoc_api_request( 'GET', '/v1/documents/' . rawurlencode( $doc_id ) . '/download' );
+		if ( is_wp_error( $dl ) ) {
+			return;
+		}
+		$url = (string) ( $dl['url'] ?? $dl['pdf_url'] ?? $dl['download_url'] ?? '' );
+		$dir = trailingslashit( get_temp_dir() ) . 'ajra-' . wp_generate_password( 8, false );
+		$pdf = '';
+		if ( '' !== $url && wp_mkdir_p( $dir ) ) {
+			$resp = wp_remote_get( $url, array( 'timeout' => 40 ) );
+			if ( ! is_wp_error( $resp ) && 200 === (int) wp_remote_retrieve_response_code( $resp ) && 0 === strpos( wp_remote_retrieve_body( $resp ), '%PDF' ) ) {
+				$name = sanitize_file_name( ( '' !== (string) $row->template_title ? (string) $row->template_title : 'signed-document' ) );
+				$name = preg_replace( '/\.pdf$/i', '', $name ) . ' - signed.pdf';
+				$pdf  = $dir . '/' . $name;
+				file_put_contents( $pdf, wp_remote_retrieve_body( $resp ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+			}
+		}
+
+		if ( $file && '' !== $pdf && '' !== (string) $row->stripe_customer_id && self::admin() ) {
+			$copy = wp_tempnam( basename( $pdf ) );
+			copy( $pdf, $copy );
+			self::admin()->upload_files_for_portal_customer(
+				$row->stripe_customer_id,
+				array( 'name' => basename( $pdf ), 'type' => 'application/pdf', 'tmp_name' => $copy, 'error' => UPLOAD_ERR_OK, 'size' => filesize( $copy ) ),
+				'Others',
+				''
+			);
+			if ( file_exists( $copy ) ) {
+				unlink( $copy ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
+			}
+		}
+
+		if ( 'off' !== $mode ) {
+			$targets = array();
+			if ( 'all' === $mode ) {
+				foreach ( $recipients as $r ) {
+					$targets[ strtolower( (string) ( $r['email'] ?? '' ) ) ] = (string) ( $r['name'] ?? '' );
+				}
+			} else {
+				$kit      = $this->email_kit();
+				$customer = $kit && '' !== (string) $row->stripe_customer_id ? $kit['customer']( $row->stripe_customer_id ) : null;
+				if ( $customer && is_email( $customer->email ) ) {
+					$targets[ strtolower( $customer->email ) ] = (string) $customer->name;
+				}
+			}
+			unset( $targets[''] );
+			foreach ( $targets as $email => $name ) {
+				$this->send_esign_email( 'signed', $email, $name, $row->stripe_customer_id, (string) $row->template_title, '' !== $pdf ? array( $pdf ) : array() );
+			}
+		}
+
+		if ( '' !== $pdf && file_exists( $pdf ) ) {
+			unlink( $pdf ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
+		}
+		if ( is_dir( $dir ) ) {
+			rmdir( $dir ); // phpcs:ignore WordPress.WP.AlternativeFunctions.rmdir_rmdir
+		}
+	}
+
+	// ── deleting local copies ───────────────────────────────────────────────────
+
+	/** BreezeDoc ids removed from the local log; imports skip them so they don't come back. @return string[] */
+	private function ignored_ids() {
+		return $this->id_list( self::IGNORED_ROW );
+	}
+
+	private function ignore_ids( array $doc_ids ) {
+		$this->add_ids( self::IGNORED_ROW, $doc_ids );
+	}
+
+	/** A persisted list of ids: shared-DB row when sharing is on, else a site option. @return string[] */
+	private function id_list( $row_name ) {
+		if ( self::is_shared() ) {
+			list( $db, $table ) = self::shared_db_and_table();
+			if ( $db ) {
+				$value   = $db->get_var( $db->prepare( "SELECT setting_value FROM `{$table}` WHERE setting_name = %s LIMIT 1", $row_name ) );
+				$decoded = json_decode( (string) $value, true );
+				return is_array( $decoded ) ? array_map( 'strval', $decoded ) : array();
+			}
+		}
+		$list = get_option( $row_name, array() );
+		return is_array( $list ) ? array_map( 'strval', $list ) : array();
+	}
+
+	private function add_ids( $row_name, array $ids ) {
+		$all     = array_slice( array_values( array_unique( array_merge( $this->id_list( $row_name ), array_map( 'strval', $ids ) ) ) ), -5000 );
+		$encoded = wp_json_encode( $all );
+		if ( self::is_shared() ) {
+			list( $db, $table ) = self::shared_db_and_table();
+			if ( $db ) {
+				$exists = $db->get_var( $db->prepare( "SELECT setting_name FROM `{$table}` WHERE setting_name = %s LIMIT 1", $row_name ) );
+				if ( $exists ) {
+					$db->update( $table, array( 'setting_value' => $encoded, 'updated_at' => current_time( 'mysql' ) ), array( 'setting_name' => $row_name ), array( '%s', '%s' ), array( '%s' ) );
+				} else {
+					$db->insert( $table, array( 'setting_name' => $row_name, 'setting_value' => $encoded, 'updated_at' => current_time( 'mysql' ) ), array( '%s', '%s', '%s' ) );
+				}
+				return;
+			}
+		}
+		update_option( $row_name, $all, false );
+	}
+
+	/** Deletes log rows (the local copy only — nothing is deleted in BreezeDoc) and remembers their ids. */
+	public function delete_logged_documents( $ids ) {
+		$ids = array_values( array_unique( array_filter( array_map( 'absint', (array) $ids ) ) ) );
+		if ( empty( $ids ) ) {
+			return new WP_Error( 'no_selection', __( 'Select at least one document.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		if ( ! $this->ensure_esign_documents_table() ) {
+			return new WP_Error( 'no_table', __( 'E-Signatures log table could not be created.', 'ajcore-ra' ) );
+		}
+		$pdb   = $this->get_pdb();
+		$table = $this->get_esign_documents_table();
+		$list  = implode( ',', $ids ); // integers only
+		$docs  = $pdb->get_col( "SELECT breezedoc_document_id FROM `{$table}` WHERE id IN ({$list})" );
+		$this->ignore_ids( (array) $docs );
+		$pdb->query( "DELETE FROM `{$table}` WHERE id IN ({$list})" );
+		return array( 'deleted' => count( (array) $docs ) );
+	}
+
+	/** Raw recipient arrays for one document (legacy numeric id → /documents/{id}/recipients, doc_… → /v1/documents/{id}). */
+	private function fetch_document_recipients( $doc_id ) {
+		if ( 0 === strpos( (string) $doc_id, 'doc_' ) ) {
+			$r = $this->breezedoc_api_request( 'GET', '/v1/documents/' . rawurlencode( (string) $doc_id ) );
+			return is_wp_error( $r ) ? $r : (array) ( $r['recipients'] ?? array() );
+		}
+		$r = $this->breezedoc_api_request( 'GET', '/documents/' . absint( $doc_id ) . '/recipients' );
+		if ( is_wp_error( $r ) ) {
+			return $r;
+		}
+		return (array) ( isset( $r['data'] ) && is_array( $r['data'] ) ? $r['data'] : $r );
+	}
+
+	private static function normalize_name( $value ) {
+		$value = strtolower( remove_accents( (string) $value ) );
+		$value = preg_replace( '/\.pdf$/', '', $value );
+		$value = preg_replace( '/[^a-z0-9]+/', ' ', $value );
+		return trim( (string) $value );
+	}
+
+	/** normalized customer name => array( stripe_customer_id, name ), only names long enough to match safely. */
+	private function customer_name_index() {
+		$index = array();
+		foreach ( $this->customers() as $c ) {
+			$norm = self::normalize_name( $c['name'] );
+			if ( strlen( $norm ) >= 8 && ! isset( $index[ $norm ] ) ) {
+				$index[ $norm ] = array( $c['id'], $c['name'] );
+			}
+		}
+		return $index;
+	}
+
+	/**
+	 * Links a document to a portal customer: first by any signer's email, then by a customer's
+	 * company name appearing in the document title (only when exactly one customer matches).
+	 *
+	 * @return array|null array( stripe_customer_id, name ) or null
+	 */
+	private function match_customer( array $recipients, $title, array $email_map, array $name_index ) {
+		foreach ( $recipients as $r ) {
+			$email = strtolower( trim( (string) ( $r['email'] ?? '' ) ) );
+			if ( '' !== $email && isset( $email_map[ $email ] ) ) {
+				return $email_map[ $email ];
+			}
+		}
+		$haystack = ' ' . self::normalize_name( $title ) . ' ';
+		$hits     = array();
+		foreach ( $name_index as $norm => $customer ) {
+			if ( false !== strpos( $haystack, ' ' . $norm . ' ' ) ) {
+				$hits[ $customer[0] ] = $customer;
+			}
+		}
+		return 1 === count( $hits ) ? array_values( $hits )[0] : null;
+	}
+
+	/**
+	 * Links already-logged documents that have no customer yet (imports made before signers were
+	 * fetched, or before the customer existed). Up to 25 rows per call; returns next_after so the
+	 * caller can continue, and `wait` when BreezeDoc's 60/min limit was hit (retry the same call).
+	 */
+	public function link_documents( $after_id = 0 ) {
+		if ( ! $this->ensure_esign_documents_table() ) {
+			return new WP_Error( 'no_table', __( 'E-Signatures log table could not be created.', 'ajcore-ra' ) );
+		}
+		$pdb    = $this->get_pdb();
+		$table  = $this->get_esign_documents_table();
+		$map    = $this->customer_email_map();
+		$names  = $this->customer_name_index();
+		$rows   = $pdb->get_results( $pdb->prepare( "SELECT * FROM `{$table}` WHERE stripe_customer_id = '' AND id > %d ORDER BY id ASC LIMIT 25", absint( $after_id ) ) );
+		$counts = array( 'checked' => 0, 'linked' => 0, 'next_after' => 0, 'done' => count( $rows ) < 25 );
+		foreach ( $rows as $row ) {
+			$recipients = $row->recipients ? json_decode( (string) $row->recipients, true ) : array();
+			$recipients = is_array( $recipients ) ? $recipients : array();
+			$update     = array();
+			if ( empty( $recipients ) ) {
+				$fetched = $this->fetch_document_recipients( $row->breezedoc_document_id );
+				if ( is_wp_error( $fetched ) ) {
+					if ( 429 === (int) ( $fetched->get_error_data()['status'] ?? 0 ) ) {
+						$counts['next_after'] = max( 0, (int) $row->id - 1 );
+						$counts['done']       = false;
+						$counts['wait']       = 30;
+						return $counts;
+					}
+				} else {
+					$recipients           = $this->breezedoc_map_recipients( $fetched );
+					$update['recipients'] = wp_json_encode( $recipients );
+				}
+			}
+			$customer = $this->match_customer( $recipients, (string) $row->template_title, $map, $names );
+			if ( $customer ) {
+				$update['stripe_customer_id'] = $customer[0];
+				$update['customer_name']      = $customer[1];
+				$counts['linked']++;
+			}
+			if ( $update ) {
+				$update['updated_at'] = current_time( 'mysql' );
+				$pdb->update( $table, $update, array( 'id' => $row->id ) );
+			}
+			$counts['checked']++;
+			$counts['next_after'] = (int) $row->id;
+		}
+		return $counts;
+	}
+
 	/**
 	 * Pulls historical documents from BreezeDoc into the local log: the team's (Team API key, `doc_` ids)
 	 * and then your own (Personal token, numeric ids). The account may hold documents from other
@@ -1149,6 +1669,9 @@ class AJCore_RA_Esign {
 		$pdb    = $this->get_pdb();
 		$table  = $this->get_esign_documents_table();
 		$map    = $this->customer_email_map();
+		$names  = $this->customer_name_index();
+		$ignored = array_flip( $this->ignored_ids() );
+		$fetch_budget = 25; // signer lookups per call (BreezeDoc allows 60 requests/minute)
 		$counts = array( 'imported' => 0, 'existing' => 0, 'unmatched' => 0, 'drafts' => 0, 'seen' => 0 );
 		$cursor = sanitize_text_field( (string) $cursor );
 
@@ -1160,6 +1683,7 @@ class AJCore_RA_Esign {
 		$page_no = $personal ? max( 1, (int) substr( $cursor, 2 ) ) : 0;
 
 		for ( $i = 0; $i < 3; $i++ ) {
+			$page_cursor = $personal ? 'p:' . $page_no : $cursor;
 			if ( $personal ) {
 				$result = $this->breezedoc_api_request( 'GET', '/documents', array( 'query' => array( 'page' => $page_no, 'order_by' => 'id', 'direction' => 'desc' ) ) );
 			} else {
@@ -1178,23 +1702,33 @@ class AJCore_RA_Esign {
 					continue;
 				}
 				$counts['seen']++;
-				$state = $personal ? $this->breezedoc_legacy_doc_state( $doc ) : $this->breezedoc_v1_doc_state( $doc );
-				if ( 'draft' === $state['status'] ) {
-					$counts['drafts']++;
-					continue;
+				if ( isset( $ignored[ $doc_id ] ) ) {
+					continue; // deleted from the local log on purpose
 				}
 				if ( $pdb->get_var( $pdb->prepare( "SELECT id FROM `{$table}` WHERE breezedoc_document_id = %s", $doc_id ) ) ) {
 					$counts['existing']++;
 					continue;
 				}
-				$customer = null;
-				foreach ( $state['recipients'] as $r ) {
-					$email = strtolower( trim( (string) $r['email'] ) );
-					if ( '' !== $email && isset( $map[ $email ] ) ) {
-						$customer = $map[ $email ];
-						break;
+				// The list responses carry no signers: look them up so the document can be linked by email.
+				if ( empty( $doc['recipients'] ) && $fetch_budget > 0 ) {
+					$fetched = $this->fetch_document_recipients( $doc_id );
+					if ( is_wp_error( $fetched ) ) {
+						if ( 429 === (int) ( $fetched->get_error_data()['status'] ?? 0 ) ) {
+							$counts['next_cursor'] = $page_cursor; // rerun this page after a pause; imported rows are skipped as existing
+							$counts['wait']        = 30;
+							return $counts;
+						}
+					} else {
+						$doc['recipients'] = $fetched;
+						$fetch_budget--;
 					}
 				}
+				$state = $personal ? $this->breezedoc_legacy_doc_state( $doc ) : $this->breezedoc_v1_doc_state( $doc );
+				if ( 'draft' === $state['status'] ) {
+					$counts['drafts']++;
+					continue;
+				}
+				$customer = $this->match_customer( $state['recipients'], $state['title'], $map, $names );
 				if ( ! $customer && ! $include_unmatched ) {
 					$counts['unmatched']++;
 					continue;
@@ -1262,12 +1796,17 @@ class AJCore_RA_Esign {
 		$catalog[] = $e( 'POST', '/ops/esign/send', 'Creates a document from a template (template_id, recipients[{party,name,email}], optional signing_order/message/expires_in_days/title), sends it, logs it.' );
 		$catalog[] = $e( 'POST', '/ops/esign/send-pdf', 'Multipart: uploads a PDF (pdf, recipients JSON, stripe_customer_id, title, page, message, expires_in_days), places signature+date fields per signer, sends, logs it. Team API key only.' );
 		$catalog[] = $e( 'GET', '/ops/esign/documents', 'Local log of sent signature requests with their last-known status.' );
+		$catalog[] = $e( 'POST', '/ops/esign/documents/delete', 'Deletes log rows (body: ids) — the local copy only, nothing is removed in BreezeDoc; the ids are remembered so imports skip them.' );
+		$catalog[] = $e( 'GET', '/ops/esign/settings', 'Auto-import frequency, last automatic run, and which BreezeDoc credentials are saved.' );
+		$catalog[] = $e( 'POST', '/ops/esign/settings/save', 'Sets the auto-import frequency (auto_import: off|hourly|twicedaily|daily). Master site only.' );
+		$catalog[] = $e( 'POST', '/ops/esign/link', 'Links logged documents that have no customer yet: by signer email, then by a customer name in the title (after_id, 25 per call).' );
 		$catalog[] = $e( 'GET', '/ops/esign/diagnose', 'Raw samples from the BreezeDoc Team API (team, first templates, first documents) for troubleshooting. Team API key only.' );
 		$catalog[] = $e( 'POST', '/ops/esign/import', 'Imports historical BreezeDoc team documents into the local log (cursor, include_unmatched). Only documents whose signer email matches a portal customer unless include_unmatched. Team API key only.' );
 		$catalog[] = $e( 'POST', '/ops/esign/documents/{id}/refresh', 'Re-reads one document\'s status from BreezeDoc.' );
 		$catalog[] = $e( 'POST', '/ops/esign/documents/{id}/remind', 'Reminds unsigned recipients (BreezeDoc allows once per 24 hours). Team API key only.' );
 		$catalog[] = $e( 'POST', '/ops/esign/documents/{id}/cancel', 'Cancels a sent document so it can no longer be signed. Team API key only.' );
 		$catalog[] = $e( 'GET', '/ops/esign/documents/{id}/download', 'Short-lived (15 min) signed URL for the completed PDF and certificate. Team API key only.' );
+		$catalog[] = $e( 'GET', '/ops/esign/documents/{id}/preview', 'What can be shown for a document: signed-PDF link (team documents once completed), page images if BreezeDoc returns any (personal documents), else the BreezeDoc viewer URL.' );
 		$catalog[] = $e( 'GET', '/ops/esign/documents/{id}/events', 'Audit events for a document. Team API key only.' );
 		$catalog[] = $e( 'GET', '/ops/esign/webhook', 'BreezeDoc webhook registration state (never the secret).' );
 		$catalog[] = $e( 'POST', '/ops/esign/webhook/register', 'Registers (or re-registers) the BreezeDoc webhook pointing at this site.' );
@@ -1286,7 +1825,7 @@ class AJCore_RA_Esign {
 		};
 		$id_re  = '(?P<id>\d+)';
 		$tpl_re = '(?P<id>[A-Za-z0-9_]+)';
-		$act_ro = '(?P<action>download|events)';
+		$act_ro = '(?P<action>download|events|preview)';
 		$act_rw = '(?P<action>refresh|remind|cancel)';
 		$r      = WP_REST_Server::READABLE;
 
@@ -1300,6 +1839,10 @@ class AJCore_RA_Esign {
 				'/send-pdf'                  => array( 'POST', 'rest_send_pdf' ),
 				'/documents'                 => array( $r, 'rest_documents' ),
 				'/import'                    => array( 'POST', 'rest_import' ),
+				'/link'                      => array( 'POST', 'rest_link' ),
+				'/settings'                  => array( $r, 'rest_settings' ),
+				'/settings/save'             => array( 'POST', 'rest_settings_save' ),
+				'/documents/delete'          => array( 'POST', 'rest_delete_documents' ),
 				'/diagnose'                  => array( $r, 'rest_diagnose' ),
 				'/documents/' . $id_re . '/' . $act_rw => array( 'POST', 'rest_document_action' ),
 				'/documents/' . $id_re . '/' . $act_ro => array( $r, 'rest_document_action' ),
@@ -1381,6 +1924,74 @@ class AJCore_RA_Esign {
 				$this->send_options( $request )
 			)
 		);
+	}
+
+	public function rest_delete_documents( WP_REST_Request $request ) {
+		return $this->rest_result( $this->delete_logged_documents( (array) $request->get_param( 'ids' ) ) );
+	}
+
+	/** Things that are not possible (or not built yet), kept visible in the UI so they can be revisited. */
+	public static function roadmap() {
+		return array(
+			array( 'status' => 'planned', 'title' => 'Bulk send', 'note' => 'Send one template to many customers in one go (BreezeDoc has it in its app; the API allows it one document at a time, 60 requests/minute).' ),
+			array( 'status' => 'planned', 'title' => 'Own template library', 'note' => 'Save a PDF once with its signer layout and reuse it, because BreezeDoc templates cannot be created or edited through its API.' ),
+			array( 'status' => 'planned', 'title' => 'Drag-to-place fields on uploaded PDFs', 'note' => 'Today a signature and date box is auto-placed per signer near the bottom of one page.' ),
+			array( 'status' => 'planned', 'title' => 'Signing status and signed copies in the customer portal', 'note' => 'Show each customer their requests and signed files in the client portal.' ),
+			array( 'status' => 'blocked', 'title' => 'Create, edit or delete templates from AJCore', 'note' => 'BreezeDoc API has no template write endpoints. Use Edit / Create in BreezeDoc.' ),
+			array( 'status' => 'blocked', 'title' => 'Delete documents in BreezeDoc', 'note' => 'No delete endpoint (only invoices and webhooks have one). Cancel works for awaiting documents (Team key); delete in BreezeDoc\'s "..." menu.' ),
+			array( 'status' => 'blocked', 'title' => 'Set logo, email subject/body or sender name from AJCore', 'note' => 'These are BreezeDoc account / team settings with no API. The custom message per request does work.' ),
+			array( 'status' => 'blocked', 'title' => 'Signing requests from our own address, with our own signing links', 'note' => 'BreezeDoc always sends its own signing email and the API cannot turn it off or change the sender. AJCore sends the optional heads-up and the signed copy from your own sender instead. Ask BreezeDoc support whether a no-email option is planned.' ),
+			array( 'status' => 'blocked', 'title' => 'Preview unsigned documents or template layout', 'note' => 'No endpoint. The signed PDF is available once completed (Team key).' ),
+			array( 'status' => 'blocked', 'title' => 'Preview / download documents from the personal account', 'note' => 'The legacy API documents no file link. Check Diagnose → personal_documents; Open uses BreezeDoc\'s own viewer.' ),
+			array( 'status' => 'blocked', 'title' => 'Redirect after signing, passcodes, Stripe payments on documents', 'note' => 'Configured inside BreezeDoc; not exposed by the API.' ),
+		);
+	}
+
+	public function rest_settings() {
+		$opt = get_option( self::OPTION, array() );
+		$opt = is_array( $opt ) ? $opt : array();
+		return rest_ensure_response(
+			array(
+				'autoImport' => (string) ( $opt['auto_import'] ?? 'off' ),
+				'notifyOnSend' => ! empty( $opt['notify_on_send'] ),
+				'signedCopy'   => (string) ( $opt['signed_copy'] ?? 'off' ),
+				'fileSigned'   => ! empty( $opt['file_signed'] ),
+				'roadmap'      => self::roadmap(),
+				'lastRun'    => (array) ( $opt['auto_last'] ?? array() ),
+				'readOnly'   => $this->read_only(),
+				'hasTeam'    => $this->breezedoc_is_v1(),
+				'hasPersonal' => '' !== $this->setting( 'api_token' ),
+			)
+		);
+	}
+
+	public function rest_settings_save( WP_REST_Request $request ) {
+		if ( $this->read_only() ) {
+			return new WP_Error( 'master_only', __( 'Managed by the AJCore master site.', 'ajcore-ra' ), array( 'status' => 403 ) );
+		}
+		$opt  = get_option( self::OPTION, array() );
+		$opt  = is_array( $opt ) ? $opt : array();
+		if ( null !== $request->get_param( 'auto_import' ) ) {
+			$freq               = sanitize_key( (string) $request->get_param( 'auto_import' ) );
+			$opt['auto_import'] = in_array( $freq, array( 'off', 'hourly', 'twicedaily', 'daily' ), true ) ? $freq : 'off';
+		}
+		if ( null !== $request->get_param( 'notify_on_send' ) ) {
+			$opt['notify_on_send'] = filter_var( $request->get_param( 'notify_on_send' ), FILTER_VALIDATE_BOOLEAN ) ? 1 : 0;
+		}
+		if ( null !== $request->get_param( 'file_signed' ) ) {
+			$opt['file_signed'] = filter_var( $request->get_param( 'file_signed' ), FILTER_VALIDATE_BOOLEAN ) ? 1 : 0;
+		}
+		if ( null !== $request->get_param( 'signed_copy' ) ) {
+			$mode               = sanitize_key( (string) $request->get_param( 'signed_copy' ) );
+			$opt['signed_copy'] = in_array( $mode, array( 'off', 'customer', 'all' ), true ) ? $mode : 'off';
+		}
+		update_option( self::OPTION, $opt, false );
+		self::sync_schedule();
+		return $this->rest_settings();
+	}
+
+	public function rest_link( WP_REST_Request $request ) {
+		return $this->rest_result( $this->link_documents( (int) $request->get_param( 'after_id' ) ) );
 	}
 
 	public function rest_diagnose() {
@@ -1498,6 +2109,19 @@ class AJCore_RA_Esign {
 			.ajra-es table.widefat td,.ajra-es table.widefat th{vertical-align:middle}
 			.ajra-es td .button{margin:0 2px 2px 0}.ajra-es pre{margin:0;white-space:pre-wrap;font-size:12px}
 			.ajra-es .ajra-empty{padding:18px;text-align:center;color:#646970}
+			.ajra-es .ajra-tpl{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 0;border-top:1px solid #f0f0f1}
+			.ajra-es .ajra-tpl:first-child{border-top:0}.ajra-es .ajra-tpl .t{flex:1;min-width:200px;font-weight:600}
+			.ajra-es .ajra-tag{display:inline-block;padding:0 7px;border-radius:9px;font-size:11px;background:#eef2ff;color:#3730a3;margin-left:6px;font-weight:600}
+			.ajra-es .ajra-tpl-detail{flex-basis:100%;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;font-size:12px}
+			#ajra-es-modal{display:none;position:fixed;inset:0;z-index:100000;background:rgba(15,23,42,.6);align-items:center;justify-content:center;padding:24px}
+			#ajra-es-modal.on{display:flex}
+			#ajra-es-modal .ajra-box{background:#fff;border-radius:10px;width:min(980px,100%);height:min(90vh,900px);display:flex;flex-direction:column;overflow:hidden}
+			#ajra-es-modal .ajra-mbar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #dcdcde}
+			#ajra-es-modal .ajra-mbar strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+			#ajra-es-modal .ajra-mbody{flex:1;overflow:auto;background:#f1f5f9}
+			#ajra-es-modal iframe{width:100%;height:100%;border:0;background:#fff}
+			#ajra-es-modal img{display:block;max-width:100%;margin:10px auto;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+			#ajra-es-modal .ajra-mmsg{padding:28px;text-align:center;color:#475569}
 		</style>
 		<div class="ajra-es">
 			<?php if ( isset( $_GET['saved'] ) ) : ?>
@@ -1525,6 +2149,29 @@ class AJCore_RA_Esign {
 							<?php endif; ?>
 						</div>
 					</div>
+					<?php $auto = (string) ( get_option( self::OPTION, array() )['auto_import'] ?? 'off' ); $last = (array) ( get_option( self::OPTION, array() )['auto_last'] ?? array() ); ?>
+					<p style="margin:10px 0 0">
+						<label for="esign_auto_import" style="display:inline"><?php esc_html_e( 'Auto-import from BreezeDoc', 'ajcore-ra' ); ?></label>
+						<select name="esign_auto_import" id="esign_auto_import" style="width:auto" <?php disabled( $ro ); ?>>
+							<?php foreach ( array( 'off' => __( 'Off', 'ajcore-ra' ), 'hourly' => __( 'Hourly', 'ajcore-ra' ), 'twicedaily' => __( 'Twice daily', 'ajcore-ra' ), 'daily' => __( 'Daily', 'ajcore-ra' ) ) as $val => $label ) : ?>
+								<option value="<?php echo esc_attr( $val ); ?>" <?php selected( $auto, $val ); ?>><?php echo esc_html( $label ); ?></option>
+							<?php endforeach; ?>
+						</select>
+						<span class="ajra-muted"><?php echo esc_html( $last ? sprintf( /* translators: 1: time, 2: seen, 3: imported, 4: linked */ __( 'Last run %1$s — %2$d found, %3$d imported, %4$d linked%5$s', 'ajcore-ra' ), $last['at'], (int) ( $last['summary']['seen'] ?? 0 ), (int) ( $last['summary']['imported'] ?? 0 ), (int) ( $last['summary']['linked'] ?? 0 ), ! empty( $last['summary']['error'] ) ? ' — ' . $last['summary']['error'] : '' ) : __( 'Matches signers to customers; runs on the master site.', 'ajcore-ra' ) ); ?></span>
+					</p>
+					<?php $sc = (string) $this->opt( 'signed_copy', 'off' ); ?>
+					<input type="hidden" name="esign_email_form" value="1">
+					<p style="margin:10px 0 0">
+						<label style="display:inline-flex;align-items:center;gap:4px;margin-right:14px"><input type="checkbox" name="esign_notify_on_send" value="1" <?php checked( (bool) $this->opt( 'notify_on_send', 0 ) ); ?> <?php disabled( $ro ); ?>> <?php esc_html_e( 'Email signers from AJCore when a request is sent', 'ajcore-ra' ); ?></label>
+						<label style="display:inline-flex;align-items:center;gap:4px;margin-right:14px"><input type="checkbox" name="esign_file_signed" value="1" <?php checked( (bool) $this->opt( 'file_signed', 0 ) ); ?> <?php disabled( $ro ); ?>> <?php esc_html_e( 'File the signed copy in the customer\'s portal Files', 'ajcore-ra' ); ?></label>
+						<label for="esign_signed_copy" style="display:inline"><?php esc_html_e( 'Email the signed copy to', 'ajcore-ra' ); ?></label>
+						<select name="esign_signed_copy" id="esign_signed_copy" style="width:auto" <?php disabled( $ro ); ?>>
+							<option value="off" <?php selected( $sc, 'off' ); ?>><?php esc_html_e( 'nobody', 'ajcore-ra' ); ?></option>
+							<option value="customer" <?php selected( $sc, 'customer' ); ?>><?php esc_html_e( 'the customer', 'ajcore-ra' ); ?></option>
+							<option value="all" <?php selected( $sc, 'all' ); ?>><?php esc_html_e( 'every signer', 'ajcore-ra' ); ?></option>
+						</select>
+						<span class="ajra-muted"><?php esc_html_e( 'Sent from your AJCore sender (Zoho / SMTP profile); templates are under Email Templates. Signed copies need the Team key and the webhook (or a Refresh).', 'ajcore-ra' ); ?></span>
+					</p>
 					<p style="margin:10px 0 0">
 						<?php if ( ! $ro ) : ?><button type="submit" class="button button-primary"><?php esc_html_e( 'Save', 'ajcore-ra' ); ?></button><?php endif; ?>
 						<button type="button" class="button" id="ajra-es-test"><?php esc_html_e( 'Test connection', 'ajcore-ra' ); ?></button>
@@ -1606,12 +2253,38 @@ class AJCore_RA_Esign {
 				</div>
 			<?php endif; ?>
 
+			<?php if ( $connected && ! $error ) : ?>
+			<div class="ajra-card" id="ajra-es-tpl-card">
+				<div class="ajra-head">
+					<h2><?php esc_html_e( 'Templates', 'ajcore-ra' ); ?> <span class="ajra-muted" id="ajra-es-tpl-count"></span></h2>
+					<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer"><?php esc_html_e( 'Create / upload in BreezeDoc', 'ajcore-ra' ); ?></a>
+				</div>
+				<div id="ajra-es-tpl-list"></div>
+				<p class="ajra-muted" style="margin:10px 0 0"><?php esc_html_e( 'BreezeDoc does not let other apps create, edit or delete templates. Use Edit or Create to open BreezeDoc (Templates page); changes show here after a reload.', 'ajcore-ra' ); ?></p>
+			</div>
+			<?php endif; ?>
+
+			<details class="ajra-card" id="ajra-es-roadmap">
+				<summary style="cursor:pointer;font-weight:600"><?php esc_html_e( 'Roadmap — what is planned and what BreezeDoc does not allow yet', 'ajcore-ra' ); ?></summary>
+				<table class="widefat striped" style="margin-top:10px">
+					<tbody>
+						<?php foreach ( self::roadmap() as $item ) : ?>
+							<tr>
+								<td style="width:110px"><span class="ajra-pill <?php echo 'planned' === $item['status'] ? 'completed' : 'cancelled'; ?>"><?php echo esc_html( 'planned' === $item['status'] ? __( 'Planned', 'ajcore-ra' ) : __( 'Not possible yet', 'ajcore-ra' ) ); ?></span></td>
+								<td><strong><?php echo esc_html( $item['title'] ); ?></strong><br><span class="ajra-muted"><?php echo esc_html( $item['note'] ); ?></span></td>
+							</tr>
+						<?php endforeach; ?>
+					</tbody>
+				</table>
+			</details>
+
 			<div class="ajra-card">
 				<div class="ajra-head">
 					<h2><?php esc_html_e( 'Sent signature requests', 'ajcore-ra' ); ?></h2>
 					<?php if ( $connected ) : ?>
 						<span style="text-align:right">
 							<button type="button" class="button button-small" id="ajra-es-import"><?php esc_html_e( 'Import from BreezeDoc', 'ajcore-ra' ); ?></button>
+							<button type="button" class="button button-small" id="ajra-es-link"><?php esc_html_e( 'Link customers', 'ajcore-ra' ); ?></button>
 							<label style="display:block;font-weight:400;margin-top:3px"><input type="checkbox" id="ajra-es-import-all"> <?php esc_html_e( 'include documents not matching a customer', 'ajcore-ra' ); ?></label>
 							<span class="ajra-muted" id="ajra-es-import-out"></span>
 						</span>
@@ -1624,10 +2297,11 @@ class AJCore_RA_Esign {
 						<a data-f="completed"><?php echo esc_html( sprintf( '%s %d', __( 'Completed', 'ajcore-ra' ), $counts['completed'] ) ); ?></a>
 						<a data-f="closed"><?php echo esc_html( sprintf( '%s %d', __( 'Closed', 'ajcore-ra' ), $counts['closed'] ) ); ?></a>
 					</div>
+					<button type="button" class="button button-small" id="ajra-es-del" disabled><?php esc_html_e( 'Delete selected', 'ajcore-ra' ); ?></button>
 					<input type="search" id="ajra-es-log-q" placeholder="<?php esc_attr_e( 'Search customer or document…', 'ajcore-ra' ); ?>">
 				</div>
 				<table class="widefat striped">
-					<thead><tr><th><?php esc_html_e( 'Customer', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Document', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Signed', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Status', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Sent', 'ajcore-ra' ); ?></th><th></th></tr></thead>
+					<thead><tr><th style="width:28px"><input type="checkbox" id="ajra-es-sel-all" aria-label="<?php esc_attr_e( 'Select all', 'ajcore-ra' ); ?>"></th><th><?php esc_html_e( 'Customer', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Document', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Signed', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Status', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Sent', 'ajcore-ra' ); ?></th><th></th></tr></thead>
 					<tbody id="ajra-es-log">
 						<?php foreach ( $log['documents'] as $doc ) :
 							$is_new          = 0 === strpos( $doc['breezedocDocumentId'], 'doc_' );
@@ -1637,7 +2311,8 @@ class AJCore_RA_Esign {
 							}, (array) $doc['recipients'] ) );
 							?>
 							<tr data-row="<?php echo esc_attr( $doc['id'] ); ?>" data-group="<?php echo esc_attr( $group( $doc['status'] ) ); ?>" data-q="<?php echo esc_attr( strtolower( $doc['customerName'] . ' ' . $doc['templateTitle'] . ' ' . $names ) ); ?>">
-								<td><?php echo esc_html( $doc['customerName'] ?: '—' ); ?></td>
+								<td><input type="checkbox" class="ajra-es-sel" value="<?php echo esc_attr( $doc['id'] ); ?>"></td>
+								<td><?php echo esc_html( $doc['customerName'] ?: '' ); ?><?php if ( '' === $doc['customerName'] ) : $first = ( (array) $doc['recipients'] )[0] ?? array(); ?><span class="ajra-muted"><?php echo esc_html( ( $first['name'] ?? '' ) ?: ( $first['email'] ?? '—' ) ); ?></span><?php endif; ?></td>
 								<td><?php echo esc_html( $doc['templateTitle'] ?: '—' ); ?></td>
 								<td data-progress title="<?php echo esc_attr( $names ); ?>"><?php echo esc_html( $tt ? $sg . '/' . $tt : '—' ); ?></td>
 								<td><span class="ajra-pill <?php echo esc_attr( $doc['status'] ); ?>" data-status><?php echo esc_html( $labels[ $doc['status'] ] ?? $doc['status'] ); ?></span></td>
@@ -1650,9 +2325,13 @@ class AJCore_RA_Esign {
 											<button type="button" class="button button-small" data-act="cancel" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Cancel', 'ajcore-ra' ); ?></button>
 										<?php endif; ?>
 										<?php if ( 'completed' === $doc['status'] ) : ?>
+											<button type="button" class="button button-small" data-act="preview" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Preview', 'ajcore-ra' ); ?></button>
 											<button type="button" class="button button-small" data-act="download" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Signed PDF', 'ajcore-ra' ); ?></button>
 										<?php endif; ?>
 										<button type="button" class="button button-small" data-act="events" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'History', 'ajcore-ra' ); ?></button>
+									<?php endif; ?>
+									<?php if ( ! $is_new && 'completed' === $doc['status'] ) : ?>
+										<button type="button" class="button button-small" data-act="preview" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Preview', 'ajcore-ra' ); ?></button>
 									<?php endif; ?>
 									<?php if ( $doc['documentUrl'] ) : ?>
 										<a class="button button-small" href="<?php echo esc_url( $doc['documentUrl'] ); ?>" target="_blank" rel="noopener noreferrer"><?php esc_html_e( 'Open', 'ajcore-ra' ); ?></a>
@@ -1663,6 +2342,16 @@ class AJCore_RA_Esign {
 					</tbody>
 				</table>
 				<div class="ajra-empty" id="ajra-es-log-empty" style="<?php echo empty( $log['documents'] ) ? '' : 'display:none'; ?>"><?php esc_html_e( 'Nothing to show.', 'ajcore-ra' ); ?></div>
+			</div>
+		</div>
+		<div id="ajra-es-modal" role="dialog" aria-modal="true">
+			<div class="ajra-box">
+				<div class="ajra-mbar"><strong id="ajra-es-mtitle"></strong>
+					<a class="button button-small" id="ajra-es-mopen" target="_blank" rel="noopener noreferrer" style="display:none"><?php esc_html_e( 'Open in new tab', 'ajcore-ra' ); ?></a>
+					<a class="button button-small" id="ajra-es-mcert" target="_blank" rel="noopener noreferrer" style="display:none"><?php esc_html_e( 'Certificate', 'ajcore-ra' ); ?></a>
+					<button type="button" class="button button-small" id="ajra-es-mclose"><?php esc_html_e( 'Close', 'ajcore-ra' ); ?></button>
+				</div>
+				<div class="ajra-mbody" id="ajra-es-mbody"></div>
 			</div>
 		</div>
 		<script>
@@ -1720,6 +2409,10 @@ class AJCore_RA_Esign {
 					out.textContent = 'Importing… ' + tot.imported;
 					return api( '/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { cursor: cursor, include_unmatched: $( 'ajra-es-import-all' ).checked } ) } ).then( function ( d ) {
 						Object.keys( tot ).forEach( function ( k ) { tot[ k ] += d[ k ] || 0; } );
+						if ( d.wait ) {
+							out.textContent = 'Waiting ' + d.wait + 's for BreezeDoc\'s rate limit… (' + tot.imported + ' imported so far)';
+							return new Promise( function ( res ) { setTimeout( res, d.wait * 1000 ); } ).then( function () { return step( d.next_cursor ); } );
+						}
 						return d.next_cursor ? step( d.next_cursor ) : null;
 					} );
 				}
@@ -1730,6 +2423,110 @@ class AJCore_RA_Esign {
 				} ).catch( function ( e ) { out.style.color = '#b32d2e'; out.textContent = e.message; } ).finally( function () { imp.disabled = false; } );
 			} ); }
 
+			// Link already-logged documents to customers (signer email, then company name in the title).
+			var lnk = $( 'ajra-es-link' );
+			if ( lnk ) { lnk.addEventListener( 'click', function () {
+				var out = $( 'ajra-es-import-out' ), tot = { checked: 0, linked: 0 };
+				lnk.disabled = true;
+				function step( after ) {
+					out.textContent = 'Linking… ' + tot.linked + ' linked';
+					return api( '/link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { after_id: after } ) } ).then( function ( d ) {
+						tot.checked += d.checked || 0; tot.linked += d.linked || 0;
+						if ( d.wait ) {
+							out.textContent = 'Waiting ' + d.wait + 's for BreezeDoc\'s rate limit… (' + tot.linked + ' linked so far)';
+							return new Promise( function ( res ) { setTimeout( res, d.wait * 1000 ); } ).then( function () { return step( d.next_after ); } );
+						}
+						return d.done ? null : step( d.next_after );
+					} );
+				}
+				step( 0 ).then( function () {
+					out.textContent = tot.linked + ' of ' + tot.checked + ' unlinked documents matched a customer';
+					if ( tot.linked ) { setTimeout( function () { window.location.reload(); }, 1500 ); }
+				} ).catch( function ( e ) { out.style.color = '#b32d2e'; out.textContent = e.message; } ).finally( function () { lnk.disabled = false; } );
+			} ); }
+
+			// Templates panel: use, inspect signers/fields, jump into BreezeDoc to edit.
+			var tplList = $( 'ajra-es-tpl-list' );
+			if ( tplList ) {
+				$( 'ajra-es-tpl-count' ).textContent = templates.length ? '(' + templates.length + ')' : '';
+				if ( ! templates.length ) { tplList.innerHTML = '<div class="ajra-empty">No templates yet — create one in BreezeDoc.</div>'; }
+				templates.forEach( function ( t ) {
+					var row = document.createElement( 'div' ); row.className = 'ajra-tpl';
+					var src = String( t.id ).indexOf( 'tpl_' ) === 0 ? 'team' : 'personal';
+					row.innerHTML = '<div class="t">' + esc( t.title || t.id ) + '<span class="ajra-tag">' + src + '</span> <span class="ajra-muted">' + ( t.recipients ? t.recipients.length : 0 ) + ' signer(s)</span></div>' +
+						'<button type="button" class="button button-small" data-tpl-use>Use template</button>' +
+						'<button type="button" class="button button-small" data-tpl-detail>Details</button>' +
+						'<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" title="Open BreezeDoc, then Templates → Edit">Edit in BreezeDoc</a>';
+					row.querySelector( '[data-tpl-use]' ).addEventListener( 'click', function () {
+						var form = $( 'ajra-es-template' ); if ( ! form ) { return; }
+						document.querySelectorAll( '.ajra-es a[data-mode]' ).forEach( function ( a ) { if ( 'template' === a.getAttribute( 'data-mode' ) ) { a.click(); } } );
+						form.value = t.id; form.dispatchEvent( new Event( 'change' ) );
+						form.scrollIntoView( { behavior: 'smooth', block: 'center' } );
+					} );
+					row.querySelector( '[data-tpl-detail]' ).addEventListener( 'click', function ( ev ) {
+						var btn = ev.target, existing = row.querySelector( '.ajra-tpl-detail' );
+						if ( existing ) { existing.remove(); return; }
+						btn.disabled = true;
+						api( '/templates/' + encodeURIComponent( t.id ) ).then( function ( d ) {
+							var byParty = {}, fields = d.fields || [];
+							fields.forEach( function ( f ) { var k = f.party || 0; ( byParty[ k ] = byParty[ k ] || [] ).push( ( f.type || 'field' ) + ( f.label ? ' “' + f.label + '”' : '' ) + ( f.page ? ' (p.' + f.page + ')' : '' ) ); } );
+							var html = ( d.recipients || [] ).map( function ( r ) { return '<div><strong>Party ' + esc( r.party ) + '</strong>' + ( r.name ? ' — ' + esc( r.name ) : '' ) + ( byParty[ r.party ] ? ': ' + esc( byParty[ r.party ].join( ', ' ) ) : '' ) + '</div>'; } ).join( '' );
+							if ( ! html && fields.length ) { html = '<div>' + esc( fields.map( function ( f ) { return f.type; } ).join( ', ' ) ) + '</div>'; }
+							var box = document.createElement( 'div' ); box.className = 'ajra-tpl-detail';
+							box.innerHTML = ( html || 'BreezeDoc returned no signer or field details for this template.' ) + '<div class="ajra-muted" style="margin-top:6px">' + fields.length + ' field(s) in total. Template text and layout can only be seen or changed in BreezeDoc.</div>';
+							row.appendChild( box );
+						} ).catch( function ( e ) { window.alert( e.message ); } ).finally( function () { btn.disabled = false; } );
+					} );
+					tplList.appendChild( row );
+				} );
+			}
+
+			// Select local copies and delete them (the BreezeDoc documents are untouched).
+			var selAll = $( 'ajra-es-sel-all' ), delBtn = $( 'ajra-es-del' );
+			function selectedIds() {
+				return Array.prototype.filter.call( document.querySelectorAll( '.ajra-es-sel' ), function ( c ) { return c.checked; } ).map( function ( c ) { return parseInt( c.value, 10 ); } );
+			}
+			function updateDel() {
+				var n = selectedIds().length;
+				delBtn.disabled = ! n; delBtn.textContent = n ? 'Delete selected (' + n + ')' : 'Delete selected';
+			}
+			document.querySelectorAll( '.ajra-es-sel' ).forEach( function ( c ) { c.addEventListener( 'change', updateDel ); } );
+			selAll.addEventListener( 'change', function () {
+				rows.forEach( function ( r ) { if ( 'none' !== r.style.display ) { r.querySelector( '.ajra-es-sel' ).checked = selAll.checked; } } );
+				updateDel();
+			} );
+			delBtn.addEventListener( 'click', function () {
+				var ids = selectedIds();
+				if ( ! ids.length || ! window.confirm( 'Delete ' + ids.length + ' document(s) from this site\'s local list? They stay in BreezeDoc, and future imports will skip them.' ) ) { return; }
+				delBtn.disabled = true;
+				api( '/documents/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { ids: ids } ) } )
+					.then( function () { window.location.reload(); } )
+					.catch( function ( e ) { window.alert( e.message ); updateDel(); } );
+			} );
+
+			// Preview modal: signed PDF (team), page images, or a pointer to BreezeDoc's viewer.
+			var modal = $( 'ajra-es-modal' ), mbody = $( 'ajra-es-mbody' );
+			function closeModal() { modal.classList.remove( 'on' ); mbody.innerHTML = ''; }
+			$( 'ajra-es-mclose' ).addEventListener( 'click', closeModal );
+			modal.addEventListener( 'click', function ( ev ) { if ( ev.target === modal ) { closeModal(); } } );
+			document.addEventListener( 'keydown', function ( ev ) { if ( 'Escape' === ev.key ) { closeModal(); } } );
+			function showPreview( title, d ) {
+				$( 'ajra-es-mtitle' ).textContent = title;
+				var open = $( 'ajra-es-mopen' ), cert = $( 'ajra-es-mcert' );
+				open.style.display = cert.style.display = 'none';
+				mbody.innerHTML = '';
+				if ( 'pdf' === d.mode && d.url ) {
+					mbody.innerHTML = '<iframe src="' + esc( d.url ) + '" title="Document preview"></iframe>';
+					open.href = d.url; open.style.display = '';
+					if ( d.certificateUrl ) { cert.href = d.certificateUrl; cert.style.display = ''; }
+				} else if ( 'images' === d.mode && d.pages && d.pages.length ) {
+					mbody.innerHTML = d.pages.map( function ( u ) { return '<img src="' + esc( u ) + '" alt="">'; } ).join( '' );
+				} else {
+					mbody.innerHTML = '<div class="ajra-mmsg">' + esc( d.message || 'No preview available.' ) + ( d.openUrl ? '<p><a class="button" target="_blank" rel="noopener noreferrer" href="' + esc( d.openUrl ) + '">Open in BreezeDoc</a></p>' : '' ) + '</div>';
+				}
+				modal.classList.add( 'on' );
+			}
+
 			// Row actions.
 			function setProgress( tr, recipients ) {
 				var cell = tr.querySelector( '[data-progress]' ), list = recipients || [];
@@ -1739,15 +2536,17 @@ class AJCore_RA_Esign {
 				var act = b.getAttribute( 'data-act' ), id = b.getAttribute( 'data-id' ), label = b.textContent, tr = b.closest( 'tr' );
 				if ( 'cancel' === act && ! window.confirm( 'Cancel this document? Signers will no longer be able to sign it.' ) ) { return; }
 				b.disabled = true; b.textContent = '…';
-				api( '/documents/' + id + '/' + act, { method: ( 'download' === act || 'events' === act ) ? 'GET' : 'POST' } ).then( function ( d ) {
-					if ( 'download' === act ) {
+				api( '/documents/' + id + '/' + act, { method: ( 'download' === act || 'events' === act || 'preview' === act ) ? 'GET' : 'POST' } ).then( function ( d ) {
+					if ( 'preview' === act ) {
+						showPreview( ( tr.children[2] ? tr.children[2].textContent.trim() : '' ) || 'Document', d );
+					} else if ( 'download' === act ) {
 						if ( d.url ) { window.open( d.url, '_blank', 'noopener' ); } else { window.alert( 'No download URL returned.' ); }
 						if ( d.certificateUrl ) { window.open( d.certificateUrl, '_blank', 'noopener' ); }
 					} else if ( 'events' === act ) {
 						var nx = tr.nextElementSibling;
 						if ( nx && nx.classList.contains( 'ajra-es-ev' ) ) { nx.remove(); } else {
 							var lines = ( d.events || [] ).map( function ( e ) { return ( e.created_at || e.at || e.timestamp || '' ) + ' — ' + ( e.type || e.event || e.action || JSON.stringify( e ) ); } );
-							var ev = document.createElement( 'tr' ); ev.className = 'ajra-es-ev'; ev.innerHTML = '<td colspan="6"><pre>' + esc( lines.join( '\n' ) || 'No events.' ) + '</pre></td>'; tr.parentNode.insertBefore( ev, nx );
+							var ev = document.createElement( 'tr' ); ev.className = 'ajra-es-ev'; ev.innerHTML = '<td colspan="7"><pre>' + esc( lines.join( '\n' ) || 'No events.' ) + '</pre></td>'; tr.parentNode.insertBefore( ev, nx );
 						}
 					} else if ( 'remind' === act ) {
 						window.alert( 'Reminder sent.' );
