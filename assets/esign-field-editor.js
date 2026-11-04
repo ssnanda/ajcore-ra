@@ -29,13 +29,13 @@
 		'.ajfe-main{flex:1;min-width:0;display:flex;flex-direction:column;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#fff}' +
 		'.ajfe-side{width:300px;flex:none;position:sticky;top:var(--ajfe-sticky,44px);max-height:calc(100vh - 70px);overflow:auto;border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:10px;display:flex;flex-direction:column;gap:8px}' +
 		'.ajfe-side h4{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#64748b}' +
-		'.ajfe-side button,.ajfe-side select,.ajfe-side input,.ajfe-bar button,.ajfe-bar select{height:30px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:0 10px;font:inherit;color:#0f172a;box-sizing:border-box}' +
-		'.ajfe-side input,.ajfe-side select{width:100%}' +
+		'.ajfe-own button,.ajfe-own select,.ajfe-own input,.ajfe-bar button,.ajfe-bar select{height:30px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:0 10px;font:inherit;color:#0f172a;box-sizing:border-box}' +
+		'.ajfe-own input,.ajfe-own select{width:100%}.ajfe-own{display:flex;flex-direction:column;gap:8px}.ajfe-mlist{display:flex;flex-direction:column;gap:3px;max-height:240px;overflow:auto}.ajfe-mlist .ajfe-chip{height:26px;font-weight:500;font-size:12px}' +
 		'.ajfe-chip{display:flex;align-items:center;gap:8px;width:100%;text-align:left;cursor:grab;font-weight:600;user-select:none}.ajfe-chip:active{cursor:grabbing}' +
 		'.ajfe-chip.on{background:#4f46e5;border-color:#4f46e5;color:#fff}.ajfe-chip i{width:10px;height:10px;border-radius:2px;flex:none}' +
 		'.ajfe-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 10px;border-bottom:1px solid #e2e8f0;background:#f8fafc}' +
-		'.ajfe-bar button{cursor:pointer;font-weight:600;white-space:nowrap}.ajfe-bar button:hover,.ajfe-side button:hover{background:#f1f5f9}' +
-		'.ajfe-bar .dng,.ajfe-side .dng{color:#b91c1c}.ajfe-bar .sp{flex:1}.ajfe-hint{color:#64748b;font-size:12px}' +
+		'.ajfe-bar button{cursor:pointer;font-weight:600;white-space:nowrap}.ajfe-bar button:hover,.ajfe-own button:hover{background:#f1f5f9}' +
+		'.ajfe-bar .dng,.ajfe-own .dng{color:#b91c1c}.ajfe-bar .sp{flex:1}.ajfe-hint{color:#64748b;font-size:12px}' +
 		'.ajfe-stage{overflow:auto;background:#e2e8f0;padding:14px;text-align:center;height:calc(100vh - 230px);min-height:520px}' +
 		'.ajfe-wrap{position:relative;display:inline-block;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.25);text-align:left}' +
 		'.ajfe-wrap canvas{display:block}.ajfe-layer{position:absolute;inset:0}.ajfe-layer.tool{cursor:crosshair}.ajfe-layer.drop{outline:3px dashed #4f46e5;outline-offset:-3px}' +
@@ -103,7 +103,8 @@
 		// ── right panel: palette + signer + inspector ────────────────────────────
 		var palette = el( 'div' ), chips = {};
 		if ( opts.sideTop ) { side.appendChild( opts.sideTop ); }
-		side.appendChild( el( 'h4', { text: 'Fields — drag onto the page' } ) );
+		var own = el( 'div', { cls: 'ajfe-own' } ); side.appendChild( own );
+		own.appendChild( el( 'h4', { text: 'Fields — drag onto the page' } ) );
 		TYPES.forEach( function ( t ) {
 			var c = el( 'button', { cls: 'ajfe-chip', draggable: 'true', title: 'Drag onto the page, or click then click the page' } );
 			c.appendChild( el( 'i' ) ); c.appendChild( el( 'span', { text: t[1] } ) );
@@ -111,18 +112,31 @@
 			c.addEventListener( 'click', function () { setTool( tool === t[0] ? '' : t[0] ); } );
 			chips[ t[0] ] = c; palette.appendChild( c ); palette.lastChild.style.marginBottom = '4px';
 		} );
-		side.appendChild( palette );
+		own.appendChild( palette );
 		var partyWrap = el( 'div' ), partySel = el( 'select' );
 		partyWrap.appendChild( el( 'h4', { text: 'New fields are for' } ) ); partyWrap.appendChild( partySel );
 		var sgRow = el( 'div' ), addSg = el( 'button', { text: '+ Add signer', title: 'Another person who signs this document' } ), rmSg = el( 'button', { text: '− Remove last' } );
-		sgRow.style.cssText = 'display:flex;gap:6px;margin-top:6px'; sgRow.appendChild( addSg ); sgRow.appendChild( rmSg ); partyWrap.appendChild( sgRow ); side.appendChild( partyWrap );
+		sgRow.style.cssText = 'display:flex;gap:6px;margin-top:6px'; sgRow.appendChild( addSg ); sgRow.appendChild( rmSg ); partyWrap.appendChild( sgRow ); own.appendChild( partyWrap );
 		addSg.addEventListener( 'click', function () { signers.push( 'Signer ' + ( signers.length + 1 ) ); renderSigners(); renderInsp(); changed(); partySel.value = String( signers.length ); renderSigners(); } );
 		rmSg.addEventListener( 'click', function () {
 			if ( signers.length < 2 ) { return; }
 			if ( fields.some( function ( f ) { return f.party === signers.length; } ) ) { window.alert( 'Signer ' + signers.length + ' still has fields on the page. Delete or reassign them first.' ); return; }
 			signers.pop(); renderSigners(); renderInsp(); changed();
 		} );
-		var insp = el( 'div' ); side.appendChild( insp );
+		// Customer / company fields: drag one onto the page to drop a text box already filled with it.
+		var mWrap = el( 'div' ), mSearch = el( 'input', { type: 'search', placeholder: 'Search customer & company fields…' } ), mList = el( 'div', { cls: 'ajfe-mlist' } ), mChips = {};
+		mWrap.appendChild( el( 'h4', { text: 'Customer & company fields — drag onto the page' } ) ); mSearch.style.margin = '6px 0'; mWrap.appendChild( mSearch ); mWrap.appendChild( mList );
+		var mEntries = [ [ '__ask', 'Ask when sending…' ] ].concat( Object.keys( merge ).map( function ( k ) { return [ k, merge[ k ] ]; } ) );
+		mEntries.forEach( function ( m ) {
+			var c = el( 'button', { cls: 'ajfe-chip', draggable: 'true', title: '__ask' === m[0] ? 'A value you type in each time you send' : '{{' + m[0] + '}}' } );
+			c.appendChild( el( 'span', { text: m[1] } ) ); c.setAttribute( 'data-label', m[1].toLowerCase() );
+			c.addEventListener( 'dragstart', function ( e ) { e.dataTransfer.setData( 'text/plain', 'ajfe:merge:' + m[0] ); e.dataTransfer.effectAllowed = 'copy'; } );
+			c.addEventListener( 'click', function () { setTool( tool === 'merge:' + m[0] ? '' : 'merge:' + m[0] ); } );
+			mChips[ m[0] ] = c; mList.appendChild( c );
+		} );
+		mSearch.addEventListener( 'input', function () { var q = mSearch.value.toLowerCase().trim(); Object.keys( mChips ).forEach( function ( k ) { mChips[ k ].style.display = ! q || mChips[ k ].getAttribute( 'data-label' ).indexOf( q ) >= 0 ? '' : 'none'; } ); } );
+		own.appendChild( mWrap );
+		var insp = el( 'div' ); own.appendChild( insp );
 		function renderSigners() {
 			var cur = partySel.value; partySel.innerHTML = '';
 			signers.forEach( function ( r, i ) { partySel.appendChild( el( 'option', { value: String( i + 1 ), text: ( i + 1 ) + '. ' + ( r || 'Signer' ) } ) ); } );
@@ -133,6 +147,7 @@
 		function setTool( t ) {
 			tool = t;
 			Object.keys( chips ).forEach( function ( k ) { chips[ k ].classList.toggle( 'on', k === t ); } );
+			Object.keys( mChips ).forEach( function ( k ) { mChips[ k ].classList.toggle( 'on', 'merge:' + k === t ); } );
 			layer.classList.toggle( 'tool', !! t );
 		}
 
@@ -208,16 +223,26 @@
 			var onPage = fields.filter( function ( f ) { return f.page === pageNo; } ).length;
 			count.textContent = fields.length + ' field(s) · ' + onPage + ' on this page';
 		}
-		function dropAt( type, clientX, clientY ) {
+		function dropAt( type, clientX, clientY, fillText ) {
 			var t = TYPES.filter( function ( x ) { return x[0] === type; } )[0]; if ( ! t ) { return; }
 			var r = layer.getBoundingClientRect(), w = t[2] / pageW, h = t[3] / pageH;
 			var x = Math.max( 0, Math.min( 1 - w, ( clientX - r.left ) / r.width - w / 2 ) ), y = Math.max( 0, Math.min( 1 - h, ( clientY - r.top ) / r.height - h / 2 ) );
-			var f = { type: type, party: parseInt( partySel.value, 10 ) || 1, page: pageNo, x: x, y: y, w: w, h: h, fill: '' };
+			var f = { type: type, party: parseInt( partySel.value, 10 ) || 1, page: pageNo, x: x, y: y, w: w, h: h, fill: fillText || '' };
 			fields.push( f ); sel = f; paint(); renderInsp(); changed();
+		}
+		function dropMerge( token, cx, cy ) {
+			var fill = '{{' + token + '}}';
+			if ( '__ask' === token ) {
+				var nm = window.prompt( 'Name of the value to ask for when sending (e.g. LLC name)' ), slug = ( nm || '' ).toLowerCase().replace( /[^a-z0-9]+/g, '_' ).replace( /^_+|_+$/g, '' );
+				if ( ! slug ) { return; }
+				fill = '{{ask.' + slug + '}}';
+			}
+			dropAt( 'text', cx, cy, fill );
 		}
 		layer.addEventListener( 'pointerdown', function ( e ) {
 			if ( e.target !== layer ) { return; }
 			if ( ! tool ) { sel = null; paint(); renderInsp(); return; }
+			if ( 0 === tool.indexOf( 'merge:' ) ) { dropMerge( tool.slice( 6 ), e.clientX, e.clientY ); return; }
 			dropAt( tool, e.clientX, e.clientY );
 		} );
 		layer.addEventListener( 'dragover', function ( e ) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; layer.classList.add( 'drop' ); } );
@@ -225,7 +250,7 @@
 		layer.addEventListener( 'drop', function ( e ) {
 			e.preventDefault(); layer.classList.remove( 'drop' );
 			var d = e.dataTransfer.getData( 'text/plain' ) || '';
-			if ( 0 === d.indexOf( 'ajfe:' ) ) { dropAt( d.slice( 5 ), e.clientX, e.clientY ); }
+			if ( 0 === d.indexOf( 'ajfe:merge:' ) ) { dropMerge( d.slice( 11 ), e.clientX, e.clientY ); } else if ( 0 === d.indexOf( 'ajfe:' ) ) { dropAt( d.slice( 5 ), e.clientX, e.clientY ); }
 		} );
 
 		// ── pages ────────────────────────────────────────────────────────────────

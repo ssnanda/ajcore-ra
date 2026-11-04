@@ -2558,7 +2558,9 @@ class AJCore_RA_Esign {
 				if ( '' === $doc_id ) {
 					continue;
 				}
-				$counts['seen']++;
+				if ( ! isset( $st['seen'][ $doc_id ] ) ) { // a page re-read after a rate-limit pause must not count twice
+					$counts['seen']++;
+				}
 				$st['seen'][ $doc_id ] = 1;
 				if ( $since_ts ) { // automatic runs only look at recent documents
 					$created = strtotime( (string) ( $doc['created_at'] ?? $doc['sent_at'] ?? '' ) );
@@ -3623,13 +3625,15 @@ class AJCore_RA_Esign {
 				mk( 'Undo', cmd( 'undo' ) ); mk( 'Redo', cmd( 'redo' ) );
 				side.innerHTML = '';
 				if ( top ) { side.appendChild( top ); }
-				side.insertAdjacentHTML( 'beforeend', '<h4>Fields — drag into the page</h4>' );
+				var own = document.createElement( 'div' ); own.className = 'ajfe-own'; side.appendChild( own );
+				own.insertAdjacentHTML( 'beforeend', '<h4>Fields — drag into the page</h4><input type="search" class="ajra-fsearch" placeholder="Search fields…">' );
+				own.querySelector( '.ajra-fsearch' ).addEventListener( 'input', function () { var q = this.value.toLowerCase().trim(); own.querySelectorAll( '.ajfe-chip' ).forEach( function ( c ) { c.style.display = ! q || c.textContent.toLowerCase().indexOf( q ) >= 0 ? '' : 'none'; } ); } );
 				Object.keys( mergeFields ).forEach( function ( k ) {
 					var c = document.createElement( 'button' ); c.type = 'button'; c.className = 'ajfe-chip'; c.draggable = true; c.textContent = mergeFields[ k ]; c.title = '{{' + k + '}}';
 					c.addEventListener( 'dragstart', function ( e ) { e.dataTransfer.setData( 'text/plain', '{{' + k + '}}' ); e.dataTransfer.effectAllowed = 'copy'; } );
 					c.addEventListener( 'mousedown', function ( e ) { e.preventDefault(); } );
 					c.addEventListener( 'click', function () { ed.focus(); document.execCommand( 'insertText', false, '{{' + k + '}}' ); } );
-					side.appendChild( c );
+					own.appendChild( c );
 				} );
 				return ed;
 			}
