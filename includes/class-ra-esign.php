@@ -28,6 +28,7 @@ class AJCore_RA_Esign {
 	const SHARED_ROW     = 'ajcore_breezedoc_settings'; // shared-DB row: master publishes, other sites read
 	const IGNORED_ROW    = 'ajcore_breezedoc_ignored';  // BreezeDoc ids deleted from the local log (imports skip them)
 	const CRON_HOOK      = 'ajcore_ra_esign_auto_import';
+	const TPL_OPTION     = 'ajcore_ra_esign_templates'; // AJCore-native templates (PDF + signer roles + signature page)
 	const SIGNED_DONE_ROW = 'ajcore_breezedoc_signed_done'; // documents whose signed copy was already emailed / filed
 
 	/** @var array<string,callable> */
@@ -594,6 +595,13 @@ class AJCore_RA_Esign {
 			}
 			$all = array_merge( $all, $list );
 		}
+		foreach ( $this->local_templates() as $meta ) {
+			$shape = $this->local_template_shape( $meta );
+			if ( $has_team || $has_pat ) {
+				$shape['title'] .= __( ' (AJCore)', 'ajcore-ra' );
+			}
+			$all[] = $shape;
+		}
 		if ( empty( $all ) && ! empty( $errors ) ) {
 			return $errors[0];
 		}
@@ -602,6 +610,10 @@ class AJCore_RA_Esign {
 
 	public function breezedoc_get_template( $template_id ) {
 		$template_id = sanitize_text_field( (string) $template_id );
+		if ( 0 === strpos( $template_id, 'ajt_' ) ) {
+			$all = $this->local_templates();
+			return isset( $all[ $template_id ] ) ? $this->local_template_shape( $all[ $template_id ] ) : new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+		}
 		if ( 0 === strpos( $template_id, 'tpl_' ) ) {
 			$result = $this->breezedoc_api_request( 'GET', '/v1/templates/' . rawurlencode( $template_id ) );
 		} else {
@@ -730,6 +742,9 @@ class AJCore_RA_Esign {
 			return $recipients;
 		}
 
+		if ( 0 === strpos( $template_id, 'ajt_' ) ) {
+			return $this->send_local_template( $template_id, $stripe_customer_id, $recipients, $options );
+		}
 		if ( 0 !== strpos( $template_id, 'tpl_' ) ) {
 			return $this->send_esign_document_legacy( absint( $template_id ), $stripe_customer_id, $recipients );
 		}
@@ -988,6 +1003,144 @@ class AJCore_RA_Esign {
 				return is_wp_error( $result ) ? $result : array( 'events' => (array) ( $result['data'] ?? array() ) );
 		}
 		return new WP_Error( 'bad_action', __( 'Unknown action.', 'ajcore-ra' ), array( 'status' => 400 ) );
+	}
+
+	// ── AJCore templates (our own; BreezeDoc templates cannot be created through its API) ──
+
+	private function tpl_dir() {
+		$u   = wp_upload_dir();
+		$dir = trailingslashit( $u['basedir'] ) . 'ajcore-ra-esign-templates';
+		if ( ! is_dir( $dir ) && wp_mkdir_p( $dir ) ) {
+			file_put_contents( $dir . '/.htaccess', "Deny from all\n<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+			file_put_contents( $dir . '/index.php', "<?php // Silence is golden.\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+		}
+		return $dir;
+	}
+
+	/** @return array<string,array> id => meta (title, file, filename, signers[], page, created) */
+	private function local_templates() {
+		$list = get_option( self::TPL_OPTION, array() );
+		return is_array( $list ) ? $list : array();
+	}
+
+	private function local_template_shape( array $meta ) {
+		$recipients = array();
+		foreach ( array_values( (array) $meta['signers'] ) as $i => $role ) {
+			$recipients[] = array( 'party' => $i + 1, 'name' => '', 'email' => '', 'completedAt' => '', 'viewedAt' => '', 'role' => (string) $role );
+		}
+		return array(
+			'id'         => (string) $meta['id'],
+			'title'      => (string) $meta['title'],
+			'rawTitle'   => (string) $meta['title'],
+			'source'     => 'ajcore',
+			'page'       => (int) ( $meta['page'] ?? 0 ),
+			'recipients' => $recipients,
+			'fields'     => array(),
+		);
+	}
+
+	/**
+	 * Creates or updates an AJCore template. $file is a $_FILES-style array (required when creating).
+	 * $signers: role labels in signing order (Party 1, 2, …). $page: 0 = last page.
+	 */
+	public function save_local_template( $id, $title, $signers, $page, $file = null ) {
+		$title   = mb_substr( sanitize_text_field( (string) $title ), 0, 191 );
+		$signers = array_values( array_filter( array_map( static function ( $r ) {
+			return mb_substr( sanitize_text_field( (string) $r ), 0, 80 );
+		}, (array) $signers ), static function ( $r ) {
+			return '' !== $r;
+		} ) );
+		if ( '' === $title ) {
+			return new WP_Error( 'no_title', __( 'Give the template a name.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		if ( empty( $signers ) ) {
+			$signers = array( __( 'Signer', 'ajcore-ra' ) );
+		}
+		$all      = $this->local_templates();
+		$id       = (string) $id;
+		$existing = isset( $all[ $id ] ) ? $all[ $id ] : null;
+		if ( '' !== $id && ! $existing ) {
+			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+		}
+		$has_file = is_array( $file ) && ! empty( $file['tmp_name'] ) && empty( $file['error'] );
+		if ( ! $existing && ! $has_file ) {
+			return new WP_Error( 'no_file', __( 'Choose the template PDF.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$meta = $existing ? $existing : array( 'id' => 'ajt_' . strtolower( wp_generate_password( 10, false ) ), 'created' => current_time( 'mysql' ) );
+		if ( $has_file ) {
+			if ( filesize( $file['tmp_name'] ) > 25 * MB_IN_BYTES ) {
+				return new WP_Error( 'file_too_large', __( 'PDF must be 25 MB or smaller.', 'ajcore-ra' ), array( 'status' => 400 ) );
+			}
+			$head = (string) file_get_contents( $file['tmp_name'], false, null, 0, 1024 );
+			if ( 0 !== strpos( ltrim( $head ), '%PDF-' ) ) {
+				return new WP_Error( 'not_pdf', __( 'That file is not a PDF.', 'ajcore-ra' ), array( 'status' => 400 ) );
+			}
+			$dir = $this->tpl_dir();
+			if ( ! is_dir( $dir ) || ! is_writable( $dir ) ) {
+				return new WP_Error( 'no_dir', __( 'Could not store the template file (uploads folder is not writable).', 'ajcore-ra' ), array( 'status' => 500 ) );
+			}
+			$stored = $meta['id'] . '.pdf';
+			if ( ! ( is_uploaded_file( $file['tmp_name'] ) ? move_uploaded_file( $file['tmp_name'], $dir . '/' . $stored ) : copy( $file['tmp_name'], $dir . '/' . $stored ) ) ) {
+				return new WP_Error( 'store_failed', __( 'Could not store the template file.', 'ajcore-ra' ), array( 'status' => 500 ) );
+			}
+			$meta['file']     = $stored;
+			$meta['filename'] = sanitize_file_name( (string) ( $file['name'] ?? $stored ) );
+		}
+		$meta['title']   = $title;
+		$meta['signers'] = $signers;
+		$meta['page']    = max( 0, (int) $page );
+		$all[ $meta['id'] ] = $meta;
+		update_option( self::TPL_OPTION, $all, false );
+		return $this->local_template_shape( $meta );
+	}
+
+	/** Really deletes an AJCore template and its stored PDF. */
+	public function delete_local_template( $id ) {
+		$all = $this->local_templates();
+		$id  = (string) $id;
+		if ( ! isset( $all[ $id ] ) ) {
+			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+		}
+		$path = $this->tpl_dir() . '/' . basename( (string) $all[ $id ]['file'] );
+		if ( is_file( $path ) ) {
+			unlink( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
+		}
+		unset( $all[ $id ] );
+		update_option( self::TPL_OPTION, $all, false );
+		return array( 'deleted' => 1 );
+	}
+
+	/** Sends an AJCore template: its stored PDF goes through the Team API upload with a signature + date box per signer. */
+	private function send_local_template( $template_id, $stripe_customer_id, array $recipients, array $options ) {
+		$all = $this->local_templates();
+		if ( ! isset( $all[ $template_id ] ) ) {
+			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+		}
+		$meta = $all[ $template_id ];
+		$path = $this->tpl_dir() . '/' . basename( (string) $meta['file'] );
+		if ( ! is_readable( $path ) ) {
+			return new WP_Error( 'file_missing', __( 'The template PDF is missing — edit the template and upload it again.', 'ajcore-ra' ), array( 'status' => 404 ) );
+		}
+		return $this->send_esign_pdf( array( 'tmp_name' => $path, 'name' => (string) $meta['filename'], 'error' => 0 ), (string) $meta['title'], $stripe_customer_id, $recipients, (int) $meta['page'], $options );
+	}
+
+	/** Streams a template PDF (admin only). */
+	public function stream_local_template( $id ) {
+		$all = $this->local_templates();
+		$id  = (string) $id;
+		if ( ! isset( $all[ $id ] ) ) {
+			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+		}
+		$path = $this->tpl_dir() . '/' . basename( (string) $all[ $id ]['file'] );
+		if ( ! is_readable( $path ) ) {
+			return new WP_Error( 'file_missing', __( 'The template PDF is missing.', 'ajcore-ra' ), array( 'status' => 404 ) );
+		}
+		nocache_headers();
+		header( 'Content-Type: application/pdf' );
+		header( 'Content-Disposition: inline; filename="' . str_replace( '"', '', (string) $all[ $id ]['filename'] ) . '"' );
+		header( 'Content-Length: ' . filesize( $path ) );
+		readfile( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_readfile
+		exit;
 	}
 
 	/** Every http(s) URL found anywhere in a decoded API value. @return string[] */
@@ -1854,6 +2007,9 @@ class AJCore_RA_Esign {
 		};
 		$catalog[] = $e( 'GET', '/ops/esign/test', 'Tests the BreezeDoc Team API key (or legacy Personal token).' );
 		$catalog[] = $e( 'GET', '/ops/esign/templates', 'Lists BreezeDoc templates (id, title, numbered signer parties).' );
+		$catalog[] = $e( 'POST', '/ops/esign/templates/save', 'Creates or updates an AJCore template (multipart: id?, title, signers[] role labels, page, pdf). AJCore templates are sent through the PDF upload (Team key).' );
+		$catalog[] = $e( 'POST', '/ops/esign/templates/delete', 'Deletes an AJCore template and its stored PDF (body: id).' );
+		$catalog[] = $e( 'GET', '/ops/esign/templates/{id}/file', 'Streams an AJCore template PDF.' );
 		$catalog[] = $e( 'GET', '/ops/esign/templates/{id}', 'Fetches one BreezeDoc template with its signer parties.' );
 		$catalog[] = $e( 'POST', '/ops/esign/send', 'Creates a document from a template (template_id, recipients[{party,name,email}], optional signing_order/message/expires_in_days/title), sends it, logs it.' );
 		$catalog[] = $e( 'POST', '/ops/esign/send-pdf', 'Multipart: uploads a PDF (pdf, recipients JSON, stripe_customer_id, title, page, message, expires_in_days), places signature+date fields per signer, sends, logs it. Team API key only.' );
@@ -1899,6 +2055,9 @@ class AJCore_RA_Esign {
 				'/test'                      => array( $r, 'rest_test' ),
 				'/templates'                 => array( $r, 'rest_templates' ),
 				'/templates/' . $tpl_re      => array( $r, 'rest_template' ),
+				'/templates/' . $tpl_re . '/file' => array( $r, 'rest_template_file' ),
+				'/templates/save'            => array( 'POST', 'rest_template_save' ),
+				'/templates/delete'          => array( 'POST', 'rest_template_delete' ),
 				'/send'                      => array( 'POST', 'rest_send' ),
 				'/send-pdf'                  => array( 'POST', 'rest_send_pdf' ),
 				'/documents'                 => array( $r, 'rest_documents' ),
@@ -1944,6 +2103,24 @@ class AJCore_RA_Esign {
 	public function rest_templates() {
 		$result = $this->breezedoc_list_templates();
 		return is_wp_error( $result ) ? $result : rest_ensure_response( array( 'templates' => $result ) );
+	}
+
+	public function rest_template_save( WP_REST_Request $request ) {
+		$files   = $request->get_file_params();
+		$signers = $request->get_param( 'signers' );
+		if ( is_string( $signers ) ) {
+			$decoded = json_decode( $signers, true );
+			$signers = is_array( $decoded ) ? $decoded : array( $signers );
+		}
+		return $this->rest_result( $this->save_local_template( sanitize_text_field( (string) $request->get_param( 'id' ) ), (string) $request->get_param( 'title' ), (array) $signers, (int) $request->get_param( 'page' ), $files['pdf'] ?? null ) );
+	}
+
+	public function rest_template_delete( WP_REST_Request $request ) {
+		return $this->rest_result( $this->delete_local_template( sanitize_text_field( (string) $request->get_param( 'id' ) ) ) );
+	}
+
+	public function rest_template_file( WP_REST_Request $request ) {
+		return $this->stream_local_template( (string) $request['id'] ); // streams and exits, or returns a WP_Error
 	}
 
 	public function rest_template( WP_REST_Request $request ) {
@@ -2350,10 +2527,26 @@ class AJCore_RA_Esign {
 			<div class="ajra-card" id="ajra-es-tpl-card" data-view="templates">
 				<div class="ajra-head">
 					<h2><?php esc_html_e( 'Templates', 'ajcore-ra' ); ?> <span class="ajra-muted" id="ajra-es-tpl-count"></span></h2>
-					<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer"><?php esc_html_e( 'Create / upload in BreezeDoc', 'ajcore-ra' ); ?></a>
+					<span>
+						<button type="button" class="button button-primary button-small" id="ajra-es-tpl-new"><?php esc_html_e( 'Create template', 'ajcore-ra' ); ?></button>
+						<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" title="<?php esc_attr_e( 'Templates made in BreezeDoc itself', 'ajcore-ra' ); ?>"><?php esc_html_e( 'Create in BreezeDoc', 'ajcore-ra' ); ?></a>
+					</span>
+				</div>
+				<div id="ajra-es-tpl-editor" style="display:none;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 14px;margin:0 0 12px">
+					<div class="ajra-err" id="ajra-es-tpl-err"></div>
+					<div class="ajra-grid">
+						<div><label><?php esc_html_e( 'Template name', 'ajcore-ra' ); ?></label><input type="text" id="ajra-es-tpl-title" maxlength="191"></div>
+						<div><label id="ajra-es-tpl-pdf-label"><?php esc_html_e( 'PDF (max 25 MB)', 'ajcore-ra' ); ?></label><input type="file" id="ajra-es-tpl-pdf" accept="application/pdf,.pdf"></div>
+					</div>
+					<div style="margin-top:10px"><label><?php esc_html_e( 'Signers, in signing order (role labels)', 'ajcore-ra' ); ?></label><div id="ajra-es-tpl-signers"></div>
+						<button type="button" class="button button-small" id="ajra-es-tpl-addsigner"><?php esc_html_e( '+ Add signer', 'ajcore-ra' ); ?></button></div>
+					<div style="margin-top:10px;max-width:260px"><label><?php esc_html_e( 'Signature page', 'ajcore-ra' ); ?></label><input type="number" id="ajra-es-tpl-page" min="1" placeholder="<?php esc_attr_e( 'blank = last page', 'ajcore-ra' ); ?>"></div>
+					<p class="ajra-muted" style="margin:8px 0"><?php esc_html_e( 'When sent, a signature box and a date box are placed for each signer near the bottom of that page. Sending a template needs the Team API key.', 'ajcore-ra' ); ?></p>
+					<button type="button" class="button button-primary" id="ajra-es-tpl-save"><?php esc_html_e( 'Save template', 'ajcore-ra' ); ?></button>
+					<button type="button" class="button" id="ajra-es-tpl-cancel"><?php esc_html_e( 'Cancel', 'ajcore-ra' ); ?></button>
 				</div>
 				<div id="ajra-es-tpl-list"></div>
-				<p class="ajra-muted" style="margin:10px 0 0"><?php esc_html_e( 'BreezeDoc does not let other apps create, edit or delete templates. Use Edit or Create to open BreezeDoc (Templates page); changes show here after a reload.', 'ajcore-ra' ); ?></p>
+				<p class="ajra-muted" style="margin:10px 0 0"><?php esc_html_e( 'AJCore templates live in AJCore and can be created, edited and deleted here. BreezeDoc\'s own templates can only be created, edited or deleted in BreezeDoc.', 'ajcore-ra' ); ?></p>
 			</div>
 			<?php endif; ?>
 
@@ -2566,6 +2759,41 @@ class AJCore_RA_Esign {
 				} ).catch( function ( e ) { out.style.color = '#b32d2e'; out.textContent = e.message; } ).finally( function () { lnk.disabled = false; } );
 			} ); }
 
+			// AJCore template editor (create / edit): name, PDF, signer role labels, signature page.
+			var editingTpl = '';
+			function tplSignerRow( value ) {
+				var d = document.createElement( 'div' ); d.className = 'ajra-row';
+				d.innerHTML = '<input type="text" class="ajra-es-tpl-signer" maxlength="80" placeholder="Role, e.g. Client" value="' + esc( value ) + '"><button type="button" class="button button-small" data-x>×</button>';
+				d.querySelector( '[data-x]' ).addEventListener( 'click', function () { d.remove(); } );
+				$( 'ajra-es-tpl-signers' ).appendChild( d );
+			}
+			function openTplEditor( t ) {
+				editingTpl = t ? t.id : '';
+				$( 'ajra-es-tpl-title' ).value = t ? ( t.rawTitle || t.title ) : '';
+				$( 'ajra-es-tpl-pdf' ).value = '';
+				$( 'ajra-es-tpl-pdf-label' ).textContent = t ? 'Replace PDF (leave empty to keep the current one)' : 'PDF (max 25 MB)';
+				$( 'ajra-es-tpl-page' ).value = t && t.page ? t.page : '';
+				$( 'ajra-es-tpl-signers' ).innerHTML = '';
+				( t && t.recipients && t.recipients.length ? t.recipients.map( function ( r ) { return r.role || ''; } ) : [ 'Client' ] ).forEach( tplSignerRow );
+				$( 'ajra-es-tpl-err' ).style.display = 'none';
+				$( 'ajra-es-tpl-editor' ).style.display = 'block';
+				$( 'ajra-es-tpl-title' ).focus();
+			}
+			if ( $( 'ajra-es-tpl-new' ) ) {
+				$( 'ajra-es-tpl-new' ).addEventListener( 'click', function () { openTplEditor( null ); } );
+				$( 'ajra-es-tpl-addsigner' ).addEventListener( 'click', function () { tplSignerRow( '' ); } );
+				$( 'ajra-es-tpl-cancel' ).addEventListener( 'click', function () { $( 'ajra-es-tpl-editor' ).style.display = 'none'; } );
+				$( 'ajra-es-tpl-save' ).addEventListener( 'click', function () {
+					var err = $( 'ajra-es-tpl-err' ), btn = $( 'ajra-es-tpl-save' ), fd = new FormData(), f = $( 'ajra-es-tpl-pdf' ).files[0];
+					var signers = Array.prototype.map.call( document.querySelectorAll( '.ajra-es-tpl-signer' ), function ( i ) { return i.value.trim(); } ).filter( Boolean );
+					fd.append( 'id', editingTpl ); fd.append( 'title', $( 'ajra-es-tpl-title' ).value ); fd.append( 'signers', JSON.stringify( signers ) ); fd.append( 'page', $( 'ajra-es-tpl-page' ).value || 0 );
+					if ( f ) { fd.append( 'pdf', f ); }
+					btn.disabled = true;
+					api( '/templates/save', { method: 'POST', body: fd } ).then( function () { window.location.reload(); } )
+						.catch( function ( e ) { err.style.display = 'block'; err.textContent = e.message; btn.disabled = false; } );
+				} );
+			}
+
 			// Templates panel: use, inspect signers/fields, jump into BreezeDoc to edit.
 			var tplList = $( 'ajra-es-tpl-list' );
 			if ( tplList ) {
@@ -2573,12 +2801,16 @@ class AJCore_RA_Esign {
 				if ( ! templates.length ) { tplList.innerHTML = '<div class="ajra-empty">No templates yet — create one in BreezeDoc.</div>'; }
 				templates.forEach( function ( t ) {
 					var row = document.createElement( 'div' ); row.className = 'ajra-tpl';
-					var src = String( t.id ).indexOf( 'tpl_' ) === 0 ? 'team' : 'personal';
+					var local = 'ajcore' === t.source, src = local ? 'ajcore' : ( String( t.id ).indexOf( 'tpl_' ) === 0 ? 'team' : 'personal' );
 					row.innerHTML = '<div class="t">' + esc( t.title || t.id ) + '<span class="ajra-tag">' + src + '</span> <span class="ajra-muted">' + ( t.recipients ? t.recipients.length : 0 ) + ' signer(s)</span></div>' +
 						'<button type="button" class="button button-small" data-tpl-use>Use template</button>' +
-						'<button type="button" class="button button-small" data-tpl-detail>Details</button>' +
-						'<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" title="Open BreezeDoc, then Templates → Edit">Edit in BreezeDoc</a>' +
-						'<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" style="color:#b32d2e" title="BreezeDoc has no delete for other apps: open BreezeDoc, then Templates → Delete">Delete in BreezeDoc</a>';
+						( local
+							? '<a class="button button-small" target="_blank" rel="noopener noreferrer" href="' + esc( base + '/templates/' + encodeURIComponent( t.id ) + '/file?_wpnonce=' + encodeURIComponent( nonce ) ) + '">Preview</a>' +
+								'<button type="button" class="button button-small" data-tpl-edit>Edit</button>' +
+								'<button type="button" class="button button-small" data-tpl-del style="color:#b32d2e">Delete</button>'
+							: '<button type="button" class="button button-small" data-tpl-detail>Details</button>' +
+								'<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" title="Open BreezeDoc, then Templates → Edit">Edit in BreezeDoc</a>' +
+								'<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" style="color:#b32d2e" title="BreezeDoc has no delete for other apps: open BreezeDoc, then Templates → Delete">Delete in BreezeDoc</a>' );
 					row.querySelector( '[data-tpl-use]' ).addEventListener( 'click', function () {
 						var form = $( 'ajra-es-template' ); if ( ! form ) { return; }
 						setView( 'new' );
@@ -2586,7 +2818,16 @@ class AJCore_RA_Esign {
 						form.value = t.id; form.dispatchEvent( new Event( 'change' ) );
 						form.scrollIntoView( { behavior: 'smooth', block: 'center' } );
 					} );
-					row.querySelector( '[data-tpl-detail]' ).addEventListener( 'click', function ( ev ) {
+					var detailBtn = row.querySelector( '[data-tpl-detail]' );
+					if ( local ) {
+						row.querySelector( '[data-tpl-edit]' ).addEventListener( 'click', function () { openTplEditor( t ); } );
+						row.querySelector( '[data-tpl-del]' ).addEventListener( 'click', function () {
+							if ( ! window.confirm( 'Delete the template "' + ( t.rawTitle || t.title ) + '" and its PDF? This cannot be undone.' ) ) { return; }
+							api( '/templates/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { id: t.id } ) } )
+								.then( function () { window.location.reload(); } ).catch( function ( e ) { window.alert( e.message ); } );
+						} );
+					}
+					if ( detailBtn ) { detailBtn.addEventListener( 'click', function ( ev ) {
 						var btn = ev.target, existing = row.querySelector( '.ajra-tpl-detail' );
 						if ( existing ) { existing.remove(); return; }
 						btn.disabled = true;
@@ -2599,7 +2840,7 @@ class AJCore_RA_Esign {
 							box.innerHTML = ( html || 'BreezeDoc returned no signer or field details for this template.' ) + '<div class="ajra-muted" style="margin-top:6px">' + fields.length + ' field(s) in total. Template text and layout can only be seen or changed in BreezeDoc.</div>';
 							row.appendChild( box );
 						} ).catch( function ( e ) { window.alert( e.message ); } ).finally( function () { btn.disabled = false; } );
-					} );
+					} ); }
 					tplList.appendChild( row );
 				} );
 			}
@@ -2714,14 +2955,14 @@ class AJCore_RA_Esign {
 			fillCustomers();
 			templates.forEach( function ( t ) { var o = document.createElement( 'option' ); o.value = t.id; o.textContent = t.title || t.id; tpl.appendChild( o ); } );
 
-			function row( party, name, email, first ) {
-				return '<div class="ajra-row ajra-es-r" data-party="' + party + '"><span class="ajra-muted" style="width:50px">Party ' + party + '</span>' +
+			function row( party, name, email, first, role ) {
+				return '<div class="ajra-row ajra-es-r" data-party="' + party + '"><span class="ajra-muted" style="width:90px">' + esc( role || ( 'Party ' + party ) ) + '</span>' +
 					'<input type="text" class="n" placeholder="Name" value="' + esc( name ) + '"><input type="email" class="e" placeholder="Email" value="' + esc( email ) + '">' +
 					( first ? '<button type="button" class="button button-small ajra-es-use">Use customer</button>' : '' ) +
 					( 'pdf' === mode && ! first ? '<button type="button" class="button button-small ajra-es-del">×</button>' : '' ) + '</div>';
 			}
 			function renderRecipients( list ) {
-				box.innerHTML = ( list.length ? '<label>Signers (in signing order)</label>' : '' ) + list.map( function ( r, i ) { return row( r.party || i + 1, r.name, r.email, 0 === i ); } ).join( '' );
+				box.innerHTML = ( list.length ? '<label>Signers (in signing order)</label>' : '' ) + list.map( function ( r, i ) { return row( r.party || i + 1, r.name, r.email, 0 === i, r.role ); } ).join( '' );
 				$( 'ajra-es-add-wrap' ).style.display = 'pdf' === mode ? 'block' : 'none';
 				updateSend();
 			}
