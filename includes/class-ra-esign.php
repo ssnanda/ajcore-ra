@@ -814,6 +814,10 @@ class AJCore_RA_Esign {
 				if ( $f['party'] > count( $recipients ) ) {
 					continue;
 				}
+				if ( 'checkbox' === $f['type'] && $f['checked'] ) { // ticked by the sender: printed on the PDF as a bold X
+					$stamps[] = $f + array( 'value' => 'X' );
+					continue;
+				}
 				if ( '' !== $f['fill'] && in_array( $f['type'], array( 'text', 'email', 'date', 'checkbox' ), true ) ) {
 					$val = trim( $this->merge_text( $f['fill'], $values ) );
 					if ( '' !== $val ) {
@@ -1504,6 +1508,7 @@ class AJCore_RA_Esign {
 				'w'     => $w,
 				'h'     => $h,
 				'fill'  => mb_substr( sanitize_text_field( (string) ( $f['fill'] ?? '' ) ), 0, 300 ),
+				'checked' => ! empty( $f['checked'] ),
 			);
 			if ( count( $out ) >= 400 ) {
 				break;

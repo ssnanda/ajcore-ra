@@ -22,8 +22,8 @@
 	'use strict';
 
 	var TYPES = [
-		[ 'signature', 'Signature', 160, 34 ], [ 'initials', 'Initials', 50, 22 ], [ 'text', 'Text', 160, 16 ],
-		[ 'email', 'Email', 160, 16 ], [ 'date', 'Date', 90, 16 ], [ 'checkbox', 'Checkbox', 13, 13 ]
+		[ 'signature', 'Signature', 180, 36 ], [ 'initials', 'Initials', 60, 28 ], [ 'text', 'Text', 160, 14 ],
+		[ 'email', 'Email', 160, 14 ], [ 'date', 'Date', 90, 14 ], [ 'checkbox', 'Checkbox', 12, 12 ]
 	];
 	var COLORS = [ '#4f46e5', '#059669', '#d97706', '#db2777', '#0891b2', '#7c3aed' ];
 	var CSS = '' +
@@ -61,15 +61,15 @@
 		return n;
 	}
 	function round( n ) { return Math.round( n * 10000 ) / 10000; }
-	// A small pill instead of the full-width chip while dragging.
-	function dragGhost( e, label ) {
-		var g = el( 'div', { text: label } );
-		g.style.cssText = 'position:fixed;top:-100px;left:-100px;padding:3px 10px;background:#4f46e5;color:#fff;font:600 12px system-ui,sans-serif;border-radius:6px;white-space:nowrap';
-		document.body.appendChild( g );
-		try { e.dataTransfer.setDragImage( g, 8, 12 ); } catch ( err ) { /* browser default */ }
-		setTimeout( function () { g.remove(); }, 0 );
+	// Default size (pt) of the text box a customer / company field drops as: names 180, addresses 260, dates 90.
+	function tokenSize( tok ) {
+		var t = String( tok || '' ).toLowerCase();
+		if ( /address|street/.test( t ) ) { return [ 260, 14 ]; }
+		if ( /(^|\.|_)name$|individual_name|business_name/.test( t ) || '__ask' === t ) { return [ 180, 14 ]; }
+		if ( 0 === t.indexOf( 'date' ) ) { return [ 90, 14 ]; }
+		return [ 160, 14 ];
 	}
-	function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: round( f.x ), y: round( f.y ), w: round( f.w ), h: round( f.h ), fill: f.fill || '' }; }
+function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: round( f.x ), y: round( f.y ), w: round( f.w ), h: round( f.h ), fill: f.fill || '', checked: !! f.checked }; }
 	function color( p ) { return COLORS[ ( p - 1 ) % COLORS.length ]; }
 
 	function loadPdfjs( base, cb, fail ) {
@@ -108,7 +108,11 @@
 		var prev = el( 'button', { text: '◀', title: 'Previous page' } ), next = el( 'button', { text: '▶', title: 'Next page' } ), pgLabel = el( 'span', { text: 'Page 1' } );
 		var detect = el( 'button', { text: 'Auto-detect blanks', title: 'Suggest text and checkbox fields from underscores, lines and squares' } );
 		var clearPg = el( 'button', { text: 'Clear page', cls: 'dng' } ), count = el( 'span', { cls: 'ajfe-hint' } );
-		bar.appendChild( prev ); bar.appendChild( pgLabel ); bar.appendChild( next ); bar.appendChild( detect ); bar.appendChild( clearPg );
+		var partySel = el( 'select', { title: 'Signer for new fields — and for the selected field' } ), addSg = el( 'button', { text: '+ Signer', title: 'Another person who signs this document' } ), rmSg = el( 'button', { text: '−', title: 'Remove the last signer' } );
+		partySel.style.maxWidth = '180px';
+		bar.appendChild( prev ); bar.appendChild( pgLabel ); bar.appendChild( next ); bar.appendChild( partySel );
+		if ( ! opts.lockSigners ) { bar.appendChild( addSg ); bar.appendChild( rmSg ); } // otherwise the host's signer rows decide who signs
+		bar.appendChild( detect ); bar.appendChild( clearPg );
 		bar.appendChild( el( 'span', { cls: 'sp' } ) );
 		if ( opts.resolveValues ) {
 			var pvLabel = el( 'label', { title: 'Show the real customer values on the page, as they will print. You can still drag, drop and edit.' } ), pvBox = el( 'input', { type: 'checkbox' } );
@@ -118,52 +122,72 @@
 		}
 		bar.appendChild( count );
 
-		// ── right panel: palette + signer + inspector ────────────────────────────
-		var palette = el( 'div' ), chips = {};
+		// ── right panel: one field palette (signer fields + customer & company) with one search ──
+		var chips = {}, mChips = {}, dragging = null;
 		if ( opts.sideTop ) { side.appendChild( opts.sideTop ); }
 		var own = el( 'div', { cls: 'ajfe-own' } ); side.appendChild( own );
 		function section( title, open ) { var d = el( 'details' ); if ( open ) { d.setAttribute( 'open', '' ); } d.appendChild( el( 'summary', { text: title } ) ); return d; }
-		var addSec = section( 'Add fields — drag onto the page', true );
+		function canvasScale() { return canvas.width && pageW ? canvas.width / pageW : 1; }
+		// The drag image is the real field: same size as it will be on the page, at the page's current zoom, held by its centre.
+		function ghost( e, wpt, hpt, label, isBox ) {
+			var sc = canvasScale(), c = color( parseInt( partySel.value, 10 ) || 1 ), g = el( 'div', { text: isBox ? '' : label } );
+			g.style.cssText = 'position:fixed;top:-600px;left:-600px;box-sizing:border-box;width:' + wpt * sc + 'px;height:' + hpt * sc + 'px;border:1.5px solid ' + c + ';background:' + c + '33;color:' + c + ';border-radius:3px;font:10px/1 system-ui,sans-serif;display:flex;align-items:center;padding:0 3px;overflow:hidden;white-space:nowrap';
+			document.body.appendChild( g );
+			try { e.dataTransfer.setDragImage( g, wpt * sc / 2, hpt * sc / 2 ); } catch ( err ) { /* browser default */ }
+			setTimeout( function () { g.remove(); }, 0 );
+			dragging = { w: wpt, h: hpt };
+		}
+		var fieldsSec = section( 'Fields — drag onto the page', true );
+		var searchAll = el( 'input', { type: 'search', placeholder: 'Search fields…' } );
+		searchAll.style.margin = '4px 0 8px'; fieldsSec.appendChild( searchAll );
+		var grpA = el( 'div' ), grpB = el( 'div' ), palette = el( 'div' ), mList = el( 'div', { cls: 'ajfe-mlist' } );
+		mList.style.maxHeight = '260px';
+		function groupLabel( t ) { var h = el( 'h4', { text: t } ); h.style.margin = '4px 0 6px'; return h; }
 		TYPES.forEach( function ( t ) {
 			var c = el( 'button', { cls: 'ajfe-chip', draggable: 'true', title: 'Drag onto the page, or click then click the page' } );
-			c.appendChild( el( 'i' ) ); c.appendChild( el( 'span', { text: t[1] } ) );
-			c.addEventListener( 'dragstart', function ( e ) { e.dataTransfer.setData( 'text/plain', 'ajfe:' + t[0] ); e.dataTransfer.effectAllowed = 'copy'; dragGhost( e, t[1] ); } );
+			c.appendChild( el( 'i' ) ); c.appendChild( el( 'span', { text: t[1] } ) ); c.setAttribute( 'data-label', t[1].toLowerCase() );
+			c.addEventListener( 'dragstart', function ( e ) { e.dataTransfer.setData( 'text/plain', 'ajfe:' + t[0] ); e.dataTransfer.effectAllowed = 'copy'; ghost( e, t[2], t[3], t[1], 'checkbox' === t[0] ); } );
+			c.addEventListener( 'dragend', function () { dragging = null; hideHint(); } );
 			c.addEventListener( 'click', function () { setTool( tool === t[0] ? '' : t[0] ); } );
 			chips[ t[0] ] = c; palette.appendChild( c ); palette.lastChild.style.marginBottom = '4px';
 		} );
-		addSec.appendChild( palette );
-		var partyWrap = el( 'div' ), partySel = el( 'select' );
-		partyWrap.appendChild( el( 'h4', { text: 'New fields are for' } ) ); partyWrap.appendChild( partySel );
-		var sgRow = el( 'div' ), addSg = el( 'button', { text: '+ Add signer', title: 'Another person who signs this document' } ), rmSg = el( 'button', { text: '− Remove last' } );
-		sgRow.style.cssText = 'display:flex;gap:6px;margin-top:6px'; sgRow.appendChild( addSg ); sgRow.appendChild( rmSg ); partyWrap.appendChild( sgRow ); addSec.appendChild( partyWrap ); own.appendChild( addSec );
-		if ( opts.lockSigners ) { sgRow.style.display = 'none'; } // the host's signer rows decide who signs
-		addSg.addEventListener( 'click', function () { signers.push( 'Signer ' + ( signers.length + 1 ) ); renderSigners(); renderInsp(); changed(); partySel.value = String( signers.length ); renderSigners(); } );
-		rmSg.addEventListener( 'click', function () {
-			if ( signers.length < 2 ) { return; }
-			if ( fields.some( function ( f ) { return f.party === signers.length; } ) ) { window.alert( 'Signer ' + signers.length + ' still has fields on the page. Delete or reassign them first.' ); return; }
-			signers.pop(); renderSigners(); renderInsp(); changed();
-		} );
-		// Customer / company fields: drag one onto the page to drop a text box already filled with it.
-		var mWrap = section( 'Customer & company fields — drag onto the page', true ), mSearch = el( 'input', { type: 'search', placeholder: 'Search customer & company fields…' } ), mList = el( 'div', { cls: 'ajfe-mlist' } ), mChips = {};
-		mSearch.style.margin = '6px 0'; mWrap.appendChild( mSearch ); mWrap.appendChild( mList );
 		var mEntries = [ [ '__ask', 'Ask when sending…' ] ].concat( Object.keys( merge ).map( function ( k ) { return [ k, merge[ k ] ]; } ) );
 		mEntries.forEach( function ( m ) {
 			var c = el( 'button', { cls: 'ajfe-chip', draggable: 'true', title: '__ask' === m[0] ? 'A value you type in each time you send' : '{{' + m[0] + '}}' } );
-			c.appendChild( el( 'span', { text: m[1] } ) ); c.setAttribute( 'data-label', m[1].toLowerCase() );
-			c.addEventListener( 'dragstart', function ( e ) { e.dataTransfer.setData( 'text/plain', 'ajfe:merge:' + m[0] ); e.dataTransfer.effectAllowed = 'copy'; dragGhost( e, m[1] ); } );
+			c.appendChild( el( 'span', { text: m[1] } ) ); c.setAttribute( 'data-label', m[1].toLowerCase() + ' ' + m[0].toLowerCase() );
+			c.addEventListener( 'dragstart', function ( e ) { var sz = tokenSize( m[0] ); e.dataTransfer.setData( 'text/plain', 'ajfe:merge:' + m[0] ); e.dataTransfer.effectAllowed = 'copy'; ghost( e, sz[0], sz[1], m[1], false ); } );
+			c.addEventListener( 'dragend', function () { dragging = null; hideHint(); } );
 			c.addEventListener( 'click', function () { setTool( tool === 'merge:' + m[0] ? '' : 'merge:' + m[0] ); } );
 			mChips[ m[0] ] = c; mList.appendChild( c );
 		} );
-		mSearch.addEventListener( 'input', function () { var q = mSearch.value.toLowerCase().trim(); Object.keys( mChips ).forEach( function ( k ) { mChips[ k ].style.display = ! q || mChips[ k ].getAttribute( 'data-label' ).indexOf( q ) >= 0 ? '' : 'none'; } ); } );
-		own.appendChild( mWrap );
+		grpA.appendChild( groupLabel( 'Signer fields' ) ); grpA.appendChild( palette ); grpB.appendChild( groupLabel( 'Customer & company' ) ); grpB.appendChild( mList );
+		fieldsSec.appendChild( grpA ); fieldsSec.appendChild( grpB ); own.appendChild( fieldsSec );
+		searchAll.addEventListener( 'input', function () {
+			var q = searchAll.value.toLowerCase().trim(), na = 0, nb = 0;
+			Object.keys( chips ).forEach( function ( k ) { var ok = ! q || chips[ k ].getAttribute( 'data-label' ).indexOf( q ) >= 0; chips[ k ].style.display = ok ? '' : 'none'; if ( ok ) { na++; } } );
+			Object.keys( mChips ).forEach( function ( k ) { var ok = ! q || mChips[ k ].getAttribute( 'data-label' ).indexOf( q ) >= 0; mChips[ k ].style.display = ok ? '' : 'none'; if ( ok ) { nb++; } } );
+			grpA.style.display = na ? '' : 'none'; grpB.style.display = nb ? '' : 'none';
+		} );
 		var insp = el( 'div' ); own.insertBefore( insp, own.firstChild ); // the selected field sits at the top of the panel
+
+		// Signer picker (top bar): new fields go to this signer, and picking a field shows / changes its signer.
 		function renderSigners() {
 			var cur = partySel.value; partySel.innerHTML = '';
 			signers.forEach( function ( r, i ) { partySel.appendChild( el( 'option', { value: String( i + 1 ), text: ( i + 1 ) + '. ' + ( r || 'Signer' ) } ) ); } );
 			if ( cur && parseInt( cur, 10 ) <= signers.length ) { partySel.value = cur; }
 			TYPES.forEach( function ( t ) { chips[ t[0] ].firstChild.style.background = color( parseInt( partySel.value, 10 ) || 1 ); } );
 		}
-		partySel.addEventListener( 'change', renderSigners );
+		function syncSignerSel() { if ( sel ) { partySel.value = String( sel.party ); renderSigners(); } }
+		partySel.addEventListener( 'change', function () {
+			if ( sel ) { sel.party = parseInt( partySel.value, 10 ) || 1; paint(); changed(); }
+			renderSigners();
+		} );
+		addSg.addEventListener( 'click', function () { signers.push( 'Signer ' + ( signers.length + 1 ) ); renderSigners(); partySel.value = String( signers.length ); renderSigners(); renderInsp(); changed(); } );
+		rmSg.addEventListener( 'click', function () {
+			if ( signers.length < 2 ) { return; }
+			if ( fields.some( function ( f ) { return f.party === signers.length; } ) ) { window.alert( 'Signer ' + signers.length + ' still has fields on the page. Delete or reassign them first.' ); return; }
+			signers.pop(); renderSigners(); renderInsp(); changed();
+		} );
 		function setTool( t ) {
 			tool = t;
 			Object.keys( chips ).forEach( function ( k ) { chips[ k ].classList.toggle( 'on', k === t ); } );
@@ -181,13 +205,17 @@
 			var typeSel = el( 'select' );
 			TYPES.forEach( function ( t ) { var o = el( 'option', { value: t[0], text: t[1] } ); if ( t[0] === sel.type ) { o.selected = true; } typeSel.appendChild( o ); } );
 			typeSel.addEventListener( 'change', function () { sel.type = typeSel.value; paint(); renderInsp(); changed(); } );
-			var pSel = el( 'select' );
-			signers.forEach( function ( r, i ) { var o = el( 'option', { value: String( i + 1 ), text: ( i + 1 ) + '. ' + ( r || 'Signer' ) } ); if ( i + 1 === sel.party ) { o.selected = true; } pSel.appendChild( o ); } );
-			pSel.addEventListener( 'change', function () { sel.party = parseInt( pSel.value, 10 ); paint(); changed(); } );
-			[ typeSel, pSel ].forEach( function ( n ) { n.style.marginBottom = '6px'; insp.appendChild( n ); } );
+			typeSel.style.marginBottom = '6px'; insp.appendChild( typeSel );
+			if ( 'checkbox' === sel.type ) {
+				var ckl = el( 'label' ), ck = el( 'input', { type: 'checkbox' } );
+				ckl.style.cssText = 'display:flex;align-items:center;gap:6px;font-weight:600;margin-bottom:6px;cursor:pointer'; ck.style.cssText = 'width:auto;height:auto'; ck.checked = !! sel.checked;
+				ckl.appendChild( ck ); ckl.appendChild( document.createTextNode( 'Checked' ) );
+				ck.addEventListener( 'change', function () { sel.checked = ck.checked; paint(); changed(); } );
+				insp.appendChild( ckl );
+			}
 			if ( 'signature' !== sel.type && 'initials' !== sel.type ) {
-				insp.appendChild( el( 'h4', { text: 'Fill with' } ) );
-				var fill = el( 'input', { type: 'text', placeholder: 'empty = signer fills in', value: sel.fill || '' } );
+				insp.appendChild( el( 'h4', { text: 'checkbox' === sel.type ? 'Check when…' : 'Fill with' } ) );
+				var fill = el( 'input', { type: 'text', placeholder: 'checkbox' === sel.type ? 'optional value' : 'empty = signer fills in', value: sel.fill || '' } );
 				fill.addEventListener( 'input', function () { sel.fill = fill.value; paint(); changed(); } );
 				function insertToken( k ) {
 					var add = '{{' + k + '}}';
@@ -211,7 +239,6 @@
 					found.style.display = n ? '' : 'none';
 				} );
 				fill.style.marginBottom = '6px'; insp.appendChild( fill ); insp.appendChild( pick ); insp.appendChild( found );
-				insp.appendChild( el( 'p', { cls: 'ajfe-hint', text: 'Filled boxes are printed on the PDF when you send. Empty boxes are filled by the signer.' + ( 'checkbox' === sel.type ? ' Any value ticks the box.' : '' ) } ) );
 			}
 			var del = el( 'button', { text: 'Delete field', cls: 'dng' } ); del.style.marginTop = '6px'; del.addEventListener( 'click', removeSel ); insp.appendChild( del );
 		}
@@ -233,10 +260,11 @@
 				var c = color( f.party ), b = el( 'div', { cls: 'ajfe-box' + ( f === sel ? ' sel' : '' ) } );
 				b.style.cssText = 'left:' + f.x * 100 + '%;top:' + f.y * 100 + '%;width:' + f.w * 100 + '%;height:' + f.h * 100 + '%;border-color:' + c + ';background:' + c + '22;color:' + c;
 				var label = ( TYPES.filter( function ( t ) { return t[0] === f.type; } )[0] || [ '', f.type ] )[1];
-				if ( 'checkbox' === f.type ) { label = ''; }
+				if ( 'checkbox' === f.type ) { label = f.checked ? '✓' : ''; }
 				if ( 'checkbox' === f.type && ! ( previewMode && f.fill ) ) { b.style.padding = '0'; b.style.background = c + '1a'; }
-				var pvText = previewMode && f.fill && 'signature' !== f.type && 'initials' !== f.type ? resolveText( f.fill ).trim() : null;
-				if ( previewMode && f.fill && 'signature' !== f.type && 'initials' !== f.type ) { // live view: the value as it will be printed
+				var showVals = previewMode && ( f.fill || ( 'checkbox' === f.type && f.checked ) ) && 'signature' !== f.type && 'initials' !== f.type;
+				var pvText = showVals ? ( 'checkbox' === f.type && f.checked ? 'X' : resolveText( f.fill ).trim() ) : null;
+				if ( showVals ) { // live view: the value as it will be printed
 					var scale = canvas.width / pageW, hpt = f.h * pageH, wpt = f.w * pageW, fpt = hpt < 13 ? Math.max( 8, hpt * 0.85 ) : 11;
 					b.style.background = 'transparent'; b.style.color = '#000'; b.style.borderStyle = 'dashed'; b.style.borderColor = c + '88';
 					b.style.fontFamily = '"Times New Roman",Times,serif'; b.style.padding = '0 2px'; b.style.alignItems = 'flex-end';
@@ -251,22 +279,28 @@
 						b.appendChild( el( 'span', { text: pvText } ) );
 					}
 					else { var em = el( 'span', { text: 'signer fills in' } ); em.style.cssText = 'color:#94a3b8;font-style:italic;font-size:9px'; b.appendChild( em ); }
-				} else {
-					b.appendChild( el( 'span', { text: label } ) );
-					if ( f.fill ) { b.appendChild( el( 'i', { text: f.fill } ) ); }
-				}
+					} else {
+						var lb = el( 'span', { text: label } ); if ( 'checkbox' === f.type ) { lb.style.cssText = 'display:block;width:100%;text-align:center;font-weight:700;font-size:11px'; }
+						b.appendChild( lb );
+						if ( f.fill && 'checkbox' !== f.type ) { b.appendChild( el( 'i', { text: f.fill } ) ); }
+					}
 				var rz = el( 'span', { cls: 'rz' } ); b.appendChild( rz );
 				b.addEventListener( 'pointerdown', function ( e ) {
 					e.stopPropagation(); e.preventDefault();
-					var resizing = e.target === rz, sx = e.clientX, sy = e.clientY, ox = f.x, oy = f.y, ow = f.w, oh = f.h, W = wrap.clientWidth, H = wrap.clientHeight, moved = false;
-					if ( sel !== f ) { sel = f; renderInsp(); layer.querySelectorAll( '.sel' ).forEach( function ( n ) { n.classList.remove( 'sel' ); } ); b.classList.add( 'sel' ); }
+						var resizing = e.target === rz, sx = e.clientX, sy = e.clientY, ox = f.x, oy = f.y, ow = f.w, oh = f.h, W = wrap.clientWidth, H = wrap.clientHeight, moved = false, wasSel = sel === f;
+						if ( sel !== f ) { sel = f; renderInsp(); syncSignerSel(); layer.querySelectorAll( '.sel' ).forEach( function ( n ) { n.classList.remove( 'sel' ); } ); b.classList.add( 'sel' ); }
 					function mv( ev ) {
+						if ( ! moved && Math.abs( ev.clientX - sx ) + Math.abs( ev.clientY - sy ) < 3 ) { return; } // a click, not a drag
 						var dx = ( ev.clientX - sx ) / W, dy = ( ev.clientY - sy ) / H; moved = true;
 						if ( resizing && 'checkbox' === f.type ) { f.w = Math.max( 0.012, Math.min( 1 - f.x, ow + dx ) ); f.h = Math.min( 1 - f.y, f.w * pageW / pageH ); f.w = f.h * pageH / pageW; b.style.width = f.w * 100 + '%'; b.style.height = f.h * 100 + '%'; }
 						else if ( resizing ) { f.w = Math.max( 0.008, Math.min( 1 - f.x, ow + dx ) ); f.h = Math.max( 0.006, Math.min( 1 - f.y, oh + dy ) ); b.style.width = f.w * 100 + '%'; b.style.height = f.h * 100 + '%'; }
 						else { f.x = Math.max( 0, Math.min( 1 - f.w, ox + dx ) ); f.y = Math.max( 0, Math.min( 1 - f.h, oy + dy ) ); b.style.left = f.x * 100 + '%'; b.style.top = f.y * 100 + '%'; }
 					}
-					function up() { document.removeEventListener( 'pointermove', mv ); document.removeEventListener( 'pointerup', up ); if ( moved ) { updateCount(); changed(); } }
+						function up() {
+							document.removeEventListener( 'pointermove', mv ); document.removeEventListener( 'pointerup', up );
+							if ( moved ) { updateCount(); changed(); }
+							else if ( ! resizing && wasSel && 'checkbox' === f.type ) { f.checked = ! f.checked; paint(); renderInsp(); changed(); } // clicking the selected checkbox ticks it
+						}
 					document.addEventListener( 'pointermove', mv ); document.addEventListener( 'pointerup', up );
 				} );
 				layer.appendChild( b );
@@ -277,11 +311,24 @@
 			var onPage = fields.filter( function ( f ) { return f.page === pageNo; } ).length;
 			count.textContent = fields.length + ' field(s) · ' + onPage + ' on this page';
 		}
-		function dropAt( type, clientX, clientY, fillText ) {
+		// Where a field of w × h pt lands for a cursor position: centred on the cursor, which is where the drag image was held.
+		function placeAt( clientX, clientY, wpt, hpt ) {
+			var r = layer.getBoundingClientRect(), w = wpt / pageW, h = hpt / pageH;
+			return { w: w, h: h, x: Math.max( 0, Math.min( 1 - w, ( clientX - r.left ) / r.width - w / 2 ) ), y: Math.max( 0, Math.min( 1 - h, ( clientY - r.top ) / r.height - h / 2 ) ) };
+		}
+		var hint = null;
+		function showHint( clientX, clientY ) {
+			if ( ! dragging ) { return; }
+			var p = placeAt( clientX, clientY, dragging.w, dragging.h );
+			if ( ! hint ) { hint = el( 'div' ); hint.style.cssText = 'position:absolute;pointer-events:none;box-sizing:border-box;border:1.5px dashed #4f46e5;background:rgba(79,70,229,.12);border-radius:3px;z-index:3'; }
+			if ( hint.parentNode !== layer ) { layer.appendChild( hint ); }
+			hint.style.left = p.x * 100 + '%'; hint.style.top = p.y * 100 + '%'; hint.style.width = p.w * 100 + '%'; hint.style.height = p.h * 100 + '%';
+		}
+		function hideHint() { if ( hint && hint.parentNode ) { hint.parentNode.removeChild( hint ); } }
+		function dropAt( type, clientX, clientY, fillText, sizePt ) {
 			var t = TYPES.filter( function ( x ) { return x[0] === type; } )[0]; if ( ! t ) { return; }
-			var r = layer.getBoundingClientRect(), w = t[2] / pageW, h = t[3] / pageH;
-			var x = Math.max( 0, Math.min( 1 - w, ( clientX - r.left ) / r.width - w / 2 ) ), y = Math.max( 0, Math.min( 1 - h, ( clientY - r.top ) / r.height - h / 2 ) );
-			var f = { type: type, party: parseInt( partySel.value, 10 ) || 1, page: pageNo, x: x, y: y, w: w, h: h, fill: fillText || '' };
+			var sz = sizePt || [ t[2], t[3] ], p = placeAt( clientX, clientY, sz[0], sz[1] );
+			var f = { type: type, party: parseInt( partySel.value, 10 ) || 1, page: pageNo, x: p.x, y: p.y, w: p.w, h: p.h, fill: fillText || '', checked: false };
 			fields.push( f ); sel = f; paint(); renderInsp(); changed();
 		}
 		function dropMerge( token, cx, cy ) {
@@ -291,7 +338,7 @@
 				if ( ! slug ) { return; }
 				fill = '{{ask.' + slug + '}}';
 			}
-			dropAt( 'text', cx, cy, fill );
+			dropAt( 'text', cx, cy, fill, tokenSize( token ) );
 		}
 		layer.addEventListener( 'pointerdown', function ( e ) {
 			if ( e.target !== layer ) { return; }
@@ -299,10 +346,10 @@
 			if ( 0 === tool.indexOf( 'merge:' ) ) { dropMerge( tool.slice( 6 ), e.clientX, e.clientY ); return; }
 			dropAt( tool, e.clientX, e.clientY );
 		} );
-		layer.addEventListener( 'dragover', function ( e ) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; layer.classList.add( 'drop' ); } );
-		layer.addEventListener( 'dragleave', function () { layer.classList.remove( 'drop' ); } );
+		layer.addEventListener( 'dragover', function ( e ) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; layer.classList.add( 'drop' ); showHint( e.clientX, e.clientY ); } );
+		layer.addEventListener( 'dragleave', function () { layer.classList.remove( 'drop' ); hideHint(); } );
 		layer.addEventListener( 'drop', function ( e ) {
-			e.preventDefault(); layer.classList.remove( 'drop' );
+			e.preventDefault(); layer.classList.remove( 'drop' ); hideHint(); dragging = null;
 			var d = e.dataTransfer.getData( 'text/plain' ) || '';
 			if ( 0 === d.indexOf( 'ajfe:merge:' ) ) { dropMerge( d.slice( 11 ), e.clientX, e.clientY ); } else if ( 0 === d.indexOf( 'ajfe:' ) ) { dropAt( d.slice( 5 ), e.clientX, e.clientY ); }
 		} );
