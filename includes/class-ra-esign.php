@@ -200,7 +200,11 @@ class AJCore_RA_Esign {
 		}
 		if ( isset( $_POST['esign_auto_import'] ) ) {
 			$freq             = sanitize_key( wp_unslash( $_POST['esign_auto_import'] ) );
-			$opt['auto_import'] = in_array( $freq, array( 'off', 'hourly', 'twicedaily', 'daily' ), true ) ? $freq : 'off';
+			$new_freq         = in_array( $freq, array( 'off', 'hourly', 'twicedaily', 'daily' ), true ) ? $freq : 'off';
+			if ( 'off' !== $new_freq && 'off' === ( $opt['auto_import'] ?? 'off' ) ) {
+				$opt['auto_since'] = time() - 2 * DAY_IN_SECONDS;
+			}
+			$opt['auto_import'] = $new_freq;
 		}
 		$opt['migrated'] = 1;
 		update_option( self::OPTION, $opt, false );
@@ -290,26 +294,34 @@ class AJCore_RA_Esign {
 
 	public function get_esign_documents_list() {
 		if ( ! $this->ensure_esign_documents_table() ) {
-			return array( 'documents' => array(), 'stats' => array( 'total' => 0, 'sent' => 0, 'completed' => 0 ) );
+			return array( 'documents' => array(), 'deleted' => array(), 'stats' => array( 'total' => 0, 'sent' => 0, 'completed' => 0 ) );
 		}
 		$pdb   = $this->get_pdb();
 		$table = $this->get_esign_documents_table();
-		// Rows parked by the short-lived "Deleted" view are finished off: removed, and never re-imported.
-		$parked = (array) $pdb->get_col( "SELECT breezedoc_document_id FROM `{$table}` WHERE status LIKE 'deleted:%'" );
-		if ( $parked ) {
-			$this->ignore_ids( $parked );
-			$pdb->query( "DELETE FROM `{$table}` WHERE status LIKE 'deleted:%'" );
+		// One-time removal of the earlier hidden "skip list" — Delete now just moves rows to Deleted.
+		if ( ! $this->opt( 'skiplist_cleared', 0 ) ) {
+			$this->clear_ids( self::IGNORED_ROW );
+			delete_option( self::IGNORED_ROW );
+			$o                     = get_option( self::OPTION, array() );
+			$o                     = is_array( $o ) ? $o : array();
+			$o['skiplist_cleared'] = 1;
+			update_option( self::OPTION, $o, false );
 		}
 		$rows = $pdb->get_results( "SELECT * FROM `{$table}` ORDER BY created_at DESC LIMIT 800" );
 
 		$documents = array();
+		$deleted   = array();
 		$stats     = array( 'total' => 0, 'sent' => 0, 'completed' => 0 );
 		foreach ( $rows as $row ) {
+			if ( 0 === strpos( (string) $row->status, 'deleted:' ) ) {
+				$deleted[] = $this->format_esign_document_row( $row );
+				continue;
+			}
 			$documents[] = $this->format_esign_document_row( $row );
 			$stats['total']++;
 			'completed' === $row->status ? $stats['completed']++ : $stats['sent']++;
 		}
-		return array( 'documents' => $documents, 'stats' => $stats );
+		return array( 'documents' => $documents, 'deleted' => $deleted, 'stats' => $stats );
 	}
 
 	// ── BreezeDoc API ───────────────────────────────────────────────────────────
@@ -1275,8 +1287,13 @@ class AJCore_RA_Esign {
 		$cursor   = (string) ( $opt['auto_cursor'] ?? '' );
 		$summary  = array( 'seen' => 0, 'imported' => 0, 'linked' => 0 );
 		$deadline = time() + 40;
+		$run_at   = time();
+		$since    = (int) ( $opt['auto_since'] ?? 0 );
+		if ( ! $since ) {
+			$since = $run_at - 2 * DAY_IN_SECONDS;
+		}
 		for ( $i = 0; $i < 6 && time() < $deadline; $i++ ) {
-			$r = $esign->import_documents( $cursor, false );
+			$r = $esign->import_documents( $cursor, false, $since );
 			if ( is_wp_error( $r ) ) {
 				$summary['error'] = $r->get_error_message();
 				break;
@@ -1301,6 +1318,11 @@ class AJCore_RA_Esign {
 		$opt['auto_cursor']     = $cursor;
 		$opt['auto_link_after'] = $link_after;
 		$opt['auto_last']       = array( 'at' => current_time( 'mysql' ), 'summary' => $summary );
+		if ( '' === $cursor && empty( $summary['error'] ) ) {
+			$opt['auto_since'] = $run_at - 2 * DAY_IN_SECONDS; // finished a full pass: next run only needs what is newer
+		} elseif ( empty( $opt['auto_since'] ) ) {
+			$opt['auto_since'] = $since;
+		}
 		update_option( self::OPTION, $opt, false );
 	}
 
@@ -1495,15 +1517,6 @@ class AJCore_RA_Esign {
 
 	// ── deleting local copies ───────────────────────────────────────────────────
 
-	/** BreezeDoc ids removed from the local log; imports skip them so they don't come back. @return string[] */
-	private function ignored_ids() {
-		return $this->id_list( self::IGNORED_ROW );
-	}
-
-	private function ignore_ids( array $doc_ids ) {
-		$this->add_ids( self::IGNORED_ROW, $doc_ids );
-	}
-
 	/** A persisted list of ids: shared-DB row when sharing is on, else a site option. @return string[] */
 	private function id_list( $row_name ) {
 		if ( self::is_shared() ) {
@@ -1529,13 +1542,6 @@ class AJCore_RA_Esign {
 		delete_option( $row_name );
 	}
 
-	/** Forgets documents deleted from the local list so the next import brings them back. */
-	public function restore_deleted_documents() {
-		$count = count( $this->ignored_ids() );
-		$this->clear_ids( self::IGNORED_ROW );
-		return array( 'restored' => $count );
-	}
-
 	private function add_ids( $row_name, array $ids ) {
 		$all     = array_slice( array_values( array_unique( array_merge( $this->id_list( $row_name ), array_map( 'strval', $ids ) ) ) ), -5000 );
 		$encoded = wp_json_encode( $all );
@@ -1558,7 +1564,7 @@ class AJCore_RA_Esign {
 		return array_values( array_unique( array_filter( array_map( 'absint', (array) $ids ) ) ) );
 	}
 
-	/** Deletes log rows (this site's list only — nothing changes in BreezeDoc) and remembers their ids so imports skip them. */
+	/** Moves rows to Deleted (status "deleted:<previous>"). This portal only — nothing changes in BreezeDoc. */
 	public function delete_logged_documents( $ids ) {
 		$ids = $this->selected_ids( $ids );
 		if ( empty( $ids ) ) {
@@ -1570,10 +1576,37 @@ class AJCore_RA_Esign {
 		$pdb   = $this->get_pdb();
 		$table = $this->get_esign_documents_table();
 		$list  = implode( ',', $ids ); // integers only
-		$docs  = (array) $pdb->get_col( "SELECT breezedoc_document_id FROM `{$table}` WHERE id IN ({$list})" );
-		$this->ignore_ids( $docs );
-		$pdb->query( "DELETE FROM `{$table}` WHERE id IN ({$list})" );
-		return array( 'deleted' => count( $docs ) );
+		return array( 'deleted' => (int) $pdb->query( "UPDATE `{$table}` SET status = CONCAT('deleted:', LEFT(status, 20)), updated_at = NOW() WHERE id IN ({$list}) AND status NOT LIKE 'deleted:%'" ) );
+	}
+
+	/** Puts rows from Deleted back with their previous status. */
+	public function restore_logged_documents( $ids ) {
+		$ids = $this->selected_ids( $ids );
+		if ( empty( $ids ) ) {
+			return new WP_Error( 'no_selection', __( 'Select at least one document.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		if ( ! $this->ensure_esign_documents_table() ) {
+			return new WP_Error( 'no_table', __( 'E-Signatures log table could not be created.', 'ajcore-ra' ) );
+		}
+		$pdb   = $this->get_pdb();
+		$table = $this->get_esign_documents_table();
+		$list  = implode( ',', $ids );
+		return array( 'restored' => (int) $pdb->query( "UPDATE `{$table}` SET status = IF(SUBSTRING(status, 9) = '', 'sent', SUBSTRING(status, 9)), updated_at = NOW() WHERE id IN ({$list}) AND status LIKE 'deleted:%'" ) );
+	}
+
+	/** Really deletes rows that are in Deleted. Nothing is remembered. */
+	public function purge_logged_documents( $ids ) {
+		$ids = $this->selected_ids( $ids );
+		if ( empty( $ids ) ) {
+			return new WP_Error( 'no_selection', __( 'Select at least one document.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		if ( ! $this->ensure_esign_documents_table() ) {
+			return new WP_Error( 'no_table', __( 'E-Signatures log table could not be created.', 'ajcore-ra' ) );
+		}
+		$pdb   = $this->get_pdb();
+		$table = $this->get_esign_documents_table();
+		$list  = implode( ',', $ids );
+		return array( 'purged' => (int) $pdb->query( "DELETE FROM `{$table}` WHERE id IN ({$list}) AND status LIKE 'deleted:%'" ) );
 	}
 
 	/** Raw recipient arrays for one document (legacy numeric id → /documents/{id}/recipients, doc_… → /v1/documents/{id}). */
@@ -1687,7 +1720,7 @@ class AJCore_RA_Esign {
 	 * imported; drafts are always skipped. Processes up to 300 documents per call and returns
 	 * next_cursor ("p:N" = your own documents, page N) so the caller can continue.
 	 */
-	public function import_documents( $cursor = '', $include_unmatched = false ) {
+	public function import_documents( $cursor = '', $include_unmatched = false, $since_ts = 0 ) {
 		if ( ! $this->breezedoc_is_connected() ) {
 			return new WP_Error( 'breezedoc_not_configured', __( 'Import needs a BreezeDoc Team API key or Personal token.', 'ajcore-ra' ), array( 'status' => 400 ) );
 		}
@@ -1698,7 +1731,6 @@ class AJCore_RA_Esign {
 		$table  = $this->get_esign_documents_table();
 		$map    = $this->customer_email_map();
 		$names  = $this->customer_name_index();
-		$ignored = array_flip( $this->ignored_ids() );
 		$fetch_budget = 25; // signer lookups per call (BreezeDoc allows 60 requests/minute)
 		$counts = array( 'imported' => 0, 'existing' => 0, 'unmatched' => 0, 'drafts' => 0, 'seen' => 0 );
 		$cursor = sanitize_text_field( (string) $cursor );
@@ -1730,8 +1762,11 @@ class AJCore_RA_Esign {
 					continue;
 				}
 				$counts['seen']++;
-				if ( isset( $ignored[ $doc_id ] ) ) {
-					continue; // deleted from the local log on purpose
+				if ( $since_ts ) { // automatic runs only look at recent documents
+					$created = strtotime( (string) ( $doc['created_at'] ?? $doc['sent_at'] ?? '' ) );
+					if ( $created && $created < $since_ts ) {
+						continue;
+					}
 				}
 				if ( $pdb->get_var( $pdb->prepare( "SELECT id FROM `{$table}` WHERE breezedoc_document_id = %s", $doc_id ) ) ) {
 					$counts['existing']++;
@@ -1823,8 +1858,9 @@ class AJCore_RA_Esign {
 		$catalog[] = $e( 'POST', '/ops/esign/send', 'Creates a document from a template (template_id, recipients[{party,name,email}], optional signing_order/message/expires_in_days/title), sends it, logs it.' );
 		$catalog[] = $e( 'POST', '/ops/esign/send-pdf', 'Multipart: uploads a PDF (pdf, recipients JSON, stripe_customer_id, title, page, message, expires_in_days), places signature+date fields per signer, sends, logs it. Team API key only.' );
 		$catalog[] = $e( 'GET', '/ops/esign/documents', 'Local log of sent signature requests with their last-known status.' );
-		$catalog[] = $e( 'POST', '/ops/esign/documents/restore', 'Allows re-import: clears the list of documents deleted from the local log so the next import brings them back.' );
-		$catalog[] = $e( 'POST', '/ops/esign/documents/delete', 'Deletes log rows (body: ids) from this portal only — nothing changes in BreezeDoc. The ids are remembered so imports skip them until you allow re-import.' );
+		$catalog[] = $e( 'POST', '/ops/esign/documents/restore-rows', 'Restores documents from Deleted (body: ids).' );
+		$catalog[] = $e( 'POST', '/ops/esign/documents/purge', 'Permanently deletes documents that are in Deleted (body: ids). Nothing is remembered and nothing changes in BreezeDoc.' );
+		$catalog[] = $e( 'POST', '/ops/esign/documents/delete', 'Moves log rows (body: ids) to Deleted — this portal only, nothing changes in BreezeDoc. Restore them or delete them permanently from Deleted.' );
 		$catalog[] = $e( 'GET', '/ops/esign/settings', 'Auto-import frequency, last automatic run, and which BreezeDoc credentials are saved.' );
 		$catalog[] = $e( 'POST', '/ops/esign/settings/save', 'Sets the auto-import frequency (auto_import: off|hourly|twicedaily|daily). Master site only.' );
 		$catalog[] = $e( 'POST', '/ops/esign/link', 'Links logged documents that have no customer yet: by signer email, then by a customer name in the title (after_id, 25 per call).' );
@@ -1871,7 +1907,8 @@ class AJCore_RA_Esign {
 				'/settings'                  => array( $r, 'rest_settings' ),
 				'/settings/save'             => array( 'POST', 'rest_settings_save' ),
 				'/documents/delete'          => array( 'POST', 'rest_delete_documents' ),
-				'/documents/restore'         => array( 'POST', 'rest_restore_documents' ),
+				'/documents/restore-rows'    => array( 'POST', 'rest_restore_rows' ),
+				'/documents/purge'           => array( 'POST', 'rest_purge_documents' ),
 				'/diagnose'                  => array( $r, 'rest_diagnose' ),
 				'/documents/' . $id_re . '/' . $act_rw => array( 'POST', 'rest_document_action' ),
 				'/documents/' . $id_re . '/' . $act_ro => array( $r, 'rest_document_action' ),
@@ -1955,8 +1992,12 @@ class AJCore_RA_Esign {
 		);
 	}
 
-	public function rest_restore_documents() {
-		return $this->rest_result( $this->restore_deleted_documents() );
+	public function rest_restore_rows( WP_REST_Request $request ) {
+		return $this->rest_result( $this->restore_logged_documents( (array) $request->get_param( 'ids' ) ) );
+	}
+
+	public function rest_purge_documents( WP_REST_Request $request ) {
+		return $this->rest_result( $this->purge_logged_documents( (array) $request->get_param( 'ids' ) ) );
 	}
 
 	public function rest_delete_documents( WP_REST_Request $request ) {
@@ -1986,7 +2027,6 @@ class AJCore_RA_Esign {
 		return rest_ensure_response(
 			array(
 				'autoImport' => (string) ( $opt['auto_import'] ?? 'off' ),
-				'ignoredCount' => count( $this->ignored_ids() ),
 				'notifyOnSend' => ! empty( $opt['notify_on_send'] ),
 				'signedCopy'   => (string) ( $opt['signed_copy'] ?? 'off' ),
 				'fileSigned'   => ! empty( $opt['file_signed'] ),
@@ -2007,7 +2047,11 @@ class AJCore_RA_Esign {
 		$opt  = is_array( $opt ) ? $opt : array();
 		if ( null !== $request->get_param( 'auto_import' ) ) {
 			$freq               = sanitize_key( (string) $request->get_param( 'auto_import' ) );
-			$opt['auto_import'] = in_array( $freq, array( 'off', 'hourly', 'twicedaily', 'daily' ), true ) ? $freq : 'off';
+			$new_freq           = in_array( $freq, array( 'off', 'hourly', 'twicedaily', 'daily' ), true ) ? $freq : 'off';
+			if ( 'off' !== $new_freq && 'off' === ( $opt['auto_import'] ?? 'off' ) ) {
+				$opt['auto_since'] = time() - 2 * DAY_IN_SECONDS;
+			}
+			$opt['auto_import'] = $new_freq;
 		}
 		if ( null !== $request->get_param( 'notify_on_send' ) ) {
 			$opt['notify_on_send'] = filter_var( $request->get_param( 'notify_on_send' ), FILTER_VALIDATE_BOOLEAN ) ? 1 : 0;
@@ -2100,12 +2144,15 @@ class AJCore_RA_Esign {
 		$hook   = $this->breezedoc_webhook_status();
 		$labels = array( 'draft' => __( 'Draft', 'ajcore-ra' ), 'sent' => __( 'Awaiting signature', 'ajcore-ra' ), 'completed' => __( 'Completed', 'ajcore-ra' ), 'cancelled' => __( 'Cancelled', 'ajcore-ra' ), 'expired' => __( 'Expired', 'ajcore-ra' ) );
 		$group  = static function ( $status ) {
+			if ( 0 === strpos( (string) $status, 'deleted:' ) ) {
+				return 'deleted';
+			}
 			if ( 'draft' === $status ) {
 				return 'draft';
 			}
 			return 'completed' === $status ? 'completed' : ( in_array( $status, array( 'cancelled', 'expired' ), true ) ? 'closed' : 'sent' );
 		};
-		$counts = array( 'all' => count( $log['documents'] ), 'sent' => 0, 'draft' => 0, 'completed' => 0, 'closed' => 0 );
+		$counts = array( 'all' => count( $log['documents'] ), 'sent' => 0, 'draft' => 0, 'completed' => 0, 'closed' => 0, 'deleted' => count( (array) ( $log['deleted'] ?? array() ) ) );
 		foreach ( $log['documents'] as $doc ) {
 			$counts[ $group( $doc['status'] ) ]++;
 		}
@@ -2331,7 +2378,6 @@ class AJCore_RA_Esign {
 						<span style="text-align:right">
 							<button type="button" class="button button-small" id="ajra-es-import"><?php esc_html_e( 'Import from BreezeDoc', 'ajcore-ra' ); ?></button>
 							<button type="button" class="button button-small" id="ajra-es-link"><?php esc_html_e( 'Link customers', 'ajcore-ra' ); ?></button>
-							<?php $ignored_n = count( $this->ignored_ids() ); if ( $ignored_n ) : ?><button type="button" class="button button-small" id="ajra-es-restore"><?php echo esc_html( sprintf( /* translators: %d: count */ __( 'Allow re-import of deleted (%d)', 'ajcore-ra' ), $ignored_n ) ); ?></button><?php endif; ?>
 							<label style="display:block;font-weight:400;margin-top:3px"><input type="checkbox" id="ajra-es-import-all"> <?php esc_html_e( 'include documents not matching a customer', 'ajcore-ra' ); ?></label>
 							<span class="ajra-muted" id="ajra-es-import-out"></span>
 						</span>
@@ -2344,14 +2390,19 @@ class AJCore_RA_Esign {
 						<a data-f="draft"><?php echo esc_html( sprintf( '%s %d', __( 'Drafts', 'ajcore-ra' ), $counts['draft'] ) ); ?></a>
 						<a data-f="completed"><?php echo esc_html( sprintf( '%s %d', __( 'Completed', 'ajcore-ra' ), $counts['completed'] ) ); ?></a>
 						<a data-f="closed"><?php echo esc_html( sprintf( '%s %d', __( 'Closed', 'ajcore-ra' ), $counts['closed'] ) ); ?></a>
+						<a data-f="deleted"><?php echo esc_html( sprintf( '%s %d', __( 'Deleted', 'ajcore-ra' ), $counts['deleted'] ) ); ?></a>
 					</div>
 					<button type="button" class="button button-small" id="ajra-es-del" disabled><?php esc_html_e( 'Delete selected', 'ajcore-ra' ); ?></button>
+					<button type="button" class="button button-small" id="ajra-es-restore-rows" style="display:none" disabled><?php esc_html_e( 'Restore selected', 'ajcore-ra' ); ?></button>
+					<button type="button" class="button button-small" id="ajra-es-purge" style="display:none;color:#b32d2e" disabled><?php esc_html_e( 'Delete permanently', 'ajcore-ra' ); ?></button>
 					<input type="search" id="ajra-es-log-q" placeholder="<?php esc_attr_e( 'Search customer or document…', 'ajcore-ra' ); ?>">
 				</div>
 				<table class="widefat striped">
 					<thead><tr><th style="width:28px"><input type="checkbox" id="ajra-es-sel-all" aria-label="<?php esc_attr_e( 'Select all', 'ajcore-ra' ); ?>"></th><th><?php esc_html_e( 'Customer', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Document', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Signed', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Status', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Sent', 'ajcore-ra' ); ?></th><th></th></tr></thead>
 					<tbody id="ajra-es-log">
-						<?php foreach ( $log['documents'] as $doc ) :
+						<?php foreach ( array_merge( $log['documents'], (array) ( $log['deleted'] ?? array() ) ) as $doc ) :
+							$is_del          = 0 === strpos( $doc['status'], 'deleted:' );
+							$was             = $is_del ? substr( $doc['status'], 8 ) : '';
 							$is_new          = 0 === strpos( $doc['breezedocDocumentId'], 'doc_' );
 							list( $sg, $tt ) = $progress( $doc['recipients'] );
 							$names           = implode( ', ', array_map( static function ( $r ) {
@@ -2363,9 +2414,12 @@ class AJCore_RA_Esign {
 								<td><?php echo esc_html( $doc['customerName'] ?: '' ); ?><?php if ( '' === $doc['customerName'] ) : $first = ( (array) $doc['recipients'] )[0] ?? array(); ?><span class="ajra-muted"><?php echo esc_html( ( $first['name'] ?? '' ) ?: ( $first['email'] ?? '—' ) ); ?></span><?php endif; ?></td>
 								<td><?php echo esc_html( $doc['templateTitle'] ?: '—' ); ?></td>
 								<td data-progress title="<?php echo esc_attr( $names ); ?>"><?php echo esc_html( $tt ? $sg . '/' . $tt : '—' ); ?></td>
-								<td><span class="ajra-pill <?php echo esc_attr( $doc['status'] ); ?>" data-status><?php echo esc_html( $labels[ $doc['status'] ] ?? $doc['status'] ); ?></span></td>
+								<td><span class="ajra-pill <?php echo esc_attr( $is_del ? 'cancelled' : $doc['status'] ); ?>" data-status><?php echo esc_html( $is_del ? sprintf( /* translators: %s: previous status */ __( 'Deleted (was %s)', 'ajcore-ra' ), $labels[ $was ] ?? $was ) : ( $labels[ $doc['status'] ] ?? $doc['status'] ) ); ?></span></td>
 								<td><?php echo esc_html( $doc['sentAt'] ? mysql2date( get_option( 'date_format' ), $doc['sentAt'] ) : '—' ); ?></td>
 								<td style="text-align:right;white-space:nowrap">
+									<?php if ( $is_del ) : ?>
+										<span class="ajra-muted"><?php esc_html_e( 'Restore it or delete it permanently', 'ajcore-ra' ); ?></span>
+									<?php else : ?>
 									<button type="button" class="button button-small" data-act="refresh" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Refresh', 'ajcore-ra' ); ?></button>
 									<?php if ( $is_new ) : ?>
 										<?php if ( 'sent' === $doc['status'] ) : ?>
@@ -2384,6 +2438,7 @@ class AJCore_RA_Esign {
 									<?php if ( $doc['documentUrl'] ) : ?>
 										<a class="button button-small" href="<?php echo esc_url( $doc['documentUrl'] ); ?>" target="_blank" rel="noopener noreferrer"><?php esc_html_e( 'Open', 'ajcore-ra' ); ?></a>
 									<?php endif; ?>
+									<?php endif; // $is_del ?>
 								</td>
 							</tr>
 						<?php endforeach; ?>
@@ -2449,17 +2504,22 @@ class AJCore_RA_Esign {
 			function applyFilter() {
 				var q = $( 'ajra-es-log-q' ).value.toLowerCase().trim(), shown = 0;
 				rows.forEach( function ( r ) {
-					var ok = ( 'all' === filter || r.getAttribute( 'data-group' ) === filter ) && ( ! q || r.getAttribute( 'data-q' ).indexOf( q ) >= 0 );
+					var g = r.getAttribute( 'data-group' ), ok = ( ( 'all' === filter && 'deleted' !== g ) || g === filter ) && ( ! q || r.getAttribute( 'data-q' ).indexOf( q ) >= 0 );
 					r.style.display = ok ? '' : 'none'; if ( ok ) { shown++; }
 					var ev = r.nextElementSibling; if ( ev && ev.classList.contains( 'ajra-es-ev' ) ) { ev.style.display = ok ? '' : 'none'; }
 				} );
 				$( 'ajra-es-log-empty' ).style.display = shown ? 'none' : '';
+				var inTrash = 'deleted' === filter;
+				if ( $( 'ajra-es-del' ) ) { $( 'ajra-es-del' ).style.display = inTrash ? 'none' : ''; }
+				if ( $( 'ajra-es-restore-rows' ) ) { $( 'ajra-es-restore-rows' ).style.display = inTrash ? '' : 'none'; }
+				if ( $( 'ajra-es-purge' ) ) { $( 'ajra-es-purge' ).style.display = inTrash ? '' : 'none'; }
 			}
 			document.querySelectorAll( '#ajra-es-filters a' ).forEach( function ( a ) { a.addEventListener( 'click', function () {
 				filter = a.getAttribute( 'data-f' );
 				document.querySelectorAll( '#ajra-es-filters a' ).forEach( function ( x ) { x.classList.toggle( 'on', x === a ); } ); applyFilter();
 			} ); } );
 			$( 'ajra-es-log-q' ).addEventListener( 'input', applyFilter );
+			applyFilter(); // Deleted rows stay out of All
 
 			// Import historical documents (loops until BreezeDoc has no more pages).
 			var imp = $( 'ajra-es-import' );
@@ -2482,17 +2542,6 @@ class AJCore_RA_Esign {
 					out.textContent = tot.seen + ' found: ' + tot.imported + ' imported, ' + tot.existing + ' already there, ' + tot.unmatched + ' skipped (no matching customer), ' + tot.drafts + ' drafts included';
 					if ( tot.imported ) { setTimeout( function () { window.location.reload(); }, 1500 ); }
 				} ).catch( function ( e ) { out.style.color = '#b32d2e'; out.textContent = e.message; } ).finally( function () { imp.disabled = false; } );
-			} ); }
-
-			// Bring back documents deleted from the local list: forget them, then import again.
-			var rst = $( 'ajra-es-restore' );
-			if ( rst ) { rst.addEventListener( 'click', function () {
-				if ( ! window.confirm( 'Allow the documents you deleted from this list to be imported again?' ) ) { return; }
-				rst.disabled = true;
-				api( '/documents/restore', { method: 'POST' } ).then( function ( d ) {
-					$( 'ajra-es-import-out' ).textContent = ( d.restored || 0 ) + ' restored — importing…';
-					if ( $( 'ajra-es-import' ) ) { $( 'ajra-es-import' ).click(); }
-				} ).catch( function ( e ) { window.alert( e.message ); rst.disabled = false; } );
 			} ); }
 
 			// Link already-logged documents to customers (signer email, then company name in the title).
@@ -2562,6 +2611,9 @@ class AJCore_RA_Esign {
 			function updateDel() {
 				var n = selectedIds().length;
 				delBtn.disabled = ! n; delBtn.textContent = n ? 'Delete selected (' + n + ')' : 'Delete selected';
+				var rr = $( 'ajra-es-restore-rows' ), pg = $( 'ajra-es-purge' );
+				if ( rr ) { rr.disabled = ! n; rr.textContent = n ? 'Restore selected (' + n + ')' : 'Restore selected'; }
+				if ( pg ) { pg.disabled = ! n; pg.textContent = n ? 'Delete permanently (' + n + ')' : 'Delete permanently'; }
 			}
 			document.querySelectorAll( '.ajra-es-sel' ).forEach( function ( c ) { c.addEventListener( 'change', updateDel ); } );
 			selAll.addEventListener( 'change', function () {
@@ -2570,7 +2622,7 @@ class AJCore_RA_Esign {
 			} );
 			delBtn.addEventListener( 'click', function () {
 				var ids = selectedIds();
-				if ( ! ids.length || ! window.confirm( 'Delete ' + ids.length + ' document(s) from this list? They stay in BreezeDoc and will not be imported again (use "Allow re-import of deleted" to undo).' ) ) { return; }
+				if ( ! ids.length || ! window.confirm( 'Move ' + ids.length + ' document(s) to Deleted? Nothing changes in BreezeDoc.' ) ) { return; }
 				delBtn.disabled = true;
 				api( '/documents/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { ids: ids } ) } )
 					.then( function () { window.location.reload(); } )
@@ -2599,6 +2651,19 @@ class AJCore_RA_Esign {
 				}
 				modal.classList.add( 'on' );
 			}
+
+			// Deleted: restore rows, or delete them permanently.
+			function trashPost( path, ids, confirmText ) {
+				if ( ! ids.length || ( confirmText && ! window.confirm( confirmText ) ) ) { return; }
+				api( path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { ids: ids } ) } )
+					.then( function () { window.location.reload(); } )
+					.catch( function ( e ) { window.alert( e.message ); } );
+			}
+			if ( $( 'ajra-es-restore-rows' ) ) { $( 'ajra-es-restore-rows' ).addEventListener( 'click', function () { trashPost( '/documents/restore-rows', selectedIds(), '' ); } ); }
+			if ( $( 'ajra-es-purge' ) ) { $( 'ajra-es-purge' ).addEventListener( 'click', function () {
+				var ids = selectedIds();
+				trashPost( '/documents/purge', ids, 'Permanently delete ' + ids.length + ' document(s) from this portal? This cannot be undone. They stay in BreezeDoc.' );
+			} ); }
 
 			// Row actions.
 			function setProgress( tr, recipients ) {
