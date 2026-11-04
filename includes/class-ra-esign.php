@@ -1074,6 +1074,9 @@ class AJCore_RA_Esign {
 			$kind = 'doc'; // a template never changes kind after creation
 		}
 		$body = trim( str_replace( "\r\n", "\n", wp_kses_no_null( (string) $body ) ) );
+		if ( 'doc' === $kind && '' !== $body ) {
+			$body = self::clean_doc_html( $body );
+		}
 		if ( 'doc' === $kind && '' === $body ) {
 			return new WP_Error( 'no_body', __( 'Write the document text.', 'ajcore-ra' ), array( 'status' => 400 ) );
 		}
@@ -1107,7 +1110,11 @@ class AJCore_RA_Esign {
 			}
 		}
 		if ( 'doc' === $kind ) {
-			$meta['body']     = mb_substr( $body, 0, 60000 );
+			if ( strlen( $body ) > 6000000 ) {
+				return new WP_Error( 'too_big', __( 'The document is too large (images?). Use smaller images.', 'ajcore-ra' ), array( 'status' => 400 ) );
+			}
+			$meta['body']     = $body;
+			$meta['format']   = 'html';
 			$meta['file']     = '';
 			$meta['filename'] = sanitize_file_name( $title ) . '.pdf';
 		}
@@ -1144,6 +1151,9 @@ class AJCore_RA_Esign {
 		$meta = $all[ $template_id ];
 		if ( ( $meta['kind'] ?? 'pdf' ) === 'doc' ) {
 			$pdf = $this->render_doc_template( $meta, $stripe_customer_id, $recipients );
+			if ( is_wp_error( $pdf ) ) {
+				return $pdf;
+			}
 			$tmp = wp_tempnam( 'ajesign.pdf' );
 			if ( ! $tmp || false === file_put_contents( $tmp, $pdf ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
 				return new WP_Error( 'tmp_failed', __( 'Could not write the generated PDF.', 'ajcore-ra' ), array( 'status' => 500 ) );
@@ -1247,8 +1257,82 @@ class AJCore_RA_Esign {
 	/** Merged PDF bytes for a document template. Last page is always a signature page. */
 	private function render_doc_template( array $meta, $stripe_customer_id, array $recipients, $preview = false ) {
 		$values = $this->merge_values( $stripe_customer_id, $recipients );
-		$text   = $this->merge_text( (string) $meta['body'], $values, $preview );
+		if ( ( $meta['format'] ?? 'text' ) === 'html' ) {
+			return $this->build_html_pdf( (string) $meta['title'], $this->merge_html( (string) $meta['body'], $values, $preview ) );
+		}
+		$text = $this->merge_text( (string) $meta['body'], $values, $preview );
 		return self::build_text_pdf( (string) $meta['title'], $text, array() );
+	}
+
+	/** Allowed rich-text markup for Build document templates (everything else is stripped). */
+	private static function clean_doc_html( $html ) {
+		$g     = array( 'style' => true, 'class' => true, 'align' => true );
+		$cell  = $g + array( 'colspan' => true, 'rowspan' => true, 'width' => true, 'height' => true, 'valign' => true );
+		$allow = array(
+			'p' => $g, 'div' => $g, 'span' => $g, 'br' => array(), 'hr' => $g, 'h1' => $g, 'h2' => $g, 'h3' => $g, 'h4' => $g,
+			'b' => $g, 'strong' => $g, 'i' => $g, 'em' => $g, 'u' => $g, 's' => $g, 'sub' => $g, 'sup' => $g, 'blockquote' => $g,
+			'ul' => $g, 'ol' => $g, 'li' => $g, 'a' => $g + array( 'href' => true ),
+			'table' => $g + array( 'border' => true, 'cellpadding' => true, 'cellspacing' => true, 'width' => true ),
+			'thead' => $g, 'tbody' => $g, 'tfoot' => $g, 'tr' => $g, 'td' => $cell, 'th' => $cell, 'colgroup' => array(), 'col' => array( 'width' => true, 'style' => true ),
+			'img' => $g + array( 'src' => true, 'alt' => true, 'width' => true, 'height' => true ),
+		);
+		$styles = static function ( $css ) {
+			return array_merge( (array) $css, array( 'text-align', 'width', 'height', 'min-height', 'border', 'border-collapse', 'border-color', 'border-width', 'border-style', 'border-top', 'border-bottom', 'border-left', 'border-right', 'padding', 'margin', 'margin-top', 'margin-bottom', 'background-color', 'color', 'font-size', 'font-weight', 'font-style', 'font-family', 'text-decoration', 'vertical-align', 'line-height', 'page-break-after', 'page-break-before', 'page-break-inside', 'list-style-type' ) );
+		};
+		add_filter( 'safe_style_css', $styles );
+		$out = wp_kses( $html, $allow, array_merge( wp_allowed_protocols(), array( 'data' ) ) );
+		remove_filter( 'safe_style_css', $styles );
+		$out = preg_replace( '/href\s*=\s*([\'"])\s*data:[^\'"]*\1/i', '', (string) $out ); // data: only for images
+		$out = preg_replace( '/src\s*=\s*([\'"])\s*data:(?!image\/(png|jpe?g|gif|webp);base64,)[^\'"]*\1/i', 'src=""', (string) $out );
+		return (string) $out;
+	}
+
+	/** Fills {{tokens}} in rich HTML; values are HTML-escaped. */
+	private function merge_html( $html, array $values, $preview = false ) {
+		return preg_replace_callback( '/\{\{\s*([a-z0-9_.]+)\s*\}\}/i', static function ( $m ) use ( $values, $preview ) {
+			if ( $preview ) {
+				return $m[0];
+			}
+			$key = strtolower( $m[1] );
+			return isset( $values[ $key ] ) ? esc_html( (string) $values[ $key ] ) : '';
+		}, $html );
+	}
+
+	/** Rich HTML → PDF with the bundled dompdf (no remote fetches, no inline PHP); ends with a signature page. */
+	private function build_html_pdf( $title, $html ) {
+		$autoload = __DIR__ . '/lib/dompdf/autoload.inc.php';
+		if ( ! is_readable( $autoload ) ) {
+			return new WP_Error( 'no_pdf_engine', __( 'The PDF engine (dompdf) is missing from the AJCore-RA plugin.', 'ajcore-ra' ), array( 'status' => 500 ) );
+		}
+		require_once $autoload;
+		if ( function_exists( 'wp_raise_memory_limit' ) ) {
+			wp_raise_memory_limit( 'admin' );
+		}
+		$cache = $this->tpl_dir() . '/cache';
+		wp_mkdir_p( $cache );
+		try {
+			$options = new \Dompdf\Options();
+			$options->set( 'isRemoteEnabled', false );
+			$options->set( 'isPhpEnabled', false );
+			$options->set( 'isJavascriptEnabled', false );
+			$options->set( 'chroot', $this->tpl_dir() );
+			$options->set( 'tempDir', $cache );
+			$options->set( 'fontDir', $cache );
+			$options->set( 'fontCache', $cache );
+			$options->set( 'defaultFont', 'Helvetica' );
+			$css = '@page{margin:0.8in}body{font-family:Helvetica,Arial,sans-serif;font-size:11pt;line-height:1.4;color:#111}'
+				. 'h1{font-size:20pt;margin:0 0 8pt}h2{font-size:15pt;margin:10pt 0 6pt}h3{font-size:12.5pt;margin:8pt 0 4pt}p{margin:0 0 7pt}'
+				. 'table{border-collapse:collapse;width:100%;margin:0 0 8pt}td,th{border:1px solid #444;padding:4pt 6pt;vertical-align:top}'
+				. 'img{max-width:100%}hr.pb{border:0;height:0;margin:0;page-break-after:always}';
+			$sig  = '<hr class="pb"><h2>Signatures</h2><p>' . esc_html( $title ) . '</p><p style="font-size:9pt;color:#555">' . esc_html__( 'Please sign and date in the boxes provided below.', 'ajcore-ra' ) . '</p>';
+			$dompdf = new \Dompdf\Dompdf( $options );
+			$dompdf->loadHtml( '<!doctype html><html><head><meta charset="utf-8"><style>' . $css . '</style></head><body>' . $html . $sig . '</body></html>', 'UTF-8' );
+			$dompdf->setPaper( 'letter' );
+			$dompdf->render();
+			return $dompdf->output();
+		} catch ( \Throwable $e ) {
+			return new WP_Error( 'pdf_failed', sprintf( /* translators: %s: error */ __( 'Could not build the PDF: %s', 'ajcore-ra' ), $e->getMessage() ), array( 'status' => 500 ) );
+		}
 	}
 
 	/**
@@ -1394,6 +1478,9 @@ class AJCore_RA_Esign {
 		}
 		if ( ( $all[ $id ]['kind'] ?? 'pdf' ) === 'doc' ) {
 			$bytes = $this->render_doc_template( $all[ $id ], '', array(), true );
+			if ( is_wp_error( $bytes ) ) {
+				return $bytes;
+			}
 			nocache_headers();
 			header( 'Content-Type: application/pdf' );
 			header( 'Content-Disposition: inline; filename="preview.pdf"' );
@@ -2643,6 +2730,10 @@ class AJCore_RA_Esign {
 			.ajra-es table.widefat td,.ajra-es table.widefat th{vertical-align:middle}
 			.ajra-es td .button{margin:0 2px 2px 0}.ajra-es pre{margin:0;white-space:pre-wrap;font-size:12px}
 			.ajra-es .ajra-empty{padding:18px;text-align:center;color:#646970}
+.ajra-es #ajra-es-tpl-body{background:#fff;border:1px solid #cbd5e1;box-shadow:0 1px 4px rgba(0,0,0,.08);min-height:520px;max-height:70vh;overflow:auto;padding:48px 56px;font:14px/1.5 Helvetica,Arial,sans-serif;color:#111;max-width:816px}
+			.ajra-es #ajra-es-tpl-body table{border-collapse:collapse;width:100%}.ajra-es #ajra-es-tpl-body td,.ajra-es #ajra-es-tpl-body th{border:1px solid #444;padding:4px 6px;min-width:40px}
+			.ajra-es #ajra-es-tpl-body img{max-width:100%}.ajra-es #ajra-es-tpl-body hr.pb{border:0;border-top:2px dashed #94a3b8;margin:22px 0;height:0;overflow:visible}
+			.ajra-es #ajra-es-tpl-body hr.pb::after{content:"page break";display:block;text-align:center;font-size:10px;color:#94a3b8;margin-top:-8px;background:#fff;width:80px;margin-left:auto;margin-right:auto}
 			.ajra-es .ajra-tpl{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 0;border-top:1px solid #f0f0f1}
 			.ajra-es .ajra-tpl:first-child{border-top:0}.ajra-es .ajra-tpl .t{flex:1;min-width:200px;font-weight:600}
 			.ajra-es .ajra-tag{display:inline-block;padding:0 7px;border-radius:9px;font-size:11px;background:#eef2ff;color:#3730a3;margin-left:6px;font-weight:600}
@@ -2806,14 +2897,21 @@ class AJCore_RA_Esign {
 					<div class="ajra-err" id="ajra-es-tpl-err"></div>
 						<div class="ajra-grid">
 							<div><label><?php esc_html_e( 'Template name', 'ajcore-ra' ); ?></label><input type="text" id="ajra-es-tpl-title" maxlength="191"></div>
-							<div><label><?php esc_html_e( 'Type', 'ajcore-ra' ); ?></label><select id="ajra-es-tpl-kind"><option value="pdf"><?php esc_html_e( 'Uploaded PDF', 'ajcore-ra' ); ?></option><option value="doc"><?php esc_html_e( 'Document with merge fields', 'ajcore-ra' ); ?></option></select></div>
+							<div><label><?php esc_html_e( 'Type', 'ajcore-ra' ); ?></label><select id="ajra-es-tpl-kind"><option value="pdf"><?php esc_html_e( 'Uploaded PDF', 'ajcore-ra' ); ?></option><option value="doc"><?php esc_html_e( 'Build document', 'ajcore-ra' ); ?></option></select></div>
 							<div id="ajra-es-tpl-pdfwrap"><label id="ajra-es-tpl-pdf-label"><?php esc_html_e( 'PDF (max 25 MB)', 'ajcore-ra' ); ?></label><input type="file" id="ajra-es-tpl-pdf" accept="application/pdf,.pdf"></div>
 						</div>
-						<div id="ajra-es-tpl-docwrap" style="display:none;margin-top:10px">
-							<label><?php esc_html_e( 'Document text', 'ajcore-ra' ); ?> <span class="ajra-muted">(# Heading, ## Subheading, - bullet, ---pagebreak---)</span></label>
-							<textarea id="ajra-es-tpl-body" rows="14" style="width:100%;min-height:280px;height:280px;font-family:monospace;resize:vertical"></textarea>
-							<div id="ajra-es-tpl-merge" style="margin-top:6px"></div>
-						</div>
+<div id="ajra-es-tpl-docwrap" style="display:none;margin-top:10px">
+<div style="display:flex;gap:12px;align-items:flex-start">
+<div style="width:190px;flex:none;background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px">
+<div style="font-weight:600;margin-bottom:6px"><?php esc_html_e( 'Fields', 'ajcore-ra' ); ?></div>
+<div id="ajra-es-tpl-merge"></div>
+</div>
+<div style="flex:1;min-width:0">
+<div id="ajra-es-tb" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px"></div>
+<div id="ajra-es-tpl-body" contenteditable="true" spellcheck="true"></div>
+</div>
+</div>
+</div>
 					<div style="margin-top:10px"><label><?php esc_html_e( 'Signers, in signing order (role labels)', 'ajcore-ra' ); ?></label><div id="ajra-es-tpl-signers"></div>
 						<button type="button" class="button button-small" id="ajra-es-tpl-addsigner"><?php esc_html_e( '+ Add signer', 'ajcore-ra' ); ?></button></div>
 						<div id="ajra-es-tpl-poswrap" class="ajra-grid" style="margin-top:10px;max-width:620px">
@@ -3054,23 +3152,71 @@ class AJCore_RA_Esign {
 				$( 'ajra-es-tpl-docwrap' ).style.display = doc ? 'block' : 'none';
 				$( 'ajra-es-tpl-poswrap' ).style.display = doc ? 'none' : '';
 			}
-			function buildMergeChips() {
-				var box = $( 'ajra-es-tpl-merge' ); if ( box.firstChild ) { return; }
-				Object.keys( mergeFields ).forEach( function ( k ) {
-					var b = document.createElement( 'button' ); b.type = 'button'; b.className = 'button button-small'; b.style.margin = '0 4px 4px 0'; b.textContent = mergeFields[ k ];
-					b.addEventListener( 'click', function () {
-						var ta = $( 'ajra-es-tpl-body' ), tok = '{{' + k + '}}', a = ta.selectionStart || ta.value.length, z = ta.selectionEnd || a;
-						ta.value = ta.value.slice( 0, a ) + tok + ta.value.slice( z ); ta.focus(); ta.selectionStart = ta.selectionEnd = a + tok.length;
-					} );
-					box.appendChild( b );
-				} );
-			}
+function buildMergeChips() {
+var box = $( 'ajra-es-tpl-merge' ); if ( box.firstChild ) { return; }
+var ed = $( 'ajra-es-tpl-body' );
+function mk( parent, label, fn, title ) {
+var b = document.createElement( 'button' ); b.type = 'button'; b.className = 'button button-small'; b.textContent = label; if ( title ) { b.title = title; }
+b.addEventListener( 'mousedown', function ( e ) { e.preventDefault(); } ); // keep the caret in the page
+b.addEventListener( 'click', function () { ed.focus(); fn(); } );
+parent.appendChild( b ); return b;
+}
+Object.keys( mergeFields ).forEach( function ( k ) {
+var b = mk( box, mergeFields[ k ], function () { document.execCommand( 'insertText', false, '{{' + k + '}}' ); } );
+b.style.cssText = 'display:block;width:100%;text-align:left;margin:0 0 4px';
+} );
+var tb = $( 'ajra-es-tb' );
+var cmd = function ( c, v ) { return function () { document.execCommand( c, false, v || null ); }; };
+[ [ 'B', 'bold' ], [ 'I', 'italic' ], [ 'U', 'underline' ] ].forEach( function ( a ) { mk( tb, a[0], cmd( a[1] ) ).style.fontWeight = 'B' === a[0] ? '700' : ''; } );
+mk( tb, 'H1', cmd( 'formatBlock', 'h1' ) ); mk( tb, 'H2', cmd( 'formatBlock', 'h2' ) ); mk( tb, 'Text', cmd( 'formatBlock', 'p' ) );
+mk( tb, '• List', cmd( 'insertUnorderedList' ) ); mk( tb, '1. List', cmd( 'insertOrderedList' ) );
+mk( tb, '⇤', cmd( 'justifyLeft' ), 'Align left' ); mk( tb, '↔', cmd( 'justifyCenter' ), 'Center' ); mk( tb, '⇥', cmd( 'justifyRight' ), 'Align right' );
+mk( tb, 'Table', function () {
+var r = parseInt( window.prompt( 'Rows', '3' ), 10 ), c = parseInt( window.prompt( 'Columns', '3' ), 10 );
+if ( ! r || ! c ) { return; }
+var h = '<table>'; for ( var i = 0; i < r; i++ ) { h += '<tr>'; for ( var j = 0; j < c; j++ ) { h += '<td>&nbsp;</td>'; } h += '</tr>'; } h += '</table><p><br></p>';
+document.execCommand( 'insertHTML', false, h );
+} );
+function cellOf() { var n = window.getSelection().anchorNode; while ( n && n !== ed ) { if ( n.nodeType === 1 && /^T[DH]$/.test( n.tagName ) ) { return n; } n = n.parentNode; } return null; }
+mk( tb, '+Row', function () { var c = cellOf(); if ( ! c ) { return; } var tr = c.parentNode, n = tr.cloneNode( true ); Array.prototype.forEach.call( n.cells, function ( x ) { x.innerHTML = '&nbsp;'; } ); tr.parentNode.insertBefore( n, tr.nextSibling ); }, 'Add a row below the cursor' );
+mk( tb, '+Col', function () { var c = cellOf(); if ( ! c ) { return; } var idx = c.cellIndex; Array.prototype.forEach.call( c.closest( 'table' ).rows, function ( tr ) { var x = tr.insertCell( idx + 1 ); x.innerHTML = '&nbsp;'; } ); }, 'Add a column right of the cursor' );
+mk( tb, '−Row', function () { var c = cellOf(); if ( c ) { var t = c.closest( 'table' ); c.parentNode.remove(); if ( ! t.rows.length ) { t.remove(); } } } );
+mk( tb, '−Col', function () { var c = cellOf(); if ( ! c ) { return; } var idx = c.cellIndex, t = c.closest( 'table' ); Array.prototype.forEach.call( t.rows, function ( tr ) { if ( tr.cells[ idx ] ) { tr.deleteCell( idx ); } } ); if ( ! t.rows[0] || ! t.rows[0].cells.length ) { t.remove(); } } );
+mk( tb, 'Image', function () {
+var inp = document.createElement( 'input' ); inp.type = 'file'; inp.accept = 'image/png,image/jpeg,image/gif,image/webp';
+inp.addEventListener( 'change', function () {
+var f = inp.files[0]; if ( ! f ) { return; }
+var rd = new FileReader();
+rd.onload = function () {
+var im = new Image();
+im.onload = function () {
+var max = 1000, sc = Math.min( 1, max / im.width ), cv = document.createElement( 'canvas' ); cv.width = Math.round( im.width * sc ); cv.height = Math.round( im.height * sc );
+cv.getContext( '2d' ).drawImage( im, 0, 0, cv.width, cv.height );
+var png = 'image/png' === f.type || 'image/gif' === f.type || 'image/webp' === f.type;
+ed.focus(); document.execCommand( 'insertImage', false, cv.toDataURL( png ? 'image/png' : 'image/jpeg', 0.85 ) );
+};
+im.src = rd.result;
+};
+rd.readAsDataURL( f );
+} );
+inp.click();
+} );
+mk( tb, 'Page break', function () { document.execCommand( 'insertHTML', false, '<hr class="pb"><p><br></p>' ); }, 'Start a new page here' );
+mk( tb, 'Undo', cmd( 'undo' ) ); mk( tb, 'Redo', cmd( 'redo' ) );
+}
+function loadDocBody( t ) {
+var b = t && t.body ? t.body : '';
+if ( b && b.indexOf( '<' ) === -1 ) { // earlier plain-text templates
+b = b.split( /\n{2,}/ ).map( function ( para ) { return '<p>' + esc( para ).replace( /\n/g, '<br>' ) + '</p>'; } ).join( '' );
+}
+$( 'ajra-es-tpl-body' ).innerHTML = b;
+}
 			function openTplEditor( t ) {
 				editingTpl = t ? t.id : '';
 				buildMergeChips();
 				$( 'ajra-es-tpl-kind' ).value = t && 'doc' === t.kind ? 'doc' : 'pdf';
 				$( 'ajra-es-tpl-kind' ).disabled = !! t;
-				$( 'ajra-es-tpl-body' ).value = t && t.body ? t.body : '';
+loadDocBody( t );
 				$( 'ajra-es-tpl-sigx' ).value = t && t.sigX !== undefined ? t.sigX : 8;
 				$( 'ajra-es-tpl-sigy' ).value = t && t.sigY !== undefined ? t.sigY : 78;
 				syncTplKind();
@@ -3093,7 +3239,7 @@ class AJCore_RA_Esign {
 					var err = $( 'ajra-es-tpl-err' ), btn = $( 'ajra-es-tpl-save' ), fd = new FormData(), f = $( 'ajra-es-tpl-pdf' ).files[0];
 					var signers = Array.prototype.map.call( document.querySelectorAll( '.ajra-es-tpl-signer' ), function ( i ) { return i.value.trim(); } ).filter( Boolean );
 					fd.append( 'id', editingTpl ); fd.append( 'title', $( 'ajra-es-tpl-title' ).value ); fd.append( 'signers', JSON.stringify( signers ) );fd.append( 'page', $( 'ajra-es-tpl-page' ).value || 0 );
-					fd.append( 'kind', $( 'ajra-es-tpl-kind' ).value ); fd.append( 'body', $( 'ajra-es-tpl-body' ).value );
+					fd.append( 'kind', $( 'ajra-es-tpl-kind' ).value );fd.append( 'body', 'doc' === $( 'ajra-es-tpl-kind' ).value ? $( 'ajra-es-tpl-body' ).innerHTML : '' );
 					fd.append( 'sig_x', $( 'ajra-es-tpl-sigx' ).value ); fd.append( 'sig_y', $( 'ajra-es-tpl-sigy' ).value );
 					if ( f ) { fd.append( 'pdf', f ); }
 					btn.disabled = true;
