@@ -2877,7 +2877,8 @@ class AJCore_RA_Esign {
 			.ajra-es .ajra-ti{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:13px}.ajra-es .ajra-ti:hover{background:#f1f5f9}.ajra-es .ajra-ti.on{background:#eef2ff;color:#3730a3;font-weight:600}
 			.ajra-es .ajra-ti span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ajra-es .ajra-ti em{font-style:normal;font-size:10px;color:#64748b;border:1px solid #e2e8f0;border-radius:4px;padding:0 4px}
 			.ajra-es .ajra-wsmain{flex:1;min-width:0}.ajra-es .ajra-wsbox{border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;padding:10px}
-			.ajra-es .ajra-wshead{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}.ajra-es .ajra-wsrow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
+			.ajra-es .ajra-wshead{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}.ajra-es .ajra-wsstrip{display:flex;flex-direction:column;gap:8px;padding-bottom:8px;border-bottom:1px solid #e2e8f0}.ajra-es .ajra-wsstrip input[type=text]{width:100%}.ajra-es .ajra-wsstrip .ajra-grid{grid-template-columns:repeat(3,1fr);gap:6px}
+			.ajra-es .ajra-wsrow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
 			.ajra-es .ajra-role{display:inline-flex;align-items:center;gap:2px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding-right:6px}.ajra-es .ajra-role input{border:0;box-shadow:none;width:110px;min-height:28px}.ajra-es .ajra-role a{text-decoration:none;color:#64748b}
 			@media(max-width:900px){.ajra-es .ajra-ws{flex-direction:column}.ajra-es .ajra-tree{width:auto;align-self:stretch;max-height:220px}}
 			.ajra-es .ajra-tpl{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 0;border-top:1px solid #f0f0f1}
@@ -3320,7 +3321,7 @@ class AJCore_RA_Esign {
 			}
 
 			// AJCore templates: settings strip + preview/editor + fields panel.
-			function docEditor( host, html ) {
+			function docEditor( host, html, top ) {
 				FE.ensureCss();
 				host.innerHTML = '';
 				var root = document.createElement( 'div' ), main = document.createElement( 'div' ), side = document.createElement( 'div' ), tb = document.createElement( 'div' ), ed = document.createElement( 'div' );
@@ -3370,7 +3371,9 @@ class AJCore_RA_Esign {
 				} );
 				mk( 'Page break', function () { document.execCommand( 'insertHTML', false, '<hr class="pb"><p><br></p>' ); }, 'Start a new page here' );
 				mk( 'Undo', cmd( 'undo' ) ); mk( 'Redo', cmd( 'redo' ) );
-				side.innerHTML = '<h4>Fields — drag into the page</h4>';
+				side.innerHTML = '';
+				if ( top ) { side.appendChild( top ); }
+				side.insertAdjacentHTML( 'beforeend', '<h4>Fields — drag into the page</h4>' );
 				Object.keys( mergeFields ).forEach( function ( k ) {
 					var c = document.createElement( 'button' ); c.type = 'button'; c.className = 'ajfe-chip'; c.draggable = true; c.textContent = mergeFields[ k ]; c.title = '{{' + k + '}}';
 					c.addEventListener( 'dragstart', function ( e ) { e.dataTransfer.setData( 'text/plain', '{{' + k + '}}' ); e.dataTransfer.effectAllowed = 'copy'; } );
@@ -3384,20 +3387,24 @@ class AJCore_RA_Esign {
 			function openLocal( t ) {
 				var isNew = ! t, kind = t ? ( 'doc' === t.kind ? 'doc' : 'pdf' ) : 'pdf', layout = t && t.layout ? t.layout.slice() : [], newFile = null, docEl = null;
 				var roles = t && t.recipients && t.recipients.length ? t.recipients.map( function ( r ) { return r.role || ''; } ) : [ 'Client' ];
-				tplWs.innerHTML = '<div class="ajra-wsbox">' +
-					'<div class="ajra-wshead"><input type="text" id="ajra-es-t-title" maxlength="191" placeholder="Template name" style="flex:1;min-width:180px;max-width:340px">' +
-					( isNew ? '<select id="ajra-es-t-kind"><option value="pdf">Uploaded PDF</option><option value="doc">Build document</option></select>' : '<span class="ajra-tag">' + ( 'doc' === kind ? 'build document' : 'pdf' ) + '</span>' ) +
-					'<span style="flex:1"></span>' +
-					( isNew ? '' : '<button type="button" class="button button-small" id="ajra-es-t-use">Use template</button><a class="button button-small" target="_blank" rel="noopener noreferrer" id="ajra-es-t-prev" href="' + esc( tplFileUrl( t.id ) ) + '">Preview PDF</a><button type="button" class="button button-small" id="ajra-es-t-del" style="color:#b32d2e">Delete</button>' ) +
+				tplWs.innerHTML = '<div class="ajra-wsbox"><div id="ajra-es-t-host"></div></div>';
+				var host = $( 'ajra-es-t-host' );
+				// Settings live in one block that sits above the editor until it is mounted, then moves into the right panel.
+				var strip = document.createElement( 'div' ); strip.className = 'ajra-wsstrip';
+				strip.innerHTML = '<input type="text" id="ajra-es-t-title" maxlength="191" placeholder="Template name">' +
+					'<div class="ajra-wsrow">' + ( isNew ? '<select id="ajra-es-t-kind"><option value="pdf">Uploaded PDF</option><option value="doc">Build document</option></select>' : '<span class="ajra-tag">' + ( 'doc' === kind ? 'build document' : 'pdf' ) + '</span>' ) + '</div>' +
+					'<div><div class="ajra-muted" style="margin-bottom:3px">Signers (in order)</div><div id="ajra-es-t-roles" class="ajra-wsrow"></div><button type="button" class="button button-small" id="ajra-es-t-addrole">+ Signer</button></div>' +
+					( t && 'doc' !== kind ? '<div id="ajra-es-t-replwrap"><div class="ajra-muted" style="margin-bottom:3px">Replace PDF <span title="Placed fields stay where they are">(fields stay)</span></div><input type="file" id="ajra-es-t-repl" accept="application/pdf,.pdf" style="max-width:100%"></div>' : '' ) +
+					'<div class="ajra-wsrow">' + ( isNew ? '' : '<button type="button" class="button button-small" id="ajra-es-t-use">Use template</button><a class="button button-small" target="_blank" rel="noopener noreferrer" id="ajra-es-t-prev" href="' + esc( tplFileUrl( t.id ) ) + '">Preview PDF</a><button type="button" class="button button-small" id="ajra-es-t-del" style="color:#b32d2e">Delete</button>' ) +
 					'<button type="button" class="button button-primary button-small" id="ajra-es-t-save">Save</button></div>' +
 					'<div class="ajra-err" id="ajra-es-t-err"></div>' +
-					'<div class="ajra-wsrow"><span class="ajra-muted">Signers (in order):</span><span id="ajra-es-t-roles"></span><button type="button" class="button button-small" id="ajra-es-t-addrole">+ Signer</button></div>' +
-					'<div id="ajra-es-t-host"></div>' +
-					'<details id="ajra-es-t-adv" style="margin-top:8px"><summary class="ajra-muted" style="cursor:pointer">Default signature position (used when no signature box is placed)</summary>' +
-					'<div class="ajra-grid" style="max-width:560px;margin-top:6px"><div><label>Page</label><input type="number" id="ajra-es-t-page" min="1" placeholder="last"></div><div><label>X % from left</label><input type="number" id="ajra-es-t-sigx" min="0" max="60"></div><div><label>Y % from top</label><input type="number" id="ajra-es-t-sigy" min="5" max="90"></div></div></details></div>';
-				$( 'ajra-es-t-title' ).value = t ? ( t.rawTitle || t.title ) : '';
-				$( 'ajra-es-t-page' ).value = t && t.page ? t.page : ''; $( 'ajra-es-t-sigx' ).value = t && t.sigX !== undefined ? t.sigX : 8; $( 'ajra-es-t-sigy' ).value = t && t.sigY !== undefined ? t.sigY : 78;
-				var host = $( 'ajra-es-t-host' ), rolesBox = $( 'ajra-es-t-roles' ), err = $( 'ajra-es-t-err' );
+					'<details id="ajra-es-t-adv"><summary class="ajra-muted" style="cursor:pointer">Default signature position</summary><div class="ajra-muted" style="margin:4px 0">Used only when no signature box is placed.</div>' +
+					'<div class="ajra-grid"><div><label>Page</label><input type="number" id="ajra-es-t-page" min="1" placeholder="last"></div><div><label>X %</label><input type="number" id="ajra-es-t-sigx" min="0" max="60"></div><div><label>Y %</label><input type="number" id="ajra-es-t-sigy" min="5" max="90"></div></div></details>';
+				var q = function ( id ) { return strip.querySelector( '#' + id ); };
+				q( 'ajra-es-t-title' ).value = t ? ( t.rawTitle || t.title ) : '';
+				q( 'ajra-es-t-page' ).value = t && t.page ? t.page : ''; q( 'ajra-es-t-sigx' ).value = t && t.sigX !== undefined ? t.sigX : 8; q( 'ajra-es-t-sigy' ).value = t && t.sigY !== undefined ? t.sigY : 78;
+				var rolesBox = q( 'ajra-es-t-roles' ), err = q( 'ajra-es-t-err' );
+				function setHost( html ) { if ( fieldEd ) { fieldEd.destroy(); fieldEd = null; } host.innerHTML = html; host.insertBefore( strip, host.firstChild ); }
 				function readRoles() { return Array.prototype.map.call( rolesBox.querySelectorAll( 'input' ), function ( i ) { return i.value.trim(); } ).filter( Boolean ); }
 				function syncRoles() { if ( fieldEd ) { fieldEd.setSigners( readRoles() ); } }
 				function roleChip( v ) {
@@ -3407,46 +3414,40 @@ class AJCore_RA_Esign {
 					s.querySelector( 'a' ).addEventListener( 'click', function ( e ) { e.preventDefault(); s.remove(); syncRoles(); } );
 					rolesBox.appendChild( s );
 				}
-				roles.forEach( roleChip ); $( 'ajra-es-t-addrole' ).addEventListener( 'click', function () { roleChip( '' ); syncRoles(); } );
+				roles.forEach( roleChip ); q( 'ajra-es-t-addrole' ).addEventListener( 'click', function () { roleChip( '' ); syncRoles(); } );
 
 				function mountPdf( buf ) {
 					if ( fieldEd ) { fieldEd.destroy(); fieldEd = null; }
-					fieldEd = FE.mount( host, { pdfData: buf, pdfjsBase: pdfjsBase, fields: layout, signers: readRoles(), mergeFields: mergeFields, onChange: function ( f ) { layout = f; } } );
+					fieldEd = FE.mount( host, { pdfData: buf, pdfjsBase: pdfjsBase, fields: layout, signers: readRoles(), mergeFields: mergeFields, sideTop: strip, onChange: function ( f ) { layout = f; } } );
 				}
 				function pdfPicker( label ) {
-					host.innerHTML = '<div class="ajra-empty" style="text-align:left"><label>' + esc( label ) + '</label><br><input type="file" id="ajra-es-t-file" accept="application/pdf,.pdf"></div>';
-					$( 'ajra-es-t-file' ).addEventListener( 'change', function ( ev ) {
+					setHost( '<div class="ajra-empty" style="text-align:left;margin-top:8px"><label>' + esc( label ) + '</label><br><input type="file" id="ajra-es-t-file" accept="application/pdf,.pdf"></div>' );
+					host.querySelector( '#ajra-es-t-file' ).addEventListener( 'change', function ( ev ) {
 						var f = ev.target.files[0]; if ( ! f ) { return; }
 						newFile = f; layout = []; f.arrayBuffer().then( mountPdf );
-						if ( ! $( 'ajra-es-t-title' ).value ) { $( 'ajra-es-t-title' ).value = f.name.replace( /\.pdf$/i, '' ); }
+						if ( ! q( 'ajra-es-t-title' ).value ) { q( 'ajra-es-t-title' ).value = f.name.replace( /\.pdf$/i, '' ); }
 					} );
 				}
 				function showKind() {
-					$( 'ajra-es-t-adv' ).style.display = 'doc' === kind ? 'none' : '';
-					if ( fieldEd ) { fieldEd.destroy(); fieldEd = null; }
-					if ( 'doc' === kind ) { docEl = docEditor( host, t && t.body ? t.body : '' ); } else if ( isNew ) { pdfPicker( 'Choose the PDF to start from (max 25 MB)' ); } else {
-						host.innerHTML = '<div class="ajra-empty">Loading PDF…</div>';
+					q( 'ajra-es-t-adv' ).style.display = 'doc' === kind ? 'none' : '';
+					if ( 'doc' === kind ) { if ( fieldEd ) { fieldEd.destroy(); fieldEd = null; } docEl = docEditor( host, t && t.body ? t.body : '', strip ); } else if ( isNew ) { pdfPicker( 'Choose the PDF to start from (max 25 MB)' ); } else {
+						setHost( '<div class="ajra-empty" style="margin-top:8px">Loading PDF…</div>' );
 						fetch( tplFileUrl( t.id ), { credentials: 'same-origin' } ).then( function ( r ) { if ( ! r.ok ) { throw new Error( 'The template PDF could not be loaded.' ); } return r.arrayBuffer(); } ).then( mountPdf )
-							.catch( function ( e ) { host.innerHTML = '<div class="ajra-empty">' + esc( e.message ) + '</div>'; } );
+							.catch( function ( e ) { setHost( '<div class="ajra-empty" style="margin-top:8px">' + esc( e.message ) + '</div>' ); } );
 					}
 				}
-				if ( $( 'ajra-es-t-kind' ) ) { $( 'ajra-es-t-kind' ).addEventListener( 'change', function () { kind = this.value; showKind(); } ); }
+				if ( q( 'ajra-es-t-kind' ) ) { q( 'ajra-es-t-kind' ).addEventListener( 'change', function () { kind = this.value; showKind(); } ); }
 				showKind();
-				if ( t && 'doc' !== kind ) {
-					var rp = document.createElement( 'div' ); rp.className = 'ajra-wsrow';
-					rp.innerHTML = '<span class="ajra-muted">Replace PDF:</span><input type="file" id="ajra-es-t-repl" accept="application/pdf,.pdf"><span class="ajra-muted">(placed fields stay where they are)</span>';
-					host.parentNode.insertBefore( rp, host );
-					rp.querySelector( 'input' ).addEventListener( 'change', function ( ev ) { var f = ev.target.files[0]; if ( f ) { newFile = f; f.arrayBuffer().then( mountPdf ); } } );
-				}
-				if ( $( 'ajra-es-t-use' ) ) { $( 'ajra-es-t-use' ).addEventListener( 'click', function () { useTemplate( t ); } ); }
-				if ( $( 'ajra-es-t-del' ) ) { $( 'ajra-es-t-del' ).addEventListener( 'click', function () {
+				if ( q( 'ajra-es-t-repl' ) ) { q( 'ajra-es-t-repl' ).addEventListener( 'change', function ( ev ) { var f = ev.target.files[0]; if ( f ) { newFile = f; f.arrayBuffer().then( mountPdf ); } } ); }
+				if ( q( 'ajra-es-t-use' ) ) { q( 'ajra-es-t-use' ).addEventListener( 'click', function () { useTemplate( t ); } ); }
+				if ( q( 'ajra-es-t-del' ) ) { q( 'ajra-es-t-del' ).addEventListener( 'click', function () {
 					if ( ! window.confirm( 'Delete the template "' + ( t.rawTitle || t.title ) + '"? This cannot be undone.' ) ) { return; }
 					api( '/templates/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { id: t.id } ) } ).then( function () { rememberTpl( '' ); window.location.reload(); } ).catch( function ( e ) { window.alert( e.message ); } );
 				} ); }
-				$( 'ajra-es-t-save' ).addEventListener( 'click', function () {
+				q( 'ajra-es-t-save' ).addEventListener( 'click', function () {
 					var btn = this, fd = new FormData();
-					fd.append( 'id', t ? t.id : '' ); fd.append( 'title', $( 'ajra-es-t-title' ).value ); fd.append( 'signers', JSON.stringify( readRoles() ) );
-					fd.append( 'kind', kind ); fd.append( 'page', $( 'ajra-es-t-page' ).value || 0 ); fd.append( 'sig_x', $( 'ajra-es-t-sigx' ).value ); fd.append( 'sig_y', $( 'ajra-es-t-sigy' ).value );
+					fd.append( 'id', t ? t.id : '' ); fd.append( 'title', q( 'ajra-es-t-title' ).value ); fd.append( 'signers', JSON.stringify( readRoles() ) );
+					fd.append( 'kind', kind ); fd.append( 'page', q( 'ajra-es-t-page' ).value || 0 ); fd.append( 'sig_x', q( 'ajra-es-t-sigx' ).value ); fd.append( 'sig_y', q( 'ajra-es-t-sigy' ).value );
 					if ( 'doc' === kind ) { fd.append( 'body', docEl ? docEl.innerHTML : '' ); } else { fd.append( 'layout', JSON.stringify( fieldEd ? fieldEd.getFields() : layout ) ); if ( newFile ) { fd.append( 'pdf', newFile ); } }
 					btn.disabled = true; err.style.display = 'none';
 					api( '/templates/save', { method: 'POST', body: fd } ).then( function ( saved ) { rememberTpl( saved && saved.id ? saved.id : '' ); window.location.reload(); } )

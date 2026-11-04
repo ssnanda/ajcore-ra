@@ -8,7 +8,8 @@
  *     fields:      [ {type,party,page,x,y,w,h,fill} ],  // x,y,w,h = fractions of the page, from top-left
  *     signers:     [ 'Client', 'Company' ],     // role labels; party = index + 1
  *     mergeFields: { 'customer.name': 'Customer name', … },
- *     onChange:    function ( fields ) {}
+ *     onChange:    function ( fields ) {},
+ *     sideTop:     HTMLElement                  // optional: shown at the top of the right panel (template settings)
  *   });  ed.getFields(); ed.setSigners( [ … ] ); ed.destroy();
  *   AJEsignFieldEditor.open( opts + onSave / onCancel )   // same editor in a full-screen dialog
  *
@@ -26,7 +27,7 @@
 	var CSS = '' +
 		'.ajfe-root{display:flex;gap:12px;align-items:flex-start;font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a;min-width:0}' +
 		'.ajfe-main{flex:1;min-width:0;display:flex;flex-direction:column;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#fff}' +
-		'.ajfe-side{width:270px;flex:none;position:sticky;top:var(--ajfe-sticky,44px);max-height:calc(100vh - 70px);overflow:auto;border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:10px;display:flex;flex-direction:column;gap:8px}' +
+		'.ajfe-side{width:300px;flex:none;position:sticky;top:var(--ajfe-sticky,44px);max-height:calc(100vh - 70px);overflow:auto;border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:10px;display:flex;flex-direction:column;gap:8px}' +
 		'.ajfe-side h4{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#64748b}' +
 		'.ajfe-side button,.ajfe-side select,.ajfe-side input,.ajfe-bar button,.ajfe-bar select{height:30px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:0 10px;font:inherit;color:#0f172a;box-sizing:border-box}' +
 		'.ajfe-side input,.ajfe-side select{width:100%}' +
@@ -100,6 +101,7 @@
 
 		// ── right panel: palette + signer + inspector ────────────────────────────
 		var palette = el( 'div' ), chips = {};
+		if ( opts.sideTop ) { side.appendChild( opts.sideTop ); }
 		side.appendChild( el( 'h4', { text: 'Fields — drag onto the page' } ) );
 		TYPES.forEach( function ( t ) {
 			var c = el( 'button', { cls: 'ajfe-chip', draggable: 'true', title: 'Drag onto the page, or click then click the page' } );
