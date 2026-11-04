@@ -11,8 +11,9 @@
  *     onChange:    function ( fields ) {},
  *     sideTop:     HTMLElement,                 // optional: shown at the top of the right panel (template settings)
  *     lockSigners: true,                        // optional: hide Add/Remove signer (the host's signer rows decide)
- *     resolveValues: function () -> Promise<{token: value}>  // optional: enables the "Preview with values" checkbox
- *   });  ed.getFields(); ed.setSigners( [ … ] ); ed.destroy();
+ *     resolveValues: function () -> Promise<{token: value}|null>  // optional: enables the "Preview with values" checkbox (null = no customer yet)
+ *     previewDefault: true                      // optional: start with the preview on
+*   });  ed.getFields(); ed.setSigners( [ … ] ); ed.destroy();
  *   AJEsignFieldEditor.open( opts + onSave / onCancel )   // same editor in a full-screen dialog
  *
  * `fill` empty = the signer fills the box in BreezeDoc; `fill` set = the text ({{tokens}} allowed) is
@@ -23,7 +24,7 @@
 
 	var TYPES = [
 		[ 'signature', 'Signature', 180, 36 ], [ 'initials', 'Initials', 60, 28 ], [ 'text', 'Text', 160, 14 ],
-		[ 'email', 'Email', 160, 14 ], [ 'date', 'Date', 90, 14 ], [ 'checkbox', 'Checkbox', 12, 12 ]
+[ 'email', 'Email', 160, 14 ], [ 'date', 'Date', 90, 14 ], [ 'checkbox', 'Checkbox', 12, 12 ], [ 'label', 'Label', 180, 14 ]
 	];
 	var COLORS = [ '#4f46e5', '#059669', '#d97706', '#db2777', '#0891b2', '#7c3aed' ];
 	var CSS = '' +
@@ -86,7 +87,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 		var signers = opts.signers && opts.signers.length ? opts.signers.slice() : [ 'Signer' ];
 		var merge = opts.mergeFields || {};
 		( opts.fields || [] ).forEach( function ( f ) { while ( signers.length < f.party ) { signers.push( 'Signer ' + ( signers.length + 1 ) ); } } );
-		var previewMode = false, values = {};
+		var previewMode = !! ( opts.previewDefault && opts.resolveValues ), values = null;
 		var pdf = null, pageNo = 1, pageW = 612, pageH = 792, tool = '', sel = null, rendering = false, dead = false;
 
 		host.innerHTML = '';
@@ -115,7 +116,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 		bar.appendChild( detect ); bar.appendChild( clearPg );
 		bar.appendChild( el( 'span', { cls: 'sp' } ) );
 		if ( opts.resolveValues ) {
-			var pvLabel = el( 'label', { title: 'Show the real customer values on the page, as they will print. You can still drag, drop and edit.' } ), pvBox = el( 'input', { type: 'checkbox' } );
+			var pvLabel = el( 'label', { title: 'Show the real customer values on the page, as they will print. You can still drag, drop and edit.' } ),pvBox = el( 'input', { type: 'checkbox' } ); pvBox.checked = previewMode; if ( previewMode ) { setTimeout( function () { layer.classList.add( 'pv' ); loadValues(); }, 0 ); }
 			pvLabel.style.cssText = 'display:inline-flex;align-items:center;gap:6px;font-weight:600;cursor:pointer'; pvBox.style.cssText = 'width:auto;height:auto';
 			pvLabel.appendChild( pvBox ); pvLabel.appendChild( document.createTextNode( 'Preview with values' ) ); bar.appendChild( pvLabel );
 			pvBox.addEventListener( 'change', function () { previewMode = pvBox.checked; layer.classList.toggle( 'pv', previewMode ); if ( previewMode ) { loadValues(); } else { paint(); } } );
@@ -140,33 +141,56 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 		var fieldsSec = section( 'Fields — drag onto the page', true );
 		var searchAll = el( 'input', { type: 'search', placeholder: 'Search fields…' } );
 		searchAll.style.margin = '4px 0 8px'; fieldsSec.appendChild( searchAll );
-		var grpA = el( 'div' ), grpB = el( 'div' ), palette = el( 'div' ), mList = el( 'div', { cls: 'ajfe-mlist' } );
-		mList.style.maxHeight = '260px';
 		function groupLabel( t ) { var h = el( 'h4', { text: t } ); h.style.margin = '4px 0 6px'; return h; }
-		TYPES.forEach( function ( t ) {
+		function makeTypeChip( type, host ) {
+			var t = TYPES.filter( function ( x ) { return x[0] === type; } )[0];
 			var c = el( 'button', { cls: 'ajfe-chip', draggable: 'true', title: 'Drag onto the page, or click then click the page' } );
 			c.appendChild( el( 'i' ) ); c.appendChild( el( 'span', { text: t[1] } ) ); c.setAttribute( 'data-label', t[1].toLowerCase() );
 			c.addEventListener( 'dragstart', function ( e ) { e.dataTransfer.setData( 'text/plain', 'ajfe:' + t[0] ); e.dataTransfer.effectAllowed = 'copy'; ghost( e, t[2], t[3], t[1], 'checkbox' === t[0] ); } );
 			c.addEventListener( 'dragend', function () { dragging = null; hideHint(); } );
 			c.addEventListener( 'click', function () { setTool( tool === t[0] ? '' : t[0] ); } );
-			chips[ t[0] ] = c; palette.appendChild( c );
+			chips[ t[0] ] = c; host.appendChild( c );
+		}
+		// Signer fields: only what the signer does. Fields I fill in myself (printed text, ticked boxes) are separate.
+		var grpA = el( 'div' ), grpM = el( 'div' ), palA = el( 'div' ), palM = el( 'div' );
+		palA.style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:4px';palM.style.cssText = 'display:grid;grid-template-columns:repeat(2,1fr);gap:4px';
+		[ 'signature', 'initials', 'text' ].forEach( function ( k ) { makeTypeChip( k, palA ); } );
+[ 'label', 'date', 'email', 'checkbox' ].forEach( function ( k ) { makeTypeChip( k, palM ); } );
+chips.label.title = 'Text I type once (or build from variables) — printed on every document'; chips.checkbox.title = 'A box I tick — printed as a bold X'; chips.date.title = 'A date I print (today by default) — not left for the signer'; chips.email.title = 'An email address I print';
+grpA.appendChild( groupLabel( 'Signer fills in' ) ); grpA.appendChild( palA );
+		var mineSec = section( 'I fill in — with my customer & company data below', true ); mineSec.appendChild( palM ); grpM.appendChild( mineSec );
+		fieldsSec.appendChild( grpA ); fieldsSec.appendChild( grpM );
+
+		// Customer, company and asked-when-sending values: collapsible groups of ready-made variables.
+		var groupDefs = [ [ 'our', 'Our company', true ], [ 'customer', 'Customer', true ], [ 'ask', 'Asked when sending', true ], [ 'business', 'Business profile', false ], [ 'mailbox', 'Mailbox', false ], [ 'other', 'Dates & signer', false ] ], groups = {};
+		function groupOf( tok ) { if ( '__ask' === tok ) { return 'ask'; } var p = String( tok ).split( '.' )[0]; return { our: 'our', customer: 'customer', ask: 'ask', business: 'business', mailbox: 'mailbox' }[ p ] || 'other'; }
+		groupDefs.forEach( function ( g ) {
+			var d = section( g[1], g[2] ), list = el( 'div', { cls: 'ajfe-mlist' } );
+			list.style.maxHeight = 'none'; d.appendChild( list ); groups[ g[0] ] = { el: d, list: list, def: g, n: 0, sum: d.firstChild };
 		} );
 		var mEntries = [ [ '__ask', 'Ask when sending…' ] ].concat( Object.keys( merge ).map( function ( k ) { return [ k, merge[ k ] ]; } ) );
 		mEntries.forEach( function ( m ) {
+			var g = groups[ groupOf( m[0] ) ], shown = String( m[1] ).replace( /^(Customer|Business|Our company|Mailbox|Signer 1|Asked) — /, '' );
 			var c = el( 'button', { cls: 'ajfe-chip', draggable: 'true', title: '__ask' === m[0] ? 'A value you type in each time you send' : '{{' + m[0] + '}}' } );
-			c.appendChild( el( 'span', { text: m[1] } ) ); c.setAttribute( 'data-label', m[1].toLowerCase() + ' ' + m[0].toLowerCase() );
-			c.addEventListener( 'dragstart', function ( e ) { var sz = tokenSize( m[0] ); e.dataTransfer.setData( 'text/plain', 'ajfe:merge:' + m[0] ); e.dataTransfer.effectAllowed = 'copy'; ghost( e, sz[0], sz[1], m[1], false ); } );
+			c.appendChild( el( 'span', { text: shown } ) ); c.setAttribute( 'data-label', String( m[1] ).toLowerCase() + ' ' + m[0].toLowerCase() + ' ' + g.def[1].toLowerCase() );
+			c.addEventListener( 'dragstart', function ( e ) { var sz = tokenSize( m[0] ); e.dataTransfer.setData( 'text/plain', 'ajfe:merge:' + m[0] ); e.dataTransfer.effectAllowed = 'copy'; ghost( e, sz[0], sz[1], shown, false ); } );
 			c.addEventListener( 'dragend', function () { dragging = null; hideHint(); } );
 			c.addEventListener( 'click', function () { setTool( tool === 'merge:' + m[0] ? '' : 'merge:' + m[0] ); } );
-			mChips[ m[0] ] = c; mList.appendChild( c );
+			mChips[ m[0] ] = c; g.list.appendChild( c ); g.n++;
 		} );
-		grpA.appendChild( groupLabel( 'Signer fields' ) ); grpA.appendChild( palette ); grpB.appendChild( groupLabel( 'Customer & company' ) ); grpB.appendChild( mList );
-		fieldsSec.appendChild( grpA ); fieldsSec.appendChild( grpB ); own.appendChild( fieldsSec );
+		groupDefs.forEach( function ( g ) { var G = groups[ g[0] ]; if ( G.n ) { G.sum.textContent = g[1] + ' (' + G.n + ')'; fieldsSec.appendChild( G.el ); } } );
+		own.appendChild( fieldsSec );
 		searchAll.addEventListener( 'input', function () {
-			var q = searchAll.value.toLowerCase().trim(), na = 0, nb = 0;
-			Object.keys( chips ).forEach( function ( k ) { var ok = ! q || chips[ k ].getAttribute( 'data-label' ).indexOf( q ) >= 0; chips[ k ].style.display = ok ? '' : 'none'; if ( ok ) { na++; } } );
-			Object.keys( mChips ).forEach( function ( k ) { var ok = ! q || mChips[ k ].getAttribute( 'data-label' ).indexOf( q ) >= 0; mChips[ k ].style.display = ok ? '' : 'none'; if ( ok ) { nb++; } } );
-			grpA.style.display = na ? '' : 'none'; grpB.style.display = nb ? '' : 'none';
+			var q = searchAll.value.toLowerCase().trim(), na = 0, nm = 0;
+			[ 'signature', 'initials', 'text' ].forEach( function ( k ) { var ok = ! q || chips[ k ].getAttribute( 'data-label' ).indexOf( q ) >= 0; chips[ k ].style.display = ok ? '' : 'none'; if ( ok ) { na++; } } );
+[ 'label', 'date', 'email', 'checkbox' ].forEach( function ( k ) { var ok = ! q || chips[ k ].getAttribute( 'data-label' ).indexOf( q ) >= 0; chips[ k ].style.display = ok ? '' : 'none'; if ( ok ) { nm++; } } );
+			grpA.style.display = na ? '' : 'none'; grpM.style.display = nm ? '' : 'none';
+			groupDefs.forEach( function ( g ) {
+				var G = groups[ g[0] ], n = 0; if ( ! G.n ) { return; }
+				G.list.childNodes.forEach( function ( ch ) { var ok = ! q || ch.getAttribute( 'data-label' ).indexOf( q ) >= 0; ch.style.display = ok ? '' : 'none'; if ( ok ) { n++; } } );
+				G.el.style.display = n ? '' : 'none';
+				if ( q ) { G.el.setAttribute( 'open', '' ); } else if ( G.def[2] ) { G.el.setAttribute( 'open', '' ); } else { G.el.removeAttribute( 'open' ); }
+			} );
 		} );
 		var insp = el( 'div' ); own.insertBefore( insp, own.firstChild ); // the selected field sits at the top of the panel
 
@@ -175,7 +199,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 			var cur = partySel.value; partySel.innerHTML = '';
 			signers.forEach( function ( r, i ) { partySel.appendChild( el( 'option', { value: String( i + 1 ), text: ( i + 1 ) + '. ' + ( r || 'Signer' ) } ) ); } );
 			if ( cur && parseInt( cur, 10 ) <= signers.length ) { partySel.value = cur; }
-			TYPES.forEach( function ( t ) { chips[ t[0] ].firstChild.style.background = color( parseInt( partySel.value, 10 ) || 1 ); } );
+TYPES.forEach( function ( t ) { if ( chips[ t[0] ] && chips[ t[0] ].firstChild ) { chips[ t[0] ].firstChild.style.background = color( parseInt( partySel.value, 10 ) || 1 ); } } );
 		}
 		function syncSignerSel() { if ( sel ) { partySel.value = String( sel.party ); renderSigners(); } }
 		partySel.addEventListener( 'change', function () {
@@ -203,19 +227,18 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 			}
 			insp.appendChild( el( 'h4', { text: 'Selected field' } ) );
 			var typeSel = el( 'select' );
-			TYPES.forEach( function ( t ) { var o = el( 'option', { value: t[0], text: t[1] } ); if ( t[0] === sel.type ) { o.selected = true; } typeSel.appendChild( o ); } );
+TYPES.forEach( function ( t ) { if ( ! chips[ t[0] ] && t[0] !== sel.type ) { return; } var o = el( 'option', { value: t[0], text: t[1] } ); if ( t[0] === sel.type ) { o.selected = true; } typeSel.appendChild( o ); } );
 			typeSel.addEventListener( 'change', function () { sel.type = typeSel.value; paint(); renderInsp(); changed(); } );
 			typeSel.style.marginBottom = '6px'; insp.appendChild( typeSel );
 			if ( 'checkbox' === sel.type ) {
-				var ckl = el( 'label' ), ck = el( 'input', { type: 'checkbox' } );
-				ckl.style.cssText = 'display:flex;align-items:center;gap:6px;font-weight:600;margin-bottom:6px;cursor:pointer'; ck.style.cssText = 'width:auto;height:auto'; ck.checked = !! sel.checked;
-				ckl.appendChild( ck ); ckl.appendChild( document.createTextNode( 'Checked' ) );
-				ck.addEventListener( 'change', function () { sel.checked = ck.checked; paint(); changed(); } );
-				insp.appendChild( ckl );
+				var tg = el( 'button', { cls: 'ajfe-chip' + ( sel.checked ? ' on' : '' ), text: ( sel.checked ? '✓' : '☐' ) + ' Checked', title: 'Print this box checked (a bold X). Unchecked, the signer ticks it.' } );
+				tg.style.marginBottom = '6px';
+				tg.addEventListener( 'click', function () { sel.checked = ! sel.checked; paint(); renderInsp(); changed(); } );
+				insp.appendChild( tg );
 			}
-			if ( 'signature' !== sel.type && 'initials' !== sel.type ) {
-				insp.appendChild( el( 'h4', { text: 'checkbox' === sel.type ? 'Check when…' : 'Fill with' } ) );
-				var fill = el( 'input', { type: 'text', placeholder: 'checkbox' === sel.type ? 'optional value' : 'empty = signer fills in', value: sel.fill || '' } );
+			if ( 'signature' !== sel.type && 'initials' !== sel.type && 'checkbox' !== sel.type ) {
+insp.appendChild( el( 'h4', { text: 'label' === sel.type ? 'Text to print' : 'Fill with' } ) );
+				var fill = el( 'input', { type: 'text', placeholder: 'label' === sel.type ? 'Type text, or insert a variable below' : 'empty = signer fills in', value: sel.fill || '' } );
 				fill.addEventListener( 'input', function () { sel.fill = fill.value; paint(); changed(); } );
 				function insertToken( k ) {
 					var add = '{{' + k + '}}';
@@ -250,7 +273,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 
 		// ── boxes on the page ────────────────────────────────────────────────────
 		function loadValues() {
-			Promise.resolve( opts.resolveValues() ).then( function ( v ) { values = v || {}; paint(); } ).catch( function () { values = {}; paint(); } );
+Promise.resolve( opts.resolveValues() ).then( function ( v ) { values = v || null; paint(); } ).catch( function () { values = null; paint(); } );
 		}
 		function resolveText( t ) { return String( t || '' ).replace( /\{\{\s*([a-z0-9_.]+)\s*\}\}/gi, function ( m, k ) { var v = values[ k.toLowerCase() ]; return v === undefined || v === null ? '' : String( v ); } ); }
 		function paint() {
@@ -262,7 +285,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 				var label = ( TYPES.filter( function ( t ) { return t[0] === f.type; } )[0] || [ '', f.type ] )[1];
 				if ( 'checkbox' === f.type ) { label = f.checked ? '✓' : ''; }
 				if ( 'checkbox' === f.type && ! ( previewMode && f.fill ) ) { b.style.padding = '0'; b.style.background = c + '1a'; }
-				var showVals = previewMode && ( f.fill || ( 'checkbox' === f.type && f.checked ) ) && 'signature' !== f.type && 'initials' !== f.type;
+var showVals = previewMode && values && ( f.fill || ( 'checkbox' === f.type && f.checked ) ) && 'signature' !== f.type && 'initials' !== f.type;
 				var pvText = showVals ? ( 'checkbox' === f.type && f.checked ? 'X' : resolveText( f.fill ).trim() ) : null;
 				if ( showVals ) { // live view: the value as it will be printed
 					var scale = canvas.width / pageW, hpt = f.h * pageH, wpt = f.w * pageW, fpt = hpt < 13 ? Math.max( 8, hpt * 0.85 ) : 11;
@@ -280,9 +303,10 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 					}
 					else { var em = el( 'span', { text: 'signer fills in' } ); em.style.cssText = 'color:#94a3b8;font-style:italic;font-size:9px'; b.appendChild( em ); }
 					} else {
+						if ( 'label' === f.type ) { label = f.fill || 'Label'; }
 						var lb = el( 'span', { text: label } ); if ( 'checkbox' === f.type ) { lb.style.cssText = 'display:block;width:100%;text-align:center;font-weight:700;font-size:11px'; }
 						b.appendChild( lb );
-						if ( f.fill && 'checkbox' !== f.type ) { b.appendChild( el( 'i', { text: f.fill } ) ); }
+if ( f.fill && 'checkbox' !== f.type && 'label' !== f.type ) { b.appendChild( el( 'i', { text: f.fill } ) ); }
 					}
 				var rz = el( 'span', { cls: 'rz' } ); b.appendChild( rz );
 				b.addEventListener( 'pointerdown', function ( e ) {
@@ -328,7 +352,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 		function dropAt( type, clientX, clientY, fillText, sizePt ) {
 			var t = TYPES.filter( function ( x ) { return x[0] === type; } )[0]; if ( ! t ) { return; }
 			var sz = sizePt || [ t[2], t[3] ], p = placeAt( clientX, clientY, sz[0], sz[1] );
-			var f = { type: type, party: parseInt( partySel.value, 10 ) || 1, page: pageNo, x: p.x, y: p.y, w: p.w, h: p.h, fill: fillText || '', checked: false };
+var f = { type: type, party: parseInt( partySel.value, 10 ) || 1, page: pageNo, x: p.x, y: p.y, w: p.w, h: p.h, fill: fillText || ( 'date' === type ? '{{date.short}}' : '' ), checked: false };
 			fields.push( f ); sel = f; paint(); renderInsp(); changed();
 		}
 		function dropMerge( token, cx, cy ) {

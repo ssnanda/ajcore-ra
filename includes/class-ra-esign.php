@@ -814,6 +814,13 @@ class AJCore_RA_Esign {
 				if ( $f['party'] > count( $recipients ) ) {
 					continue;
 				}
+				if ( 'label' === $f['type'] ) { // fixed text typed in the editor: always printed, never a signer field
+					$lv = trim( $this->merge_text( $f['fill'], $values ) );
+					if ( '' !== $lv ) {
+						$stamps[] = $f + array( 'value' => $lv );
+					}
+					continue;
+				}
 				if ( 'checkbox' === $f['type'] && $f['checked'] ) { // ticked by the sender: printed on the PDF as a bold X
 					$stamps[] = $f + array( 'value' => 'X' );
 					continue;
@@ -1285,9 +1292,20 @@ class AJCore_RA_Esign {
 			}
 			$c['business.address'] = 'Business — full address';
 		}
+		$our = self::our_details();
 		foreach ( self::our_fields() as $k => $label ) {
-			$c[ 'our.' . $k ] = 'Our company — ' . $label;
+			$c[ 'our.' . $k ] = 'Our company — ' . $label . ': ' . $our[ $k ];
 		}
+		$c['our.address'] = 'Our company — address: ' . implode( ', ', array_filter( array( $our['street'], trim( $our['city'] . ', ' . $our['state'] . ' ' . $our['zip'], ', ' ) ) ) );
+		$c['our.csz']     = 'Our company — city, state ZIP: ' . trim( $our['city'] . ', ' . $our['state'] . ' ' . $our['zip'], ', ' );
+		// Things asked for when sending (typed in New document): the usual ones for an Articles of Organization.
+		$c += array(
+			'ask.llc_name'        => 'Asked — LLC name',
+			'ask.principal_phone' => 'Asked — principal office phone',
+			'ask.business_email'  => 'Asked — business email',
+			'ask.effective_date'  => 'Asked — effective date',
+			'ask.other'           => 'Asked — other provisions',
+		);
 		$c += array(
 			'mailbox.pmb'            => 'Mailbox — PMB number',
 			'mailbox.start_date'     => 'Mailbox — start date',
@@ -1444,6 +1462,8 @@ class AJCore_RA_Esign {
 		foreach ( self::our_details() as $k => $val ) {
 			$v[ 'our.' . $k ] = $val;
 		}
+		$v['our.csz']     = trim( $v['our.city'] . ', ' . $v['our.state'] . ' ' . $v['our.zip'], ', ' );
+		$v['our.address'] = implode( ', ', array_filter( array( $v['our.street'], $v['our.csz'] ) ) );
 		if ( ! empty( $recipients[0] ) ) {
 			$v['signer.name']  = (string) ( $recipients[0]['name'] ?? '' );
 			$v['signer.email'] = (string) ( $recipients[0]['email'] ?? '' );
@@ -1491,7 +1511,7 @@ class AJCore_RA_Esign {
 		if ( ! is_array( $raw ) ) {
 			return array();
 		}
-		$types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox' );
+$types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'label' );
 		$out   = array();
 		foreach ( $raw as $f ) {
 			if ( ! is_array( $f ) || ! in_array( (string) ( $f['type'] ?? '' ), $types, true ) ) {
@@ -4300,6 +4320,7 @@ class AJCore_RA_Esign {
 			function rehome() { if ( reqside.parentNode !== reqHome ) { reqHome.appendChild( reqside ); } } // back into the card before the editor is torn down
 			// Live values for the "Preview with values" checkbox: every merge field resolved for the chosen customer.
 			function resolveValues() {
+				if ( ! cust.value ) { return Promise.resolve( null ); } // no customer yet: keep showing the variables
 				return fetch( base + '/merge-values', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-WP-Nonce': nonce }, body: JSON.stringify( { stripe_customer_id: cust.value, recipients: readRecipients(), vars: JSON.stringify( readVars() ) } ) } ).then( function ( r ) { return r.json(); } );
 			}
 			var rvTimer = null;
@@ -4311,7 +4332,7 @@ class AJCore_RA_Esign {
 				inlineHost.style.display = ''; inlineHost.innerHTML = '<div class="ajra-muted">Loading the document…</div>';
 				loader().then( function ( buf ) {
 					if ( seq !== inlineSeq ) { return; }
-					inlineEd = window.AJEsignFieldEditor.mount( inlineHost, { pdfData: buf, pdfjsBase: pdfjsBase, fields: fields, signers: currentRoles(), mergeFields: mergeFields, sideTop: reqside, lockSigners: true, resolveValues: resolveValues, onChange: onChange } );
+					inlineEd = window.AJEsignFieldEditor.mount( inlineHost, { pdfData: buf, pdfjsBase: pdfjsBase, fields: fields, signers: currentRoles(), mergeFields: mergeFields, sideTop: reqside, lockSigners: true, resolveValues: resolveValues, previewDefault: true, onChange: onChange } );
 				} ).catch( function ( e ) { if ( seq === inlineSeq ) { inlineHost.innerHTML = '<div class="ajra-err" style="display:block">' + esc( e.message ) + '</div>'; } } );
 			}
 			// The document and its fields sit under the form: the template's saved fields load automatically; edits apply to this request only.
