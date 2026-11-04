@@ -3498,7 +3498,8 @@ class AJCore_RA_Esign {
 			.ajra-es #ajra-es-tpl-body table{border-collapse:collapse;width:100%}.ajra-es #ajra-es-tpl-body td,.ajra-es #ajra-es-tpl-body th{border:1px solid #444;padding:4px 6px;min-width:40px}
 			.ajra-es #ajra-es-tpl-body img{max-width:100%}.ajra-es #ajra-es-tpl-body hr.pb{border:0;border-top:2px dashed #94a3b8;margin:22px 0;height:0;overflow:visible}
 			.ajra-es #ajra-es-tpl-body hr.pb::after{content:"page break";display:block;text-align:center;font-size:10px;color:#94a3b8;margin-top:-8px;background:#fff;width:80px;margin-left:auto;margin-right:auto}
-			.ajra-es .ajra-ws{display:flex;gap:12px;align-items:flex-start}.ajra-es .ajra-tree{width:240px;flex:none;border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:6px;max-height:80vh;overflow:auto}
+			.ajra-es #ajra-es-tpl-card{padding:12px}.ajra-es .ajra-wsleft{width:240px;flex:none;display:flex;flex-direction:column;gap:6px}.ajra-es .ajra-wsleft>.button{width:100%;text-align:center;justify-content:center}
+			.ajra-es .ajra-ws{display:flex;gap:12px;align-items:flex-start}.ajra-es .ajra-tree{width:100%;flex:none;border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:6px;max-height:80vh;overflow:auto}
 			.ajra-es .ajra-tg{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;padding:8px 8px 4px}
 			.ajra-es .ajra-ti{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:13px}.ajra-es .ajra-ti:hover{background:#f1f5f9}.ajra-es .ajra-ti.on{background:#eef2ff;color:#3730a3;font-weight:600}
 			.ajra-es .ajra-ti span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ajra-es .ajra-ti em{font-style:normal;font-size:10px;color:#64748b;border:1px solid #e2e8f0;border-radius:4px;padding:0 4px}
@@ -3673,14 +3674,12 @@ class AJCore_RA_Esign {
 
 			<?php if ( $connected && ! $error ) : ?>
 			<div class="ajra-card" id="ajra-es-tpl-card" data-view="templates">
-				<div class="ajra-head">
-					<h2><?php esc_html_e( 'Forms', 'ajcore-ra' ); ?> <span class="ajra-muted" id="ajra-es-tpl-count"></span></h2>
-					<span>
-						<button type="button" class="button button-primary button-small" id="ajra-es-tpl-new"><?php esc_html_e( 'New form', 'ajcore-ra' ); ?></button>
-					</span>
-				</div>
+				<span id="ajra-es-tpl-count" style="display:none"></span>
 				<div class="ajra-ws">
-					<div class="ajra-tree" id="ajra-es-tree"></div>
+					<div class="ajra-wsleft">
+						<button type="button" class="button button-primary button-small" id="ajra-es-tpl-new"><?php esc_html_e( '+ New form', 'ajcore-ra' ); ?></button>
+						<div class="ajra-tree" id="ajra-es-tree"></div>
+					</div>
 					<div class="ajra-wsmain" id="ajra-es-ws"></div>
 				</div>
 				<p class="ajra-muted" style="margin:10px 0 0"><?php esc_html_e( 'Forms live in AJCore: upload a PDF or build one, drag fields on, and fill them from customer data. BreezeDoc is only used to collect the signatures.', 'ajcore-ra' ); ?></p>
