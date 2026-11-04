@@ -4008,8 +4008,12 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 				if ( ! templates.length && '__new' !== curTpl ) { tplTree.innerHTML = '<div class="ajra-muted" style="padding:10px">No forms yet.</div>'; }
 				$( 'ajra-es-tpl-count' ).textContent = templates.length ? '(' + templates.length + ')' : '';
 			}
+			// The forms list gives way to the editor while a form is open.
+			function setList( on ) { var l = document.querySelector( '#ajra-es-tpl-card .ajra-wsleft' ); if ( l ) { l.style.display = on ? '' : 'none'; } }
+			function backBtn() { var b = document.createElement( 'button' ); b.type = 'button'; b.className = 'button button-small'; b.textContent = '← All forms'; b.style.marginBottom = '8px'; b.addEventListener( 'click', function () { selectTpl( '' ); } ); return b; }
 			function selectTpl( id ) {
 				if ( fieldEd ) { fieldEd.destroy(); fieldEd = null; }
+				setList( true );
 				curTpl = id; rememberTpl( id ); renderTree();
 				if ( '__new' === id ) { openChooser(); return; }
 				var t = templates.filter( function ( x ) { return x.id === id; } )[0];
@@ -4092,6 +4096,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 				var isNew = ! t, kind = t ? ( 'doc' === t.kind ? 'doc' : 'pdf' ) : startKind, layout = t && t.layout ? t.layout.slice() : [], newFile = null, docEl = null;
 				var signerList = t && t.recipients && t.recipients.length ? t.recipients.map( function ( r, i ) { return r.role || ( 'Signer ' + ( i + 1 ) ); } ) : [ 'Signer 1' ];
 				tplWs.innerHTML = '<div class="ajra-wsbox"><div id="ajra-es-t-host"></div></div>';
+				setList( false ); tplWs.insertBefore( backBtn(), tplWs.firstChild );
 				var host = $( 'ajra-es-t-host' );
 				// The panel holds only generic actions; it sits above the editor until it is mounted, then moves into the right panel.
 				var strip = document.createElement( 'div' ); strip.className = 'ajra-wsstrip';
