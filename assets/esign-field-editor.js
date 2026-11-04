@@ -75,6 +75,7 @@
 		var fields = ( opts.fields || [] ).map( function ( f ) { return JSON.parse( JSON.stringify( f ) ); } );
 		var signers = opts.signers && opts.signers.length ? opts.signers.slice() : [ 'Signer' ];
 		var merge = opts.mergeFields || {};
+		( opts.fields || [] ).forEach( function ( f ) { while ( signers.length < f.party ) { signers.push( 'Signer ' + ( signers.length + 1 ) ); } } );
 		var pdf = null, pageNo = 1, pageW = 612, pageH = 792, tool = '', sel = null, rendering = false, dead = false;
 
 		host.innerHTML = '';
@@ -112,7 +113,15 @@
 		} );
 		side.appendChild( palette );
 		var partyWrap = el( 'div' ), partySel = el( 'select' );
-		partyWrap.appendChild( el( 'h4', { text: 'New fields are for' } ) ); partyWrap.appendChild( partySel ); side.appendChild( partyWrap );
+		partyWrap.appendChild( el( 'h4', { text: 'New fields are for' } ) ); partyWrap.appendChild( partySel );
+		var sgRow = el( 'div' ), addSg = el( 'button', { text: '+ Add signer', title: 'Another person who signs this document' } ), rmSg = el( 'button', { text: '− Remove last' } );
+		sgRow.style.cssText = 'display:flex;gap:6px;margin-top:6px'; sgRow.appendChild( addSg ); sgRow.appendChild( rmSg ); partyWrap.appendChild( sgRow ); side.appendChild( partyWrap );
+		addSg.addEventListener( 'click', function () { signers.push( 'Signer ' + ( signers.length + 1 ) ); renderSigners(); renderInsp(); changed(); partySel.value = String( signers.length ); renderSigners(); } );
+		rmSg.addEventListener( 'click', function () {
+			if ( signers.length < 2 ) { return; }
+			if ( fields.some( function ( f ) { return f.party === signers.length; } ) ) { window.alert( 'Signer ' + signers.length + ' still has fields on the page. Delete or reassign them first.' ); return; }
+			signers.pop(); renderSigners(); renderInsp(); changed();
+		} );
 		var insp = el( 'div' ); side.appendChild( insp );
 		function renderSigners() {
 			var cur = partySel.value; partySel.innerHTML = '';
@@ -147,8 +156,15 @@
 				fill.addEventListener( 'input', function () { sel.fill = fill.value; paint(); changed(); } );
 				var tokens = el( 'select' );
 				tokens.appendChild( el( 'option', { value: '', text: 'Insert customer field…' } ) );
+				tokens.appendChild( el( 'option', { value: '__ask', text: 'Ask when sending…' } ) );
 				Object.keys( merge ).forEach( function ( k ) { tokens.appendChild( el( 'option', { value: k, text: merge[ k ] } ) ); } );
-				tokens.addEventListener( 'change', function () { if ( tokens.value ) { fill.value += '{{' + tokens.value + '}}'; sel.fill = fill.value; paint(); changed(); tokens.value = ''; } } );
+				tokens.addEventListener( 'change', function () {
+					if ( '__ask' === tokens.value ) {
+						var nm = window.prompt( 'Name of the value to ask for when sending (e.g. LLC name)' ), slug = ( nm || '' ).toLowerCase().replace( /[^a-z0-9]+/g, '_' ).replace( /^_+|_+$/g, '' );
+						tokens.value = ''; if ( slug ) { fill.value += '{{ask.' + slug + '}}'; sel.fill = fill.value; paint(); changed(); }
+						return;
+					}
+					if ( tokens.value ) { fill.value += '{{' + tokens.value + '}}'; sel.fill = fill.value; paint(); changed(); tokens.value = ''; } } );
 				fill.style.marginBottom = '6px'; insp.appendChild( fill ); insp.appendChild( tokens );
 				insp.appendChild( el( 'p', { cls: 'ajfe-hint', text: 'Filled boxes are printed on the PDF when you send. Empty boxes are filled by the signer.' + ( 'checkbox' === sel.type ? ' Any value ticks the box.' : '' ) } ) );
 			}
@@ -300,6 +316,7 @@
 
 		return {
 			getFields: function () { return fields.map( clean ); },
+			getSigners: function () { return signers.slice(); },
 			setSigners: function ( list ) { signers = list && list.length ? list.slice() : [ 'Signer' ]; renderSigners(); renderInsp(); paint(); },
 			destroy: function () { dead = true; document.removeEventListener( 'keydown', onKey ); host.innerHTML = ''; }
 		};

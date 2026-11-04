@@ -573,37 +573,11 @@ class AJCore_RA_Esign {
 	}
 
 	/** Templates from every saved credential: team (tpl_ ids) and personal (numeric ids), labelled when both exist. */
+	/** Templates are AJCore's own; BreezeDoc is only the signing engine (its templates can't be previewed or edited through the API). */
 	public function breezedoc_list_templates() {
-		$has_team = $this->breezedoc_is_v1();
-		$has_pat  = '' !== $this->setting( 'api_token' );
-		$all      = array();
-		$errors   = array();
-		foreach ( array( 'team' => $has_team, 'personal' => $has_pat ) as $source => $enabled ) {
-			if ( ! $enabled ) {
-				continue;
-			}
-			$list = $this->list_templates_source( 'team' === $source );
-			if ( is_wp_error( $list ) ) {
-				$errors[] = $list;
-				continue;
-			}
-			if ( $has_team && $has_pat ) {
-				$suffix = 'team' === $source ? __( ' (team)', 'ajcore-ra' ) : __( ' (personal)', 'ajcore-ra' );
-				foreach ( $list as $i => $t ) {
-					$list[ $i ]['title'] = ( '' !== $t['title'] ? $t['title'] : $t['id'] ) . $suffix;
-				}
-			}
-			$all = array_merge( $all, $list );
-		}
+		$all = array();
 		foreach ( $this->local_templates() as $meta ) {
-			$shape = $this->local_template_shape( $meta );
-			if ( $has_team || $has_pat ) {
-				$shape['title'] .= __( ' (AJCore)', 'ajcore-ra' );
-			}
-			$all[] = $shape;
-		}
-		if ( empty( $all ) && ! empty( $errors ) ) {
-			return $errors[0];
+			$all[] = $this->local_template_shape( $meta );
 		}
 		return $all;
 	}
@@ -833,7 +807,7 @@ class AJCore_RA_Esign {
 		$have   = array();
 		$layout = ! empty( $options['layout'] ) ? self::clean_layout( $options['layout'] ) : array();
 		if ( $layout ) {
-			$values = $this->merge_values( $stripe_customer_id, $recipients );
+			$values = $this->merge_values( $stripe_customer_id, $recipients, isset( $options['vars'] ) && is_array( $options['vars'] ) ? $options['vars'] : array() );
 			$stamps = array();
 			foreach ( $layout as $f ) {
 				if ( $f['party'] > count( $recipients ) ) {
@@ -1163,6 +1137,30 @@ class AJCore_RA_Esign {
 		return $this->local_template_shape( $meta );
 	}
 
+	/** Copies a template (and its stored PDF) under a new id. */
+	public function duplicate_local_template( $id ) {
+		$all = $this->local_templates();
+		$id  = (string) $id;
+		if ( ! isset( $all[ $id ] ) ) {
+			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+		}
+		$meta          = $all[ $id ];
+		$meta['id']    = 'ajt_' . strtolower( wp_generate_password( 10, false ) );
+		$meta['title'] = mb_substr( sprintf( /* translators: %s: template name */ __( '%s (copy)', 'ajcore-ra' ), (string) $meta['title'] ), 0, 191 );
+		$meta['created'] = current_time( 'mysql' );
+		if ( '' !== (string) ( $meta['file'] ?? '' ) ) {
+			$src = $this->tpl_dir() . '/' . basename( (string) $meta['file'] );
+			$new = $meta['id'] . '.pdf';
+			if ( ! is_readable( $src ) || ! copy( $src, $this->tpl_dir() . '/' . $new ) ) {
+				return new WP_Error( 'copy_failed', __( 'Could not copy the template file.', 'ajcore-ra' ), array( 'status' => 500 ) );
+			}
+			$meta['file'] = $new;
+		}
+		$all[ $meta['id'] ] = $meta;
+		update_option( self::TPL_OPTION, $all, false );
+		return $this->local_template_shape( $meta );
+	}
+
 	/** Really deletes an AJCore template and its stored PDF. */
 	public function delete_local_template( $id ) {
 		$all = $this->local_templates();
@@ -1187,7 +1185,7 @@ class AJCore_RA_Esign {
 		}
 		$meta = $all[ $template_id ];
 		if ( ( $meta['kind'] ?? 'pdf' ) === 'doc' ) {
-			$pdf = $this->render_doc_template( $meta, $stripe_customer_id, $recipients );
+			$pdf = $this->render_doc_template( $meta, $stripe_customer_id, $recipients, false, isset( $options['vars'] ) && is_array( $options['vars'] ) ? $options['vars'] : array() );
 			if ( is_wp_error( $pdf ) ) {
 				return $pdf;
 			}
@@ -1205,8 +1203,8 @@ class AJCore_RA_Esign {
 		if ( ! is_readable( $path ) ) {
 			return new WP_Error( 'file_missing', __( 'The template PDF is missing — edit the template and upload it again.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
-		if ( ! empty( $meta['layout'] ) ) {
-			$options['layout'] = $meta['layout'];
+		if ( ! empty( $meta['layout'] ) && empty( $options['layout'] ) ) {
+			$options['layout'] = $meta['layout']; // a layout adjusted at send time wins
 		}
 		if ( isset( $meta['sig_x'] ) ) {
 			$options['sig_x'] = (float) $meta['sig_x'] / 100;
@@ -1231,12 +1229,16 @@ class AJCore_RA_Esign {
 			'signer.email'     => 'Signer 1 email',
 			'date'             => 'Today (long date)',
 			'date.short'       => 'Today (numeric)',
+			'date.day'         => 'Today — day',
+			'date.month'       => 'Today — month name',
+			'date.year'        => 'Today — year (4 digits)',
+			'date.year2'       => 'Today — year (2 digits)',
 			'company'          => 'Your site / business name',
 		);
 	}
 
 	/** Values for the merge fields for one customer (blank when unknown). */
-	private function merge_values( $stripe_customer_id, array $recipients ) {
+	private function merge_values( $stripe_customer_id, array $recipients, array $vars = array() ) {
 		$v = array_fill_keys( array_keys( self::merge_field_catalog() ), '' );
 		$pdb = $this->get_pdb();
 		$id  = (string) $stripe_customer_id;
@@ -1279,6 +1281,14 @@ class AJCore_RA_Esign {
 		}
 		$v['date']       = wp_date( 'F j, Y' );
 		$v['date.short'] = wp_date( 'm/d/Y' );
+		$v['date.day']   = wp_date( 'j' );
+		$v['date.month'] = wp_date( 'F' );
+		$v['date.year']  = wp_date( 'Y' );
+		$v['date.year2'] = wp_date( 'y' );
+		// Values asked for at send time: {{ask.llc_name}} etc.
+		foreach ( $vars as $k => $val ) {
+			$v[ 'ask.' . sanitize_key( (string) $k ) ] = sanitize_text_field( (string) $val );
+		}
 		$v['company']    = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
 		return $v;
 	}
@@ -1295,8 +1305,8 @@ class AJCore_RA_Esign {
 	}
 
 	/** Merged PDF bytes for a document template. Last page is always a signature page. */
-	private function render_doc_template( array $meta, $stripe_customer_id, array $recipients, $preview = false ) {
-		$values = $this->merge_values( $stripe_customer_id, $recipients );
+	private function render_doc_template( array $meta, $stripe_customer_id, array $recipients, $preview = false, array $vars = array() ) {
+		$values = $this->merge_values( $stripe_customer_id, $recipients, $vars );
 		if ( ( $meta['format'] ?? 'text' ) === 'html' ) {
 			return $this->build_html_pdf( (string) $meta['title'], $this->merge_html( (string) $meta['body'], $values, $preview ) );
 		}
@@ -2499,6 +2509,7 @@ class AJCore_RA_Esign {
 		};
 		$catalog[] = $e( 'GET', '/ops/esign/test', 'Tests the BreezeDoc Team API key (or legacy Personal token).' );
 		$catalog[] = $e( 'GET', '/ops/esign/templates', 'Lists BreezeDoc templates (id, title, numbered signer parties).' );
+		$catalog[] = $e( 'POST', '/ops/esign/templates/duplicate', 'Copies an AJCore template (and its PDF). JSON: id.' );
 		$catalog[] = $e( 'POST', '/ops/esign/templates/save', 'Creates or updates an AJCore template (multipart: id?, title, signers[] role labels, page, pdf). AJCore templates are sent through the PDF upload (Team key).' );
 		$catalog[] = $e( 'POST', '/ops/esign/templates/delete', 'Deletes an AJCore template and its stored PDF (body: id).' );
 		$catalog[] = $e( 'GET', '/ops/esign/templates/{id}/file', 'Streams an AJCore template PDF.' );
@@ -2550,6 +2561,7 @@ class AJCore_RA_Esign {
 				'/templates/' . $tpl_re . '/file' => array( $r, 'rest_template_file' ),
 				'/templates/save'            => array( 'POST', 'rest_template_save' ),
 				'/templates/delete'          => array( 'POST', 'rest_template_delete' ),
+				'/templates/duplicate'       => array( 'POST', 'rest_template_duplicate' ),
 				'/send'                      => array( 'POST', 'rest_send' ),
 				'/send-pdf'                  => array( 'POST', 'rest_send_pdf' ),
 				'/documents'                 => array( $r, 'rest_documents' ),
@@ -2607,6 +2619,10 @@ class AJCore_RA_Esign {
 		return $this->rest_result( $this->save_local_template( sanitize_text_field( (string) $request->get_param( 'id' ) ), (string) $request->get_param( 'title' ), (array) $signers, (int) $request->get_param( 'page' ), $files['pdf'] ?? null, (string) $request->get_param( 'kind' ), (string) $request->get_param( 'body' ),$request->get_param( 'sig_x' ), $request->get_param( 'sig_y' ), $request->get_param( 'layout' ) ) );
 	}
 
+	public function rest_template_duplicate( WP_REST_Request $request ) {
+		return $this->rest_result( $this->duplicate_local_template( sanitize_text_field( (string) $request->get_param( 'id' ) ) ) );
+	}
+
 	public function rest_template_delete( WP_REST_Request $request ) {
 		return $this->rest_result( $this->delete_local_template( sanitize_text_field( (string) $request->get_param( 'id' ) ) ) );
 	}
@@ -2634,6 +2650,13 @@ class AJCore_RA_Esign {
 		}
 		if ( '' !== (string) $request->get_param( 'layout' ) ) {
 			$options['layout'] = (string) $request->get_param( 'layout' );
+		}
+		$vars = $request->get_param( 'vars' );
+		if ( is_string( $vars ) ) {
+			$vars = json_decode( $vars, true );
+		}
+		if ( is_array( $vars ) ) {
+			$options['vars'] = array_slice( $vars, 0, 30, true );
 		}
 		return $options;
 	}
@@ -2878,6 +2901,7 @@ class AJCore_RA_Esign {
 			.ajra-es .ajra-ti span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ajra-es .ajra-ti em{font-style:normal;font-size:10px;color:#64748b;border:1px solid #e2e8f0;border-radius:4px;padding:0 4px}
 			.ajra-es .ajra-wsmain{flex:1;min-width:0}.ajra-es .ajra-wsbox{border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;padding:10px}
 			.ajra-es .ajra-wshead{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}.ajra-es .ajra-wsstrip{display:flex;flex-direction:column;gap:8px;padding-bottom:8px;border-bottom:1px solid #e2e8f0}.ajra-es .ajra-wsstrip input[type=text]{width:100%}.ajra-es .ajra-wsstrip .ajra-grid{grid-template-columns:repeat(3,1fr);gap:6px}
+			.ajra-es .ajra-choice{border:1px solid #cbd5e1;border-radius:10px;background:#fff;padding:14px;cursor:pointer;display:flex;flex-direction:column;gap:4px}.ajra-es .ajra-choice:hover{border-color:#4f46e5;box-shadow:0 0 0 2px #e0e7ff}
 			.ajra-es .ajra-wsrow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
 			.ajra-es .ajra-role{display:inline-flex;align-items:center;gap:2px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding-right:6px}.ajra-es .ajra-role input{border:0;box-shadow:none;width:110px;min-height:28px}.ajra-es .ajra-role a{text-decoration:none;color:#64748b}
 			@media(max-width:900px){.ajra-es .ajra-ws{flex-direction:column}.ajra-es .ajra-tree{width:auto;align-self:stretch;max-height:220px}}
@@ -2982,8 +3006,6 @@ class AJCore_RA_Esign {
 			<?php else : ?>
 				<?php if ( $error ) : ?>
 					<div class="notice notice-error inline" data-view="templates new settings"><p><?php echo esc_html( sprintf( /* translators: %s: error */ __( 'Templates could not be loaded: %s', 'ajcore-ra' ), $error ) ); ?></p></div>
-				<?php elseif ( empty( $templates ) ) : ?>
-					<div class="notice notice-info inline" data-view="templates"><p><?php echo esc_html( $is_v1 ? __( 'Connected — this BreezeDoc team has no templates yet. Create one at breezedoc.com (Templates), or use Upload PDF.', 'ajcore-ra' ) : __( 'Connected — no templates found in this BreezeDoc account.', 'ajcore-ra' ) ); ?></p></div>
 				<?php endif; ?>
 
 				<div class="ajra-card" data-view="new">
@@ -3004,6 +3026,8 @@ class AJCore_RA_Esign {
 							<div id="ajra-es-tpl-wrap">
 								<label><?php esc_html_e( 'Template', 'ajcore-ra' ); ?></label>
 								<select id="ajra-es-template"><option value=""><?php esc_html_e( '— pick a template —', 'ajcore-ra' ); ?></option></select>
+								<div id="ajra-es-tplfields-wrap" style="display:none;margin-top:6px"><button type="button" class="button button-small" id="ajra-es-tplfields"><?php esc_html_e( 'Place fields…', 'ajcore-ra' ); ?></button> <span class="ajra-muted" id="ajra-es-tplfields-count"></span> <span class="ajra-muted"><?php esc_html_e( 'Adjust the fields for this request only.', 'ajcore-ra' ); ?></span></div>
+								<div id="ajra-es-vars" style="display:none;margin-top:8px"></div>
 							</div>
 							<div id="ajra-es-pdf-wrap" style="display:none">
 								<label><?php esc_html_e( 'PDF (max 25 MB, 100 pages)', 'ajcore-ra' ); ?></label>
@@ -3276,48 +3300,27 @@ class AJCore_RA_Esign {
 			}
 			function renderTree() {
 				tplTree.innerHTML = '';
-				var groups = [ [ 'AJCore templates', 'ajcore' ], [ 'BreezeDoc — team', 'team' ], [ 'BreezeDoc — personal', 'personal' ] ];
-				function item( label, id, tag ) {
+				function item( label, id ) {
 					var d = document.createElement( 'div' ); d.className = 'ajra-ti' + ( curTpl === id ? ' on' : '' );
-					d.innerHTML = '<span>' + esc( label ) + '</span>' + ( tag ? '<em>' + esc( tag ) + '</em>' : '' );
-					d.addEventListener( 'click', function () { selectTpl( id ); } ); return d;
+					d.innerHTML = '<span>' + esc( label ) + '</span>'; d.addEventListener( 'click', function () { selectTpl( id ); } ); return d;
 				}
-				if ( '__new' === curTpl ) {
-					tplTree.insertAdjacentHTML( 'beforeend', '<div class="ajra-tg">New</div>' ); tplTree.appendChild( item( 'Untitled template', '__new', '' ) );
-				}
-				groups.forEach( function ( g ) {
-					var list = templates.filter( function ( t ) { return tplSource( t ) === g[1]; } );
-					if ( ! list.length ) { return; }
-					tplTree.insertAdjacentHTML( 'beforeend', '<div class="ajra-tg">' + esc( g[0] ) + ' (' + list.length + ')</div>' );
-					list.forEach( function ( t ) { tplTree.appendChild( item( ( t.rawTitle || t.title || t.id ).replace( /\s*\((personal|team|AJCore)\)\s*$/, '' ), t.id, 'ajcore' === g[1] ? ( 'doc' === t.kind ? 'doc' : 'pdf' ) : '' ) ); } );
-				} );
+				if ( '__new' === curTpl ) { tplTree.appendChild( item( 'New template', '__new' ) ); }
+				templates.forEach( function ( t ) { tplTree.appendChild( item( t.rawTitle || t.title || t.id, t.id ) ); } );
+				if ( ! templates.length && '__new' !== curTpl ) { tplTree.innerHTML = '<div class="ajra-muted" style="padding:10px">No templates yet.</div>'; }
 				$( 'ajra-es-tpl-count' ).textContent = templates.length ? '(' + templates.length + ')' : '';
 			}
 			function selectTpl( id ) {
 				if ( fieldEd ) { fieldEd.destroy(); fieldEd = null; }
 				curTpl = id; rememberTpl( id ); renderTree();
-				if ( '__new' === id ) { openLocal( null ); return; }
+				if ( '__new' === id ) { openChooser(); return; }
 				var t = templates.filter( function ( x ) { return x.id === id; } )[0];
 				if ( ! t ) { tplWs.innerHTML = '<div class="ajra-empty">Select a template on the left, or create a new one.</div>'; return; }
-				if ( 'ajcore' === t.source ) { openLocal( t ); } else { openRemote( t ); }
+				openLocal( t, '' );
 			}
-
-			// BreezeDoc templates: details only (its API exposes no document or editor).
-			function openRemote( t ) {
-				var src = tplSource( t );
-				tplWs.innerHTML = '<div class="ajra-wsbox"><div class="ajra-wshead"><strong>' + esc( ( t.rawTitle || t.title || t.id ).replace( /\s*\((personal|team)\)\s*$/, '' ) ) + '</strong><span class="ajra-tag">' + src + '</span>' +
-					'<span style="flex:1"></span><button type="button" class="button button-small" id="ajra-es-r-use">Use template</button>' +
-					'<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" title="Open BreezeDoc, then Templates → Edit">Edit in BreezeDoc</a>' +
-					'<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" style="color:#b32d2e" title="Open BreezeDoc, then Templates → Delete">Delete in BreezeDoc</a></div>' +
-					'<div id="ajra-es-r-body" class="ajra-muted">Loading…</div><p class="ajra-muted" style="margin-top:10px">BreezeDoc keeps the document and its fields on its side, so they can only be previewed and edited in BreezeDoc. For a template you can preview, edit and place fields on here, create an AJCore template.</p></div>';
-				$( 'ajra-es-r-use' ).addEventListener( 'click', function () { useTemplate( t ); } );
-				api( '/templates/' + encodeURIComponent( t.id ) ).then( function ( d ) {
-					var byParty = {}, fields = d.fields || [];
-					fields.forEach( function ( f ) { var k = f.party || 0; ( byParty[ k ] = byParty[ k ] || [] ).push( ( f.type || 'field' ) + ( f.label ? ' “' + f.label + '”' : '' ) + ( f.page ? ' (p.' + f.page + ')' : '' ) ); } );
-					var html = ( d.recipients || [] ).map( function ( r ) { return '<div><strong>Party ' + esc( r.party ) + '</strong>' + ( r.name ? ' — ' + esc( r.name ) : '' ) + ( byParty[ r.party ] ? ': ' + esc( byParty[ r.party ].join( ', ' ) ) : '' ) + '</div>'; } ).join( '' );
-					if ( ! html && fields.length ) { html = '<div>' + esc( fields.map( function ( f ) { return f.type; } ).join( ', ' ) ) + '</div>'; }
-					$( 'ajra-es-r-body' ).innerHTML = ( html || 'BreezeDoc returned no signer or field details for this template.' ) + '<div style="margin-top:6px">' + fields.length + ' field(s) in total.</div>';
-				} ).catch( function ( e ) { $( 'ajra-es-r-body' ).textContent = e.message; } );
+			function openChooser() {
+				tplWs.innerHTML = '<div class="ajra-wsbox"><div class="ajra-grid" style="max-width:640px"><div class="ajra-choice" data-k="pdf"><strong>Upload a PDF</strong><span class="ajra-muted">An existing form or contract. Drag signature, text, date and checkbox fields onto it.</span></div>' +
+					'<div class="ajra-choice" data-k="doc"><strong>Build a document</strong><span class="ajra-muted">Write it here with tables and images; customer details are merged in when you send.</span></div></div></div>';
+				tplWs.querySelectorAll( '.ajra-choice' ).forEach( function ( c ) { c.addEventListener( 'click', function () { openLocal( null, c.getAttribute( 'data-k' ) ); } ); } );
 			}
 
 			// AJCore templates: settings strip + preview/editor + fields panel.
@@ -3384,71 +3387,62 @@ class AJCore_RA_Esign {
 				return ed;
 			}
 
-			function openLocal( t ) {
-				var isNew = ! t, kind = t ? ( 'doc' === t.kind ? 'doc' : 'pdf' ) : 'pdf', layout = t && t.layout ? t.layout.slice() : [], newFile = null, docEl = null;
-				var roles = t && t.recipients && t.recipients.length ? t.recipients.map( function ( r ) { return r.role || ''; } ) : [ 'Client' ];
+			function openLocal( t, startKind ) {
+				var isNew = ! t, kind = t ? ( 'doc' === t.kind ? 'doc' : 'pdf' ) : startKind, layout = t && t.layout ? t.layout.slice() : [], newFile = null, docEl = null;
+				var signerList = t && t.recipients && t.recipients.length ? t.recipients.map( function ( r, i ) { return r.role || ( 'Signer ' + ( i + 1 ) ); } ) : [ 'Signer 1' ];
 				tplWs.innerHTML = '<div class="ajra-wsbox"><div id="ajra-es-t-host"></div></div>';
 				var host = $( 'ajra-es-t-host' );
-				// Settings live in one block that sits above the editor until it is mounted, then moves into the right panel.
+				// The panel holds only generic actions; it sits above the editor until it is mounted, then moves into the right panel.
 				var strip = document.createElement( 'div' ); strip.className = 'ajra-wsstrip';
 				strip.innerHTML = '<input type="text" id="ajra-es-t-title" maxlength="191" placeholder="Template name">' +
-					'<div class="ajra-wsrow">' + ( isNew ? '<select id="ajra-es-t-kind"><option value="pdf">Uploaded PDF</option><option value="doc">Build document</option></select>' : '<span class="ajra-tag">' + ( 'doc' === kind ? 'build document' : 'pdf' ) + '</span>' ) + '</div>' +
-					'<div><div class="ajra-muted" style="margin-bottom:3px">Signers (in order)</div><div id="ajra-es-t-roles" class="ajra-wsrow"></div><button type="button" class="button button-small" id="ajra-es-t-addrole">+ Signer</button></div>' +
-					( t && 'doc' !== kind ? '<div id="ajra-es-t-replwrap"><div class="ajra-muted" style="margin-bottom:3px">Replace PDF <span title="Placed fields stay where they are">(fields stay)</span></div><input type="file" id="ajra-es-t-repl" accept="application/pdf,.pdf" style="max-width:100%"></div>' : '' ) +
-					'<div class="ajra-wsrow">' + ( isNew ? '' : '<button type="button" class="button button-small" id="ajra-es-t-use">Use template</button><a class="button button-small" target="_blank" rel="noopener noreferrer" id="ajra-es-t-prev" href="' + esc( tplFileUrl( t.id ) ) + '">Preview PDF</a><button type="button" class="button button-small" id="ajra-es-t-del" style="color:#b32d2e">Delete</button>' ) +
-					'<button type="button" class="button button-primary button-small" id="ajra-es-t-save">Save</button></div>' +
-					'<div class="ajra-err" id="ajra-es-t-err"></div>' +
-					'<details id="ajra-es-t-adv"><summary class="ajra-muted" style="cursor:pointer">Default signature position</summary><div class="ajra-muted" style="margin:4px 0">Used only when no signature box is placed.</div>' +
-					'<div class="ajra-grid"><div><label>Page</label><input type="number" id="ajra-es-t-page" min="1" placeholder="last"></div><div><label>X %</label><input type="number" id="ajra-es-t-sigx" min="0" max="60"></div><div><label>Y %</label><input type="number" id="ajra-es-t-sigy" min="5" max="90"></div></div></details>';
+					( isNew ? '' : '<div class="ajra-wsrow"><button type="button" class="button button-primary button-small" id="ajra-es-t-use">Use template</button><button type="button" class="button button-small" id="ajra-es-t-dup">Duplicate</button>' +
+						( 'doc' === kind ? '' : '<button type="button" class="button button-small" id="ajra-es-t-replbtn">Replace PDF</button><input type="file" id="ajra-es-t-repl" accept="application/pdf,.pdf" style="display:none">' ) +
+						'<a class="button button-small" target="_blank" rel="noopener noreferrer" href="' + esc( tplFileUrl( t.id ) ) + '">Preview PDF</a><button type="button" class="button button-small" id="ajra-es-t-del" style="color:#b32d2e">Delete</button></div>' ) +
+					( 'doc' === kind ? '<div class="ajra-wsrow"><span class="ajra-muted">Signers</span><button type="button" class="button button-small" id="ajra-es-t-sm">−</button><strong id="ajra-es-t-sn"></strong><button type="button" class="button button-small" id="ajra-es-t-sp">+</button></div>' : '' ) +
+					'<div class="ajra-wsrow"><button type="button" class="button button-primary button-small" id="ajra-es-t-save">Save</button></div><div class="ajra-err" id="ajra-es-t-err"></div>';
 				var q = function ( id ) { return strip.querySelector( '#' + id ); };
 				q( 'ajra-es-t-title' ).value = t ? ( t.rawTitle || t.title ) : '';
-				q( 'ajra-es-t-page' ).value = t && t.page ? t.page : ''; q( 'ajra-es-t-sigx' ).value = t && t.sigX !== undefined ? t.sigX : 8; q( 'ajra-es-t-sigy' ).value = t && t.sigY !== undefined ? t.sigY : 78;
-				var rolesBox = q( 'ajra-es-t-roles' ), err = q( 'ajra-es-t-err' );
+				var err = q( 'ajra-es-t-err' );
 				function setHost( html ) { if ( fieldEd ) { fieldEd.destroy(); fieldEd = null; } host.innerHTML = html; host.insertBefore( strip, host.firstChild ); }
-				function readRoles() { return Array.prototype.map.call( rolesBox.querySelectorAll( 'input' ), function ( i ) { return i.value.trim(); } ).filter( Boolean ); }
-				function syncRoles() { if ( fieldEd ) { fieldEd.setSigners( readRoles() ); } }
-				function roleChip( v ) {
-					var s = document.createElement( 'span' ); s.className = 'ajra-role';
-					s.innerHTML = '<input type="text" maxlength="80" placeholder="Role" value="' + esc( v ) + '"><a href="#" title="Remove">×</a>';
-					s.querySelector( 'input' ).addEventListener( 'input', syncRoles );
-					s.querySelector( 'a' ).addEventListener( 'click', function ( e ) { e.preventDefault(); s.remove(); syncRoles(); } );
-					rolesBox.appendChild( s );
-				}
-				roles.forEach( roleChip ); q( 'ajra-es-t-addrole' ).addEventListener( 'click', function () { roleChip( '' ); syncRoles(); } );
-
 				function mountPdf( buf ) {
 					if ( fieldEd ) { fieldEd.destroy(); fieldEd = null; }
-					fieldEd = FE.mount( host, { pdfData: buf, pdfjsBase: pdfjsBase, fields: layout, signers: readRoles(), mergeFields: mergeFields, sideTop: strip, onChange: function ( f ) { layout = f; } } );
+					fieldEd = FE.mount( host, { pdfData: buf, pdfjsBase: pdfjsBase, fields: layout, signers: signerList, mergeFields: mergeFields, sideTop: strip, onChange: function ( f ) { layout = f; } } );
 				}
-				function pdfPicker( label ) {
-					setHost( '<div class="ajra-empty" style="text-align:left;margin-top:8px"><label>' + esc( label ) + '</label><br><input type="file" id="ajra-es-t-file" accept="application/pdf,.pdf"></div>' );
+				function pdfPicker() {
+					setHost( '<div class="ajra-empty" style="text-align:left;margin-top:8px"><label>Choose the PDF (max 25 MB)</label><br><input type="file" id="ajra-es-t-file" accept="application/pdf,.pdf"></div>' );
 					host.querySelector( '#ajra-es-t-file' ).addEventListener( 'change', function ( ev ) {
 						var f = ev.target.files[0]; if ( ! f ) { return; }
 						newFile = f; layout = []; f.arrayBuffer().then( mountPdf );
 						if ( ! q( 'ajra-es-t-title' ).value ) { q( 'ajra-es-t-title' ).value = f.name.replace( /\.pdf$/i, '' ); }
 					} );
 				}
-				function showKind() {
-					q( 'ajra-es-t-adv' ).style.display = 'doc' === kind ? 'none' : '';
-					if ( 'doc' === kind ) { if ( fieldEd ) { fieldEd.destroy(); fieldEd = null; } docEl = docEditor( host, t && t.body ? t.body : '', strip ); } else if ( isNew ) { pdfPicker( 'Choose the PDF to start from (max 25 MB)' ); } else {
-						setHost( '<div class="ajra-empty" style="margin-top:8px">Loading PDF…</div>' );
-						fetch( tplFileUrl( t.id ), { credentials: 'same-origin' } ).then( function ( r ) { if ( ! r.ok ) { throw new Error( 'The template PDF could not be loaded.' ); } return r.arrayBuffer(); } ).then( mountPdf )
-							.catch( function ( e ) { setHost( '<div class="ajra-empty" style="margin-top:8px">' + esc( e.message ) + '</div>' ); } );
-					}
+				function stepper() { if ( q( 'ajra-es-t-sn' ) ) { q( 'ajra-es-t-sn' ).textContent = signerList.length; } }
+				if ( 'doc' === kind ) {
+					docEl = docEditor( host, t && t.body ? t.body : '', strip ); stepper();
+					q( 'ajra-es-t-sp' ).addEventListener( 'click', function () { signerList.push( 'Signer ' + ( signerList.length + 1 ) ); stepper(); } );
+					q( 'ajra-es-t-sm' ).addEventListener( 'click', function () { if ( signerList.length > 1 ) { signerList.pop(); stepper(); } } );
+				} else if ( isNew ) { pdfPicker(); } else {
+					setHost( '<div class="ajra-empty" style="margin-top:8px">Loading PDF…</div>' );
+					fetch( tplFileUrl( t.id ), { credentials: 'same-origin' } ).then( function ( r ) { if ( ! r.ok ) { throw new Error( 'The template PDF could not be loaded.' ); } return r.arrayBuffer(); } ).then( mountPdf )
+						.catch( function ( e ) { setHost( '<div class="ajra-empty" style="margin-top:8px">' + esc( e.message ) + '</div>' ); } );
 				}
-				if ( q( 'ajra-es-t-kind' ) ) { q( 'ajra-es-t-kind' ).addEventListener( 'change', function () { kind = this.value; showKind(); } ); }
-				showKind();
-				if ( q( 'ajra-es-t-repl' ) ) { q( 'ajra-es-t-repl' ).addEventListener( 'change', function ( ev ) { var f = ev.target.files[0]; if ( f ) { newFile = f; f.arrayBuffer().then( mountPdf ); } } ); }
+				if ( q( 'ajra-es-t-replbtn' ) ) {
+					q( 'ajra-es-t-replbtn' ).addEventListener( 'click', function () { q( 'ajra-es-t-repl' ).click(); } );
+					q( 'ajra-es-t-repl' ).addEventListener( 'change', function ( ev ) { var f = ev.target.files[0]; if ( f ) { newFile = f; f.arrayBuffer().then( mountPdf ); } } );
+				}
 				if ( q( 'ajra-es-t-use' ) ) { q( 'ajra-es-t-use' ).addEventListener( 'click', function () { useTemplate( t ); } ); }
+				if ( q( 'ajra-es-t-dup' ) ) { q( 'ajra-es-t-dup' ).addEventListener( 'click', function () {
+					api( '/templates/duplicate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { id: t.id } ) } ).then( function ( c ) { rememberTpl( c && c.id ? c.id : '' ); window.location.reload(); } ).catch( function ( e ) { window.alert( e.message ); } );
+				} ); }
 				if ( q( 'ajra-es-t-del' ) ) { q( 'ajra-es-t-del' ).addEventListener( 'click', function () {
 					if ( ! window.confirm( 'Delete the template "' + ( t.rawTitle || t.title ) + '"? This cannot be undone.' ) ) { return; }
 					api( '/templates/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { id: t.id } ) } ).then( function () { rememberTpl( '' ); window.location.reload(); } ).catch( function ( e ) { window.alert( e.message ); } );
 				} ); }
 				q( 'ajra-es-t-save' ).addEventListener( 'click', function () {
 					var btn = this, fd = new FormData();
-					fd.append( 'id', t ? t.id : '' ); fd.append( 'title', q( 'ajra-es-t-title' ).value ); fd.append( 'signers', JSON.stringify( readRoles() ) );
-					fd.append( 'kind', kind ); fd.append( 'page', q( 'ajra-es-t-page' ).value || 0 ); fd.append( 'sig_x', q( 'ajra-es-t-sigx' ).value ); fd.append( 'sig_y', q( 'ajra-es-t-sigy' ).value );
-					if ( 'doc' === kind ) { fd.append( 'body', docEl ? docEl.innerHTML : '' ); } else { fd.append( 'layout', JSON.stringify( fieldEd ? fieldEd.getFields() : layout ) ); if ( newFile ) { fd.append( 'pdf', newFile ); } }
+					fd.append( 'id', t ? t.id : '' ); fd.append( 'title', q( 'ajra-es-t-title' ).value ); fd.append( 'kind', kind );
+					if ( 'doc' === kind ) { fd.append( 'signers', JSON.stringify( signerList ) ); fd.append( 'body', docEl ? docEl.innerHTML : '' ); }
+					else { fd.append( 'signers', JSON.stringify( fieldEd ? fieldEd.getSigners() : signerList ) ); fd.append( 'layout', JSON.stringify( fieldEd ? fieldEd.getFields() : layout ) ); if ( newFile ) { fd.append( 'pdf', newFile ); } }
 					btn.disabled = true; err.style.display = 'none';
 					api( '/templates/save', { method: 'POST', body: fd } ).then( function ( saved ) { rememberTpl( saved && saved.id ? saved.id : '' ); window.location.reload(); } )
 						.catch( function ( e ) { err.style.display = 'block'; err.textContent = e.message; btn.disabled = false; } );
@@ -3458,7 +3452,7 @@ class AJCore_RA_Esign {
 				$( 'ajra-es-tpl-new' ).addEventListener( 'click', function () { selectTpl( '__new' ); } );
 				var firstSel = '';
 				try { firstSel = window.sessionStorage.getItem( 'ajra_tpl_sel' ) || ''; } catch ( e ) { firstSel = ''; }
-				if ( firstSel && '__new' !== firstSel && ! templates.some( function ( t ) { return t.id === firstSel; } ) ) { firstSel = ''; }
+				if ( '__new' === firstSel || ( firstSel && ! templates.some( function ( t ) { return t.id === firstSel; } ) ) ) { firstSel = ''; }
 				renderTree();
 				if ( firstSel ) { selectTpl( firstSel ); } else { tplWs.innerHTML = '<div class="ajra-empty">Select a template on the left, or create a new one.</div>'; }
 			}
@@ -3610,7 +3604,33 @@ class AJCore_RA_Esign {
 				renderRecipients( 'pdf' === m ? [ { party: 1, name: '', email: '' } ] : currentTemplateRecipients() );
 			}
 			document.querySelectorAll( '.ajra-es a[data-mode]' ).forEach( function ( a ) { a.addEventListener( 'click', function () { setMode( a.getAttribute( 'data-mode' ) ); } ); } );
-			tpl.addEventListener( 'change', function () { renderRecipients( currentTemplateRecipients() ); } );
+			var tplLayout = [];
+			var varVals = {};
+			function renderVars() {
+				var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0], layout = tplLayout.length ? tplLayout : ( t && t.layout ? t.layout : [] ), names = [], box2 = $( 'ajra-es-vars' );
+				layout.forEach( function ( f ) { String( f.fill || '' ).replace( /\{\{\s*ask\.([a-z0-9_]+)\s*\}\}/gi, function ( m, n ) { n = n.toLowerCase(); if ( names.indexOf( n ) < 0 ) { names.push( n ); } return m; } ); } );
+				box2.style.display = names.length ? '' : 'none';
+				box2.innerHTML = names.map( function ( n ) { return '<label>' + esc( n.replace( /_/g, ' ' ).replace( /^./, function ( c ) { return c.toUpperCase(); } ) ) + '</label><input type="text" class="ajra-es-var" data-n="' + esc( n ) + '" value="' + esc( varVals[ n ] || '' ) + '">'; } ).join( '' );
+				box2.querySelectorAll( '.ajra-es-var' ).forEach( function ( i ) { i.addEventListener( 'input', function () { varVals[ i.getAttribute( 'data-n' ) ] = i.value; } ); } );
+			}
+			function readVars() { var o = {}; document.querySelectorAll( '.ajra-es-var' ).forEach( function ( i ) { o[ i.getAttribute( 'data-n' ) ] = i.value; } ); return o; }
+			function syncTplFields() {
+				var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0];
+				tplLayout = [];
+				$( 'ajra-es-tplfields-count' ).textContent = '';
+				$( 'ajra-es-tplfields-wrap' ).style.display = 'template' === mode && t && 'doc' !== t.kind ? '' : 'none';
+				renderVars();
+			}
+			tpl.addEventListener( 'change', function () { renderRecipients( currentTemplateRecipients() ); syncTplFields(); } );
+			$( 'ajra-es-tplfields' ).addEventListener( 'click', function () {
+				var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0]; if ( ! t ) { return; }
+				fetch( tplFileUrl( t.id ), { credentials: 'same-origin' } ).then( function ( r ) { if ( ! r.ok ) { throw new Error( 'The template PDF could not be loaded.' ); } return r.arrayBuffer(); } ).then( function ( buf ) {
+					var roles = readRecipients().map( function ( r, i ) { return r.name || ( 'Signer ' + ( i + 1 ) ); } );
+					window.AJEsignFieldEditor.open( { pdfData: buf, pdfjsBase: pdfjsBase, fields: tplLayout.length ? tplLayout : ( t.layout || [] ), signers: roles, mergeFields: mergeFields, onSave: function ( list ) {
+						tplLayout = list; $( 'ajra-es-tplfields-count' ).textContent = list.length + ' field(s) for this request'; renderVars();
+					} } );
+				} ).catch( function ( e ) { window.alert( e.message ); } );
+			} );
 			cust.addEventListener( 'change', updateSend );
 			$( 'ajra-es-pdf' ) && $( 'ajra-es-pdf' ).addEventListener( 'change', function () { upLayout = []; $( 'ajra-es-pdf-fcount' ).textContent = ''; updateSend(); } );
 			var upLayout = [];
@@ -3651,6 +3671,8 @@ class AJCore_RA_Esign {
 					req = api( '/send-pdf', { method: 'POST', body: fd } );
 				} else {
 					var body = { template_id: tpl.value, stripe_customer_id: cust.value, recipients: rec };
+					if ( tplLayout.length ) { body.layout = JSON.stringify( tplLayout ); }
+					body.vars = JSON.stringify( readVars() );
 					if ( exp ) { body.expires_in_days = parseInt( exp.value, 10 ) || 30; body.signing_order = ord.checked; body.message = msg.value; }
 					req = api( '/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( body ) } );
 				}
