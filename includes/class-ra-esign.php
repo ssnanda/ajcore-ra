@@ -1048,6 +1048,19 @@ class AJCore_RA_Esign {
 		return rest_ensure_response( array( 'received' => true, 'refreshed' => $refreshed ) );
 	}
 
+	/** Raw samples from the Team API (team info, first templates, first documents) so a mismatch with what we expect is visible. */
+	public function esign_diagnose() {
+		if ( ! $this->breezedoc_is_v1() ) {
+			return new WP_Error( 'breezedoc_not_configured', __( 'Diagnose needs a Team API key.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$out = array();
+		foreach ( array( 'me' => '/v1/me', 'templates' => '/v1/templates', 'documents' => '/v1/documents' ) as $key => $path ) {
+			$r         = $this->breezedoc_api_request( 'GET', $path, 'me' === $key ? array() : array( 'query' => array( 'limit' => 2 ) ) );
+			$out[ $key ] = is_wp_error( $r ) ? 'ERROR (' . ( $r->get_error_data()['status'] ?? '?' ) . '): ' . $r->get_error_message() : $r;
+		}
+		return $out;
+	}
+
 	/** lower-cased email => array( stripe_customer_id, name ) across Stripe and local portal customers. */
 	private function customer_email_map() {
 		$map = array();
@@ -1076,7 +1089,7 @@ class AJCore_RA_Esign {
 		$pdb    = $this->get_pdb();
 		$table  = $this->get_esign_documents_table();
 		$map    = $this->customer_email_map();
-		$counts = array( 'imported' => 0, 'existing' => 0, 'unmatched' => 0, 'drafts' => 0 );
+		$counts = array( 'imported' => 0, 'existing' => 0, 'unmatched' => 0, 'drafts' => 0, 'seen' => 0 );
 		$cursor = sanitize_text_field( (string) $cursor );
 
 		for ( $page = 0; $page < 3; $page++ ) {
@@ -1093,6 +1106,7 @@ class AJCore_RA_Esign {
 				if ( '' === $doc_id ) {
 					continue;
 				}
+				$counts['seen']++;
 				$state = $this->breezedoc_v1_doc_state( $doc );
 				if ( 'draft' === $state['status'] ) {
 					$counts['drafts']++;
@@ -1159,6 +1173,7 @@ class AJCore_RA_Esign {
 		$catalog[] = $e( 'POST', '/ops/esign/send', 'Creates a document from a template (template_id, recipients[{party,name,email}], optional signing_order/message/expires_in_days/title), sends it, logs it.' );
 		$catalog[] = $e( 'POST', '/ops/esign/send-pdf', 'Multipart: uploads a PDF (pdf, recipients JSON, stripe_customer_id, title, page, message, expires_in_days), places signature+date fields per signer, sends, logs it. Team API key only.' );
 		$catalog[] = $e( 'GET', '/ops/esign/documents', 'Local log of sent signature requests with their last-known status.' );
+		$catalog[] = $e( 'GET', '/ops/esign/diagnose', 'Raw samples from the BreezeDoc Team API (team, first templates, first documents) for troubleshooting. Team API key only.' );
 		$catalog[] = $e( 'POST', '/ops/esign/import', 'Imports historical BreezeDoc team documents into the local log (cursor, include_unmatched). Only documents whose signer email matches a portal customer unless include_unmatched. Team API key only.' );
 		$catalog[] = $e( 'POST', '/ops/esign/documents/{id}/refresh', 'Re-reads one document\'s status from BreezeDoc.' );
 		$catalog[] = $e( 'POST', '/ops/esign/documents/{id}/remind', 'Reminds unsigned recipients (BreezeDoc allows once per 24 hours). Team API key only.' );
@@ -1196,6 +1211,7 @@ class AJCore_RA_Esign {
 				'/send-pdf'                  => array( 'POST', 'rest_send_pdf' ),
 				'/documents'                 => array( $r, 'rest_documents' ),
 				'/import'                    => array( 'POST', 'rest_import' ),
+				'/diagnose'                  => array( $r, 'rest_diagnose' ),
 				'/documents/' . $id_re . '/' . $act_rw => array( 'POST', 'rest_document_action' ),
 				'/documents/' . $id_re . '/' . $act_ro => array( $r, 'rest_document_action' ),
 				'/webhook/register'          => array( 'POST', 'rest_webhook_register' ),
@@ -1276,6 +1292,10 @@ class AJCore_RA_Esign {
 				$this->send_options( $request )
 			)
 		);
+	}
+
+	public function rest_diagnose() {
+		return $this->rest_result( $this->esign_diagnose() );
 	}
 
 	public function rest_import( WP_REST_Request $request ) {
@@ -1419,8 +1439,10 @@ class AJCore_RA_Esign {
 					<p style="margin:10px 0 0">
 						<?php if ( ! $ro ) : ?><button type="submit" class="button button-primary"><?php esc_html_e( 'Save', 'ajcore-ra' ); ?></button><?php endif; ?>
 						<button type="button" class="button" id="ajra-es-test"><?php esc_html_e( 'Test connection', 'ajcore-ra' ); ?></button>
+						<?php if ( $is_v1 ) : ?><button type="button" class="button" id="ajra-es-diagnose"><?php esc_html_e( 'Diagnose', 'ajcore-ra' ); ?></button><?php endif; ?>
 						<span id="ajra-es-test-out" class="ajra-muted"></span>
 					</p>
+					<pre id="ajra-es-diag-out" style="max-height:260px;overflow:auto"></pre>
 				</form>
 				<?php if ( $is_v1 && $ro ) : ?>
 					<hr>
@@ -1571,6 +1593,10 @@ class AJCore_RA_Esign {
 				var out = $( 'ajra-es-test-out' ); out.textContent = '…';
 				api( '/test' ).then( function ( d ) { out.style.color = '#166534'; out.textContent = 'Connected: ' + ( d.email || '' ); } ).catch( function ( e ) { out.style.color = '#b32d2e'; out.textContent = e.message; } );
 			} ); }
+			if ( $( 'ajra-es-diagnose' ) ) { $( 'ajra-es-diagnose' ).addEventListener( 'click', function () {
+				var out = $( 'ajra-es-diag-out' ); out.textContent = '…';
+				api( '/diagnose' ).then( function ( d ) { out.textContent = JSON.stringify( d, null, 1 ).slice( 0, 8000 ); } ).catch( function ( e ) { out.textContent = e.message; } );
+			} ); }
 			document.querySelectorAll( '[data-hook]' ).forEach( function ( b ) { b.addEventListener( 'click', function () {
 				var act = b.getAttribute( 'data-hook' ), out = $( 'ajra-es-hook-out' ); out.textContent = '…';
 				api( '/webhook' + ( 'deliveries' === act ? '/deliveries' : '/' + act ), { method: 'deliveries' === act ? 'GET' : 'POST' } ).then( function ( d ) {
@@ -1599,7 +1625,7 @@ class AJCore_RA_Esign {
 			// Import historical documents (loops until BreezeDoc has no more pages).
 			var imp = $( 'ajra-es-import' );
 			if ( imp ) { imp.addEventListener( 'click', function () {
-				var out = $( 'ajra-es-import-out' ), tot = { imported: 0, existing: 0, unmatched: 0, drafts: 0 };
+				var out = $( 'ajra-es-import-out' ), tot = { imported: 0, existing: 0, unmatched: 0, drafts: 0, seen: 0 };
 				imp.disabled = true;
 				function step( cursor ) {
 					out.textContent = 'Importing… ' + tot.imported;
@@ -1609,7 +1635,8 @@ class AJCore_RA_Esign {
 					} );
 				}
 				step( '' ).then( function () {
-					out.textContent = tot.imported + ' imported, ' + tot.existing + ' already there, ' + tot.unmatched + ' skipped (no matching customer), ' + tot.drafts + ' drafts skipped';
+					if ( 0 === tot.seen ) { out.textContent = 'BreezeDoc returned no documents for this key\'s team — click Diagnose in Connection to see the raw response.'; return; }
+					out.textContent = tot.seen + ' found: ' + tot.imported + ' imported, ' + tot.existing + ' already there, ' + tot.unmatched + ' skipped (no matching customer), ' + tot.drafts + ' drafts skipped';
 					if ( tot.imported ) { setTimeout( function () { window.location.reload(); }, 1500 ); }
 				} ).catch( function ( e ) { out.style.color = '#b32d2e'; out.textContent = e.message; } ).finally( function () { imp.disabled = false; } );
 			} ); }
