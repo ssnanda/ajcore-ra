@@ -902,6 +902,9 @@ class AJCore_RA_Esign {
 	}
 
 	public function breezedoc_webhook_register() {
+		if ( $this->read_only() ) {
+			return new WP_Error( 'webhook_master_only', __( 'The BreezeDoc webhook is registered from the master site only.', 'ajcore-ra' ), array( 'status' => 403 ) );
+		}
 		if ( ! $this->breezedoc_is_v1() ) {
 			return new WP_Error( 'breezedoc_not_configured', __( 'Webhooks need a Team API key.', 'ajcore-ra' ), array( 'status' => 400 ) );
 		}
@@ -935,6 +938,9 @@ class AJCore_RA_Esign {
 	}
 
 	public function breezedoc_webhook_remove() {
+		if ( $this->read_only() ) {
+			return new WP_Error( 'webhook_master_only', __( 'The BreezeDoc webhook is managed from the master site only.', 'ajcore-ra' ), array( 'status' => 403 ) );
+		}
 		$state = $this->breezedoc_webhook_state();
 		if ( ! empty( $state['id'] ) && ( $state['url'] ?? '' ) === rest_url( AJCore_Extensions::rest_namespace() . '/esign/webhook' ) ) {
 			$result = $this->breezedoc_api_request( 'DELETE', '/v1/webhooks/' . rawurlencode( (string) $state['id'] ) );
@@ -1416,7 +1422,10 @@ class AJCore_RA_Esign {
 						<span id="ajra-es-test-out" class="ajra-muted"></span>
 					</p>
 				</form>
-				<?php if ( $is_v1 ) : ?>
+				<?php if ( $is_v1 && $ro ) : ?>
+					<hr>
+					<p class="ajra-muted" style="margin:0"><?php esc_html_e( 'Webhook: registered once, from the master site.', 'ajcore-ra' ); ?></p>
+				<?php elseif ( $is_v1 ) : ?>
 					<hr>
 					<p style="margin:0 0 6px"><strong><?php esc_html_e( 'Webhook', 'ajcore-ra' ); ?></strong>
 						<span class="ajra-muted"><?php echo esc_html( $hook['registered'] ? __( 'registered', 'ajcore-ra' ) . ( $hook['lastEventAt'] ? ' · ' . __( 'last event', 'ajcore-ra' ) . ' ' . $hook['lastEventAt'] . ' (' . $hook['lastResult'] . ')' : ' · ' . __( 'no events yet', 'ajcore-ra' ) ) : __( 'not registered — status updates only on refresh', 'ajcore-ra' ) ); ?></span></p>
