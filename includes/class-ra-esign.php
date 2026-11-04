@@ -1271,46 +1271,46 @@ class AJCore_RA_Esign {
 		};
 		?>
 		<style>
-			.ajra-es{max-width:1040px}
-			.ajra-es .card{background:#fff;border:1px solid #dcdcde;border-radius:10px;padding:14px 16px;margin:0 0 12px}
-			.ajra-es .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px}
-			@media(max-width:782px){.ajra-es .grid{grid-template-columns:1fr}}
+			.ajra-es{max-width:1100px;width:100%}
+			.ajra-es .ajra-card{background:#fff;border:1px solid #dcdcde;border-radius:10px;padding:14px 16px;margin:0 0 12px}
+			.ajra-es .ajra-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px}
+			@media(max-width:782px){.ajra-es .ajra-grid{grid-template-columns:1fr}}
 			.ajra-es label{display:block;font-weight:600;margin:0 0 3px;font-size:12px;color:#3c434a}
 			.ajra-es input[type=text],.ajra-es input[type=email],.ajra-es input[type=number],.ajra-es input[type=search],.ajra-es select,.ajra-es textarea{width:100%;min-height:34px;box-sizing:border-box}
-			.ajra-es select[size]{height:auto;padding:2px}
-			.ajra-es .row{display:flex;gap:6px;align-items:center;margin-bottom:5px}.ajra-es .row input{flex:1;min-width:0}
-			.ajra-es .muted{color:#646970;font-size:12px}
-			.ajra-es .err{display:none;margin:0 0 10px;padding:8px 10px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;color:#991b1b}
-			.ajra-es .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;background:#fef3c7;color:#92400e;white-space:nowrap}
-			.ajra-es .pill.completed{background:#dcfce7;color:#166534}.ajra-es .pill.cancelled,.ajra-es .pill.expired,.ajra-es .pill.draft{background:#f1f5f9;color:#475569}
-			.ajra-es .head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
-			.ajra-es .head h2{margin:0;font-size:14px}
-			.ajra-es .seg{display:inline-flex;border:1px solid #c3c4c7;border-radius:8px;overflow:hidden}
-			.ajra-es .seg a{padding:5px 12px;cursor:pointer;text-decoration:none;color:#3c434a;background:#fff;font-size:12px;font-weight:600;border-right:1px solid #c3c4c7}
-			.ajra-es .seg a:last-child{border-right:0}.ajra-es .seg a.on{background:#2563eb;color:#fff}
-			.ajra-es .bar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f1}
-			.ajra-es .bar .sp{flex:1}
-			.ajra-es .bar input[type=number]{width:64px}
-			.ajra-es .bar label{display:inline-flex;align-items:center;gap:4px;margin:0;font-weight:400;font-size:13px}
+			.ajra-es select[size]{height:auto;padding:2px}.ajra-es select[size] option{padding:4px 8px;border-radius:4px}
+			.ajra-es .ajra-row{display:flex;gap:6px;align-items:center;margin-bottom:5px}.ajra-es .ajra-row input{flex:1;min-width:0}
+			.ajra-es .ajra-muted{color:#646970;font-size:12px}
+			.ajra-es .ajra-err{display:none;margin:0 0 10px;padding:8px 10px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;color:#991b1b}
+			.ajra-es .ajra-pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:600;background:#fef3c7;color:#92400e;white-space:nowrap}
+			.ajra-es .ajra-pill.completed{background:#dcfce7;color:#166534}.ajra-es .ajra-pill.cancelled,.ajra-es .ajra-pill.expired,.ajra-es .ajra-pill.draft{background:#f1f5f9;color:#475569}
+			.ajra-es .ajra-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+			.ajra-es .ajra-head h2{margin:0;font-size:14px}
+			.ajra-es .ajra-seg{display:inline-flex;border:1px solid #c3c4c7;border-radius:8px;overflow:hidden}
+			.ajra-es .ajra-seg a{padding:5px 12px;cursor:pointer;text-decoration:none;color:#3c434a;background:#fff;font-size:12px;font-weight:600;border-right:1px solid #c3c4c7}
+			.ajra-es .ajra-seg a:last-child{border-right:0}.ajra-es .ajra-seg a.on{background:#2563eb;color:#fff}
+			.ajra-es .ajra-bar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f1}
+			.ajra-es .ajra-bar .ajra-sp{flex:1}
+			.ajra-es .ajra-bar input[type=number]{width:64px}
+			.ajra-es .ajra-bar label{display:inline-flex;align-items:center;gap:4px;margin:0;font-weight:400;font-size:13px}
 			.ajra-es #ajra-es-send.button-primary{height:36px;min-height:0;padding:0 18px;border-radius:8px;font-size:13px;line-height:34px;background:#2563eb!important;border-color:#2563eb!important;color:#fff!important;box-shadow:none}
 			.ajra-es #ajra-es-send.button-primary:disabled{background:#94a3b8!important;border-color:#94a3b8!important;color:#fff!important;opacity:1;cursor:not-allowed}
-			.ajra-es .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
-			.ajra-es .toolbar input[type=search]{width:220px;margin-left:auto}
+			.ajra-es .ajra-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+			.ajra-es .ajra-toolbar input[type=search]{width:220px;margin-left:auto}
 			.ajra-es table.widefat td,.ajra-es table.widefat th{vertical-align:middle}
 			.ajra-es td .button{margin:0 2px 2px 0}.ajra-es pre{margin:0;white-space:pre-wrap;font-size:12px}
-			.ajra-es .empty{padding:18px;text-align:center;color:#646970}
+			.ajra-es .ajra-empty{padding:18px;text-align:center;color:#646970}
 		</style>
 		<div class="ajra-es">
 			<?php if ( isset( $_GET['saved'] ) ) : ?>
 				<div class="notice notice-success inline"><p><?php esc_html_e( 'Saved.', 'ajcore-ra' ); ?></p></div>
 			<?php endif; ?>
 
-			<details class="card" <?php echo $connected ? '' : 'open'; ?>>
+			<details class="ajra-card" <?php echo $connected ? '' : 'open'; ?>>
 				<summary style="cursor:pointer;font-weight:600"><?php esc_html_e( 'Connection', 'ajcore-ra' ); ?> — <?php echo esc_html( $is_v1 ? __( 'Team API key', 'ajcore-ra' ) : ( $connected ? __( 'Personal token (legacy)', 'ajcore-ra' ) : __( 'not connected', 'ajcore-ra' ) ) ); ?></summary>
 				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin-top:10px">
 					<input type="hidden" name="action" value="ajcore_ra_save_esign">
 					<?php wp_nonce_field( 'ajcore_ra_save_esign' ); ?>
-					<div class="grid">
+					<div class="ajra-grid">
 						<div>
 							<label for="breezedoc_team_api_key"><?php esc_html_e( 'Team API key', 'ajcore-ra' ); ?></label>
 							<input type="text" name="breezedoc_team_api_key" id="breezedoc_team_api_key" autocomplete="off" placeholder="<?php echo $is_v1 ? esc_attr__( '•••• saved — blank keeps', 'ajcore-ra' ) : 'bd_live_…'; ?>">
@@ -1326,13 +1326,13 @@ class AJCore_RA_Esign {
 					<p style="margin:10px 0 0">
 						<button type="submit" class="button button-primary"><?php esc_html_e( 'Save', 'ajcore-ra' ); ?></button>
 						<button type="button" class="button" id="ajra-es-test"><?php esc_html_e( 'Test connection', 'ajcore-ra' ); ?></button>
-						<span id="ajra-es-test-out" class="muted"></span>
+						<span id="ajra-es-test-out" class="ajra-muted"></span>
 					</p>
 				</form>
 				<?php if ( $is_v1 ) : ?>
 					<hr>
 					<p style="margin:0 0 6px"><strong><?php esc_html_e( 'Webhook', 'ajcore-ra' ); ?></strong>
-						<span class="muted"><?php echo esc_html( $hook['registered'] ? __( 'registered', 'ajcore-ra' ) . ( $hook['lastEventAt'] ? ' · ' . __( 'last event', 'ajcore-ra' ) . ' ' . $hook['lastEventAt'] . ' (' . $hook['lastResult'] . ')' : ' · ' . __( 'no events yet', 'ajcore-ra' ) ) : __( 'not registered — status updates only on refresh', 'ajcore-ra' ) ); ?></span></p>
+						<span class="ajra-muted"><?php echo esc_html( $hook['registered'] ? __( 'registered', 'ajcore-ra' ) . ( $hook['lastEventAt'] ? ' · ' . __( 'last event', 'ajcore-ra' ) . ' ' . $hook['lastEventAt'] . ' (' . $hook['lastResult'] . ')' : ' · ' . __( 'no events yet', 'ajcore-ra' ) ) : __( 'not registered — status updates only on refresh', 'ajcore-ra' ) ); ?></span></p>
 					<p style="margin:0">
 						<button type="button" class="button" data-hook="register"><?php echo esc_html( $hook['registered'] ? __( 'Re-register', 'ajcore-ra' ) : __( 'Register webhook', 'ajcore-ra' ) ); ?></button>
 						<?php if ( $hook['registered'] ) : ?>
@@ -1354,15 +1354,15 @@ class AJCore_RA_Esign {
 					<div class="notice notice-info inline"><p><?php echo esc_html( $is_v1 ? __( 'Connected — this BreezeDoc team has no templates yet. Create one at breezedoc.com (Templates), or use Upload PDF.', 'ajcore-ra' ) : __( 'Connected — no templates found in this BreezeDoc account.', 'ajcore-ra' ) ); ?></p></div>
 				<?php endif; ?>
 
-				<div class="card">
-					<div class="head">
+				<div class="ajra-card">
+					<div class="ajra-head">
 						<h2><?php esc_html_e( 'New signature request', 'ajcore-ra' ); ?></h2>
 						<?php if ( $is_v1 ) : ?>
-							<div class="seg"><a class="on" data-mode="template"><?php esc_html_e( 'From template', 'ajcore-ra' ); ?></a><a data-mode="pdf"><?php esc_html_e( 'Upload PDF', 'ajcore-ra' ); ?></a></div>
+							<div class="ajra-seg"><a class="on" data-mode="template"><?php esc_html_e( 'From template', 'ajcore-ra' ); ?></a><a data-mode="pdf"><?php esc_html_e( 'Upload PDF', 'ajcore-ra' ); ?></a></div>
 						<?php endif; ?>
 					</div>
-					<div id="ajra-es-error" class="err"></div>
-					<div class="grid">
+					<div id="ajra-es-error" class="ajra-err"></div>
+					<div class="ajra-grid">
 						<div>
 							<label><?php esc_html_e( 'Customer', 'ajcore-ra' ); ?></label>
 							<input type="search" id="ajra-es-customer-q" placeholder="<?php esc_attr_e( 'Search name or email…', 'ajcore-ra' ); ?>" style="margin-bottom:4px">
@@ -1376,7 +1376,7 @@ class AJCore_RA_Esign {
 							<div id="ajra-es-pdf-wrap" style="display:none">
 								<label><?php esc_html_e( 'PDF (max 25 MB, 100 pages)', 'ajcore-ra' ); ?></label>
 								<input type="file" id="ajra-es-pdf" accept="application/pdf,.pdf" style="margin-bottom:6px">
-								<div class="row">
+								<div class="ajra-row">
 									<input type="text" id="ajra-es-title" maxlength="191" placeholder="<?php esc_attr_e( 'Title (defaults to file name)', 'ajcore-ra' ); ?>">
 									<input type="number" id="ajra-es-page" min="1" placeholder="<?php esc_attr_e( 'Sign page', 'ajcore-ra' ); ?>" title="<?php esc_attr_e( 'Blank = last page. A signature and date box is placed per signer near the bottom.', 'ajcore-ra' ); ?>" style="max-width:100px;flex:none">
 								</div>
@@ -1386,32 +1386,32 @@ class AJCore_RA_Esign {
 						</div>
 					</div>
 					<textarea id="ajra-es-message" rows="2" style="display:none;margin-top:10px" placeholder="<?php esc_attr_e( 'Message to signers (needs BreezeDoc custom-email plan)', 'ajcore-ra' ); ?>"></textarea>
-					<div class="bar">
+					<div class="ajra-bar">
 						<?php if ( $is_v1 ) : ?>
 							<label><?php esc_html_e( 'Expires in', 'ajcore-ra' ); ?> <input type="number" id="ajra-es-expires" min="1" max="365" value="30"> <?php esc_html_e( 'days', 'ajcore-ra' ); ?></label>
 							<label><input type="checkbox" id="ajra-es-order" checked> <?php esc_html_e( 'Sign in order', 'ajcore-ra' ); ?></label>
 							<a href="#" id="ajra-es-msg-toggle"><?php esc_html_e( 'Add message', 'ajcore-ra' ); ?></a>
 						<?php endif; ?>
-						<span class="sp"></span>
-						<span class="muted" id="ajra-es-summary"></span>
+						<span class="ajra-sp"></span>
+						<span class="ajra-muted" id="ajra-es-summary"></span>
 						<button type="button" class="button button-primary" id="ajra-es-send" disabled><?php esc_html_e( 'Send for signature', 'ajcore-ra' ); ?></button>
 					</div>
 				</div>
 			<?php endif; ?>
 
-			<div class="card">
-				<div class="head">
+			<div class="ajra-card">
+				<div class="ajra-head">
 					<h2><?php esc_html_e( 'Sent signature requests', 'ajcore-ra' ); ?></h2>
 					<?php if ( $is_v1 ) : ?>
 						<span style="text-align:right">
 							<button type="button" class="button button-small" id="ajra-es-import"><?php esc_html_e( 'Import from BreezeDoc', 'ajcore-ra' ); ?></button>
 							<label style="display:block;font-weight:400;margin-top:3px"><input type="checkbox" id="ajra-es-import-all"> <?php esc_html_e( 'include documents not matching a customer', 'ajcore-ra' ); ?></label>
-							<span class="muted" id="ajra-es-import-out"></span>
+							<span class="ajra-muted" id="ajra-es-import-out"></span>
 						</span>
 					<?php endif; ?>
 				</div>
-				<div class="toolbar">
-					<div class="seg" id="ajra-es-filters">
+				<div class="ajra-toolbar">
+					<div class="ajra-seg" id="ajra-es-filters">
 						<a class="on" data-f="all"><?php echo esc_html( sprintf( '%s %d', __( 'All', 'ajcore-ra' ), $counts['all'] ) ); ?></a>
 						<a data-f="sent"><?php echo esc_html( sprintf( '%s %d', __( 'Awaiting', 'ajcore-ra' ), $counts['sent'] ) ); ?></a>
 						<a data-f="completed"><?php echo esc_html( sprintf( '%s %d', __( 'Completed', 'ajcore-ra' ), $counts['completed'] ) ); ?></a>
@@ -1433,7 +1433,7 @@ class AJCore_RA_Esign {
 								<td><?php echo esc_html( $doc['customerName'] ?: '—' ); ?></td>
 								<td><?php echo esc_html( $doc['templateTitle'] ?: '—' ); ?></td>
 								<td data-progress title="<?php echo esc_attr( $names ); ?>"><?php echo esc_html( $tt ? $sg . '/' . $tt : '—' ); ?></td>
-								<td><span class="pill <?php echo esc_attr( $doc['status'] ); ?>" data-status><?php echo esc_html( $labels[ $doc['status'] ] ?? $doc['status'] ); ?></span></td>
+								<td><span class="ajra-pill <?php echo esc_attr( $doc['status'] ); ?>" data-status><?php echo esc_html( $labels[ $doc['status'] ] ?? $doc['status'] ); ?></span></td>
 								<td><?php echo esc_html( $doc['sentAt'] ? mysql2date( get_option( 'date_format' ), $doc['sentAt'] ) : '—' ); ?></td>
 								<td style="text-align:right;white-space:nowrap">
 									<button type="button" class="button button-small" data-act="refresh" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Refresh', 'ajcore-ra' ); ?></button>
@@ -1455,7 +1455,7 @@ class AJCore_RA_Esign {
 						<?php endforeach; ?>
 					</tbody>
 				</table>
-				<div class="empty" id="ajra-es-log-empty" style="<?php echo empty( $log['documents'] ) ? '' : 'display:none'; ?>"><?php esc_html_e( 'Nothing to show.', 'ajcore-ra' ); ?></div>
+				<div class="ajra-empty" id="ajra-es-log-empty" style="<?php echo empty( $log['documents'] ) ? '' : 'display:none'; ?>"><?php esc_html_e( 'Nothing to show.', 'ajcore-ra' ); ?></div>
 			</div>
 		</div>
 		<script>
@@ -1540,7 +1540,7 @@ class AJCore_RA_Esign {
 					} else if ( 'remind' === act ) {
 						window.alert( 'Reminder sent.' );
 					} else if ( d.status ) {
-						var pill = tr.querySelector( '[data-status]' ); pill.className = 'pill ' + d.status; pill.textContent = labels[ d.status ] || d.status;
+						var pill = tr.querySelector( '[data-status]' ); pill.className = 'ajra-pill ' + d.status; pill.textContent = labels[ d.status ] || d.status;
 						setProgress( tr, d.recipients );
 						if ( 'cancel' === act ) { window.location.reload(); }
 					}
@@ -1565,7 +1565,7 @@ class AJCore_RA_Esign {
 			templates.forEach( function ( t ) { var o = document.createElement( 'option' ); o.value = t.id; o.textContent = t.title || t.id; tpl.appendChild( o ); } );
 
 			function row( party, name, email, first ) {
-				return '<div class="row ajra-es-r" data-party="' + party + '"><span class="muted" style="width:50px">Party ' + party + '</span>' +
+				return '<div class="ajra-row ajra-es-r" data-party="' + party + '"><span class="ajra-muted" style="width:50px">Party ' + party + '</span>' +
 					'<input type="text" class="n" placeholder="Name" value="' + esc( name ) + '"><input type="email" class="e" placeholder="Email" value="' + esc( email ) + '">' +
 					( first ? '<button type="button" class="button button-small ajra-es-use">Use customer</button>' : '' ) +
 					( 'pdf' === mode && ! first ? '<button type="button" class="button button-small ajra-es-del">×</button>' : '' ) + '</div>';
@@ -1595,7 +1595,7 @@ class AJCore_RA_Esign {
 			}
 			function setMode( m ) {
 				mode = m;
-				document.querySelectorAll( '.ajra-es .seg[class="seg"] a[data-mode]' ).forEach( function ( a ) { a.classList.toggle( 'on', a.getAttribute( 'data-mode' ) === m ); } );
+				document.querySelectorAll( '.ajra-es a[data-mode]' ).forEach( function ( a ) { a.classList.toggle( 'on', a.getAttribute( 'data-mode' ) === m ); } );
 				$( 'ajra-es-tpl-wrap' ).style.display = 'template' === m ? '' : 'none';
 				$( 'ajra-es-pdf-wrap' ).style.display = 'pdf' === m ? '' : 'none';
 				renderRecipients( 'pdf' === m ? [ { party: 1, name: '', email: '' } ] : currentTemplateRecipients() );
