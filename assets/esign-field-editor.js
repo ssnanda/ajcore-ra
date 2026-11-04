@@ -23,7 +23,7 @@
 
 	var TYPES = [
 		[ 'signature', 'Signature', 160, 34 ], [ 'initials', 'Initials', 50, 22 ], [ 'text', 'Text', 160, 16 ],
-		[ 'email', 'Email', 160, 16 ], [ 'date', 'Date', 90, 16 ], [ 'checkbox', 'Checkbox', 12, 12 ]
+		[ 'email', 'Email', 160, 16 ], [ 'date', 'Date', 90, 16 ], [ 'checkbox', 'Checkbox', 13, 13 ]
 	];
 	var COLORS = [ '#4f46e5', '#059669', '#d97706', '#db2777', '#0891b2', '#7c3aed' ];
 	var CSS = '' +
@@ -61,6 +61,14 @@
 		return n;
 	}
 	function round( n ) { return Math.round( n * 10000 ) / 10000; }
+	// A small pill instead of the full-width chip while dragging.
+	function dragGhost( e, label ) {
+		var g = el( 'div', { text: label } );
+		g.style.cssText = 'position:fixed;top:-100px;left:-100px;padding:3px 10px;background:#4f46e5;color:#fff;font:600 12px system-ui,sans-serif;border-radius:6px;white-space:nowrap';
+		document.body.appendChild( g );
+		try { e.dataTransfer.setDragImage( g, 8, 12 ); } catch ( err ) { /* browser default */ }
+		setTimeout( function () { g.remove(); }, 0 );
+	}
 	function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: round( f.x ), y: round( f.y ), w: round( f.w ), h: round( f.h ), fill: f.fill || '' }; }
 	function color( p ) { return COLORS[ ( p - 1 ) % COLORS.length ]; }
 
@@ -119,7 +127,7 @@
 		TYPES.forEach( function ( t ) {
 			var c = el( 'button', { cls: 'ajfe-chip', draggable: 'true', title: 'Drag onto the page, or click then click the page' } );
 			c.appendChild( el( 'i' ) ); c.appendChild( el( 'span', { text: t[1] } ) );
-			c.addEventListener( 'dragstart', function ( e ) { e.dataTransfer.setData( 'text/plain', 'ajfe:' + t[0] ); e.dataTransfer.effectAllowed = 'copy'; } );
+			c.addEventListener( 'dragstart', function ( e ) { e.dataTransfer.setData( 'text/plain', 'ajfe:' + t[0] ); e.dataTransfer.effectAllowed = 'copy'; dragGhost( e, t[1] ); } );
 			c.addEventListener( 'click', function () { setTool( tool === t[0] ? '' : t[0] ); } );
 			chips[ t[0] ] = c; palette.appendChild( c ); palette.lastChild.style.marginBottom = '4px';
 		} );
@@ -142,7 +150,7 @@
 		mEntries.forEach( function ( m ) {
 			var c = el( 'button', { cls: 'ajfe-chip', draggable: 'true', title: '__ask' === m[0] ? 'A value you type in each time you send' : '{{' + m[0] + '}}' } );
 			c.appendChild( el( 'span', { text: m[1] } ) ); c.setAttribute( 'data-label', m[1].toLowerCase() );
-			c.addEventListener( 'dragstart', function ( e ) { e.dataTransfer.setData( 'text/plain', 'ajfe:merge:' + m[0] ); e.dataTransfer.effectAllowed = 'copy'; } );
+			c.addEventListener( 'dragstart', function ( e ) { e.dataTransfer.setData( 'text/plain', 'ajfe:merge:' + m[0] ); e.dataTransfer.effectAllowed = 'copy'; dragGhost( e, m[1] ); } );
 			c.addEventListener( 'click', function () { setTool( tool === 'merge:' + m[0] ? '' : 'merge:' + m[0] ); } );
 			mChips[ m[0] ] = c; mList.appendChild( c );
 		} );
@@ -225,14 +233,23 @@
 				var c = color( f.party ), b = el( 'div', { cls: 'ajfe-box' + ( f === sel ? ' sel' : '' ) } );
 				b.style.cssText = 'left:' + f.x * 100 + '%;top:' + f.y * 100 + '%;width:' + f.w * 100 + '%;height:' + f.h * 100 + '%;border-color:' + c + ';background:' + c + '22;color:' + c;
 				var label = ( TYPES.filter( function ( t ) { return t[0] === f.type; } )[0] || [ '', f.type ] )[1];
-				if ( 'checkbox' === f.type ) { label = '☐'; }
+				if ( 'checkbox' === f.type ) { label = ''; }
+				if ( 'checkbox' === f.type && ! ( previewMode && f.fill ) ) { b.style.padding = '0'; b.style.background = c + '1a'; }
 				var pvText = previewMode && f.fill && 'signature' !== f.type && 'initials' !== f.type ? resolveText( f.fill ).trim() : null;
 				if ( previewMode && f.fill && 'signature' !== f.type && 'initials' !== f.type ) { // live view: the value as it will be printed
-					var scale = canvas.width / pageW, fpx = Math.max( 7, Math.min( 11 * scale, f.h * canvas.height * 0.75 ) );
+					var scale = canvas.width / pageW, hpt = f.h * pageH, wpt = f.w * pageW, fpt = hpt < 13 ? Math.max( 8, hpt * 0.85 ) : 11;
 					b.style.background = 'transparent'; b.style.color = '#000'; b.style.borderStyle = 'dashed'; b.style.borderColor = c + '88';
-					b.style.fontFamily = 'Helvetica,Arial,sans-serif'; b.style.fontSize = fpx + 'px'; b.style.padding = '0 2px';
-					if ( 'checkbox' === f.type ) { b.style.justifyContent = 'center'; b.style.fontWeight = '700'; b.appendChild( el( 'span', { text: pvText ? 'X' : '' } ) ); }
-					else if ( pvText ) { b.appendChild( el( 'span', { text: pvText } ) ); }
+					b.style.fontFamily = '"Times New Roman",Times,serif'; b.style.padding = '0 2px'; b.style.alignItems = 'flex-end';
+					if ( 'checkbox' === f.type ) {
+						b.style.padding = '0'; b.style.alignItems = 'center'; b.style.justifyContent = 'center'; b.style.fontWeight = '700'; b.style.fontSize = Math.max( 8, Math.min( 13, Math.min( wpt, hpt ) * 0.95 ) ) * scale + 'px';
+						if ( pvText ) { b.appendChild( el( 'span', { text: 'X' } ) ); }
+					}
+					else if ( pvText ) {
+						var mctx = ( paint._m = paint._m || document.createElement( 'canvas' ).getContext( '2d' ) );
+						while ( fpt > 8 ) { mctx.font = fpt + 'px "Times New Roman", Times, serif'; if ( mctx.measureText( pvText ).width <= wpt - 2 ) { break; } fpt -= 0.5; }
+						b.style.fontSize = fpt * scale + 'px'; b.style.paddingBottom = Math.max( 0, 2 * scale ) + 'px';
+						b.appendChild( el( 'span', { text: pvText } ) );
+					}
 					else { var em = el( 'span', { text: 'signer fills in' } ); em.style.cssText = 'color:#94a3b8;font-style:italic;font-size:9px'; b.appendChild( em ); }
 				} else {
 					b.appendChild( el( 'span', { text: label } ) );
@@ -245,7 +262,8 @@
 					if ( sel !== f ) { sel = f; renderInsp(); layer.querySelectorAll( '.sel' ).forEach( function ( n ) { n.classList.remove( 'sel' ); } ); b.classList.add( 'sel' ); }
 					function mv( ev ) {
 						var dx = ( ev.clientX - sx ) / W, dy = ( ev.clientY - sy ) / H; moved = true;
-						if ( resizing ) { f.w = Math.max( 0.008, Math.min( 1 - f.x, ow + dx ) ); f.h = Math.max( 0.006, Math.min( 1 - f.y, oh + dy ) ); b.style.width = f.w * 100 + '%'; b.style.height = f.h * 100 + '%'; }
+						if ( resizing && 'checkbox' === f.type ) { f.w = Math.max( 0.012, Math.min( 1 - f.x, ow + dx ) ); f.h = Math.min( 1 - f.y, f.w * pageW / pageH ); f.w = f.h * pageH / pageW; b.style.width = f.w * 100 + '%'; b.style.height = f.h * 100 + '%'; }
+						else if ( resizing ) { f.w = Math.max( 0.008, Math.min( 1 - f.x, ow + dx ) ); f.h = Math.max( 0.006, Math.min( 1 - f.y, oh + dy ) ); b.style.width = f.w * 100 + '%'; b.style.height = f.h * 100 + '%'; }
 						else { f.x = Math.max( 0, Math.min( 1 - f.w, ox + dx ) ); f.y = Math.max( 0, Math.min( 1 - f.h, oy + dy ) ); b.style.left = f.x * 100 + '%'; b.style.top = f.y * 100 + '%'; }
 					}
 					function up() { document.removeEventListener( 'pointermove', mv ); document.removeEventListener( 'pointerup', up ); if ( moved ) { updateCount(); changed(); } }

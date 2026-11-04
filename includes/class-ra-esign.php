@@ -853,7 +853,7 @@ class AJCore_RA_Esign {
 			$outs = array();
 			foreach ( $fields as $bf ) {
 				$pr     = $bf['properties'];
-				$outs[] = array( 'page' => $bf['page'], 'x' => $pr['x'], 'y' => $pr['y'], 'w' => $pr['w'], 'h' => $pr['h'], 'outline' => ucfirst( (string) $bf['type'] ) . ' (' . ( $bf['party'] ?? 1 ) . ')' );
+				$outs[] = array( 'page' => $bf['page'], 'x' => $pr['x'], 'y' => $pr['y'], 'w' => $pr['w'], 'h' => $pr['h'], 'outline' => 'checkbox' === $bf['type'] ? '' : ucfirst( (string) $bf['type'] ) . ' (' . ( $bf['party'] ?? 1 ) . ')' );
 			}
 			$bytes = $outs ? $this->stamp_pdf( $content, $outs ) : $content;
 			return is_wp_error( $bytes ) ? $bytes : array( 'preview_pdf' => $bytes );
@@ -1547,30 +1547,32 @@ class AJCore_RA_Esign {
 					$y = $f['y'] * $size['height'];
 					$w = $f['w'] * $size['width'];
 					$h = $f['h'] * $size['height'];
-					if ( ! empty( $f['outline'] ) ) { // preview only: where the signer will sign / fill in
+					if ( isset( $f['outline'] ) ) { // preview only: where the signer will sign / fill in
 						$pdf->SetDrawColor( 79, 70, 229 );
 						$pdf->SetLineWidth( 0.8 );
 						$pdf->Rect( $x, $y, $w, $h );
-						$pdf->SetFont( 'Helvetica', '', 6.5 );
-						$pdf->SetTextColor( 79, 70, 229 );
-						$pdf->Text( $x + 1.5, $y + 7, (string) $f['outline'] );
+						if ( '' !== (string) $f['outline'] && $w > 42 && $h > 8 ) { // a label only where it fits
+							$pdf->SetFont( 'Helvetica', '', 6.5 );
+							$pdf->SetTextColor( 79, 70, 229 );
+							$pdf->Text( $x + 1.5, $y + 7, (string) $f['outline'] );
+						}
 						continue;
 					}
 					$pdf->SetTextColor( 0, 0, 0 );
-					if ( 'checkbox' === $f['type'] ) {
-						$fs = max( 6, min( 12, $h * 0.95 ) );
-						$pdf->SetFont( 'Helvetica', 'B', $fs );
-						$pdf->Text( $x + max( 0.5, ( $w - $pdf->GetStringWidth( 'X' ) ) / 2 ), $y + $h * 0.5 + $fs * 0.35, 'X' );
+					if ( 'checkbox' === $f['type'] ) { // a bold X, centred in the box
+						$fs = max( 8, min( 13, min( $w, $h ) * 0.95 ) );
+						$pdf->SetFont( 'Times', 'B', $fs );
+						$pdf->Text( $x + ( $w - $pdf->GetStringWidth( 'X' ) ) / 2, $y + $h / 2 + $fs * 0.33, 'X' );
 						continue;
 					}
 					$text = $enc( (string) $f['value'] );
-					$fs   = max( 6, min( 11, $h * 0.75 ) );
-					$pdf->SetFont( 'Helvetica', '', $fs );
-					while ( $fs > 5 && $pdf->GetStringWidth( $text ) > $w - 2 ) {
+					$fs   = $h < 13 ? max( 8, $h * 0.85 ) : 11; // the form's own text size (Times, 11 pt); only a very short box or a long value goes smaller
+					$pdf->SetFont( 'Times', '', $fs );
+					while ( $fs > 8 && $pdf->GetStringWidth( $text ) > $w - 2 ) {
 						$fs -= 0.5;
-						$pdf->SetFont( 'Helvetica', '', $fs );
+						$pdf->SetFont( 'Times', '', $fs );
 					}
-					$base = $h <= 18 ? $y + $h - 3 : $y + $h * 0.5 + $fs * 0.35;
+					$base = max( $y + $fs, $y + $h - 3 ); // the text rests on the line at the bottom of the box
 					$pdf->Text( $x + 1.5, $base, $text );
 				}
 			}
