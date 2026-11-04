@@ -42,7 +42,6 @@ function ajcore_ra_features() {
 		),
 		'Integrations'      => array(
 			'Rentec Direct (API, Client Portal tab, settings)' => true,
-			'UPOS Temps (Honeywell)'           => false,
 			'AJPhone'                          => false,
 			'Zoho Calendar and Zoho Mail'      => false,
 			'E-Signatures (BreezeDoc): templates, PDF upload, webhooks' => true,
