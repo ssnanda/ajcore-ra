@@ -2811,7 +2811,7 @@ class AJCore_RA_Esign {
 						</div>
 						<div id="ajra-es-tpl-docwrap" style="display:none;margin-top:10px">
 							<label><?php esc_html_e( 'Document text', 'ajcore-ra' ); ?> <span class="ajra-muted">(# Heading, ## Subheading, - bullet, ---pagebreak---)</span></label>
-							<textarea id="ajra-es-tpl-body" rows="12" style="width:100%;font-family:monospace"></textarea>
+							<textarea id="ajra-es-tpl-body" rows="14" style="width:100%;min-height:280px;height:280px;font-family:monospace;resize:vertical"></textarea>
 							<div id="ajra-es-tpl-merge" style="margin-top:6px"></div>
 						</div>
 					<div style="margin-top:10px"><label><?php esc_html_e( 'Signers, in signing order (role labels)', 'ajcore-ra' ); ?></label><div id="ajra-es-tpl-signers"></div>
