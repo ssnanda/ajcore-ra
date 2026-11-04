@@ -3026,13 +3026,12 @@ class AJCore_RA_Esign {
 							<div id="ajra-es-tpl-wrap">
 								<label><?php esc_html_e( 'Template', 'ajcore-ra' ); ?></label>
 								<select id="ajra-es-template"><option value=""><?php esc_html_e( '— pick a template —', 'ajcore-ra' ); ?></option></select>
-								<div id="ajra-es-tplfields-wrap" style="display:none;margin-top:6px"><button type="button" class="button button-small" id="ajra-es-tplfields"><?php esc_html_e( 'Place fields…', 'ajcore-ra' ); ?></button> <span class="ajra-muted" id="ajra-es-tplfields-count"></span> <span class="ajra-muted"><?php esc_html_e( 'Adjust the fields for this request only.', 'ajcore-ra' ); ?></span></div>
 								<div id="ajra-es-vars" style="display:none;margin-top:8px"></div>
 							</div>
 							<div id="ajra-es-pdf-wrap" style="display:none">
 								<label><?php esc_html_e( 'PDF (max 25 MB, 100 pages)', 'ajcore-ra' ); ?></label>
 								<input type="file" id="ajra-es-pdf" accept="application/pdf,.pdf" style="margin-bottom:6px">
-								<div style="margin:0 0 6px"><button type="button" class="button button-small" id="ajra-es-pdf-fields"><?php esc_html_e( 'Place fields…', 'ajcore-ra' ); ?></button> <span class="ajra-muted" id="ajra-es-pdf-fcount"></span> <span class="ajra-muted"><?php esc_html_e( 'Drop signatures, text, dates and checkboxes where you want them; text can be filled from customer data.', 'ajcore-ra' ); ?></span></div>
+								
 								<div class="ajra-row">
 									<input type="text" id="ajra-es-title" maxlength="191" placeholder="<?php esc_attr_e( 'Title (defaults to file name)', 'ajcore-ra' ); ?>">
 									<input type="number" id="ajra-es-page" min="1" placeholder="<?php esc_attr_e( 'Sign page', 'ajcore-ra' ); ?>" title="<?php esc_attr_e( 'Blank = last page. A signature and date box is placed per signer near the bottom.', 'ajcore-ra' ); ?>" style="max-width:100px;flex:none">
@@ -3042,6 +3041,7 @@ class AJCore_RA_Esign {
 							<p id="ajra-es-add-wrap" style="display:none;margin:0"><button type="button" class="button button-small" id="ajra-es-add"><?php esc_html_e( '+ Add signer', 'ajcore-ra' ); ?></button></p>
 						</div>
 					</div>
+					<div id="ajra-es-inline" style="display:none;margin-top:14px"></div>
 					<textarea id="ajra-es-message" rows="2" style="display:none;margin-top:10px" placeholder="<?php esc_attr_e( 'Message to signers (needs BreezeDoc custom-email plan)', 'ajcore-ra' ); ?>"></textarea>
 					<div class="ajra-bar">
 						<?php if ( $is_v1 ) : ?>
@@ -3576,6 +3576,7 @@ class AJCore_RA_Esign {
 			function renderRecipients( list ) {
 				box.innerHTML = ( list.length ? '<label>Signers (in signing order)</label>' : '' ) + list.map( function ( r, i ) { return row( r.party || i + 1, r.name, r.email, 0 === i, r.role ); } ).join( '' );
 				$( 'ajra-es-add-wrap' ).style.display = 'pdf' === mode ? 'block' : 'none';
+				if ( inlineEd ) { inlineEd.setSigners( currentRoles() ); }
 				updateSend();
 			}
 			function readRecipients() {
@@ -3602,6 +3603,7 @@ class AJCore_RA_Esign {
 				$( 'ajra-es-tpl-wrap' ).style.display = 'template' === m ? '' : 'none';
 				$( 'ajra-es-pdf-wrap' ).style.display = 'pdf' === m ? '' : 'none';
 				renderRecipients( 'pdf' === m ? [ { party: 1, name: '', email: '' } ] : currentTemplateRecipients() );
+				refreshInline();
 			}
 			document.querySelectorAll( '.ajra-es a[data-mode]' ).forEach( function ( a ) { a.addEventListener( 'click', function () { setMode( a.getAttribute( 'data-mode' ) ); } ); } );
 			var tplLayout = [];
@@ -3617,32 +3619,34 @@ class AJCore_RA_Esign {
 			function syncTplFields() {
 				var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0];
 				tplLayout = [];
-				$( 'ajra-es-tplfields-count' ).textContent = '';
-				$( 'ajra-es-tplfields-wrap' ).style.display = 'template' === mode && t && 'doc' !== t.kind ? '' : 'none';
 				renderVars();
 			}
-			tpl.addEventListener( 'change', function () { renderRecipients( currentTemplateRecipients() ); syncTplFields(); } );
-			$( 'ajra-es-tplfields' ).addEventListener( 'click', function () {
-				var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0]; if ( ! t ) { return; }
-				fetch( tplFileUrl( t.id ), { credentials: 'same-origin' } ).then( function ( r ) { if ( ! r.ok ) { throw new Error( 'The template PDF could not be loaded.' ); } return r.arrayBuffer(); } ).then( function ( buf ) {
-					var roles = readRecipients().map( function ( r, i ) { return r.name || ( 'Signer ' + ( i + 1 ) ); } );
-					window.AJEsignFieldEditor.open( { pdfData: buf, pdfjsBase: pdfjsBase, fields: tplLayout.length ? tplLayout : ( t.layout || [] ), signers: roles, mergeFields: mergeFields, onSave: function ( list ) {
-						tplLayout = list; $( 'ajra-es-tplfields-count' ).textContent = list.length + ' field(s) for this request'; renderVars();
-					} } );
-				} ).catch( function ( e ) { window.alert( e.message ); } );
-			} );
+			tpl.addEventListener( 'change', function () { renderRecipients( currentTemplateRecipients() ); syncTplFields(); refreshInline(); } );
 			cust.addEventListener( 'change', updateSend );
-			$( 'ajra-es-pdf' ) && $( 'ajra-es-pdf' ).addEventListener( 'change', function () { upLayout = []; $( 'ajra-es-pdf-fcount' ).textContent = ''; updateSend(); } );
-			var upLayout = [];
-			if ( $( 'ajra-es-pdf-fields' ) ) { $( 'ajra-es-pdf-fields' ).addEventListener( 'click', function () {
-				var f = $( 'ajra-es-pdf' ).files[0]; if ( ! f ) { window.alert( 'Choose a PDF first.' ); return; }
-				f.arrayBuffer().then( function ( buf ) {
-					var roles = readRecipients().map( function ( r, i ) { return r.name || ( 'Signer ' + ( i + 1 ) ); } );
-					window.AJEsignFieldEditor.open( { pdfData: buf, pdfjsBase: pdfjsBase, fields: upLayout, signers: roles, mergeFields: mergeFields, onSave: function ( list ) {
-						upLayout = list; $( 'ajra-es-pdf-fcount' ).textContent = list.length ? list.length + ' field(s) placed' : '';
-					} } );
-				} );
-			} ); }
+			var upLayout = [], inlineEd = null, inlineHost = $( 'ajra-es-inline' ), inlineSeq = 0;
+			function currentRoles() { return readRecipients().map( function ( r, i ) { return r.name || ( 'Signer ' + ( i + 1 ) ); } ); }
+			function hideInline() { inlineSeq++; if ( inlineEd ) { inlineEd.destroy(); inlineEd = null; } inlineHost.style.display = 'none'; inlineHost.innerHTML = ''; }
+			function showInline( loader, fields, onChange ) {
+				var seq = ++inlineSeq; if ( inlineEd ) { inlineEd.destroy(); inlineEd = null; }
+				inlineHost.style.display = ''; inlineHost.innerHTML = '<div class="ajra-muted">Loading the document…</div>';
+				loader().then( function ( buf ) {
+					if ( seq !== inlineSeq ) { return; }
+					inlineEd = window.AJEsignFieldEditor.mount( inlineHost, { pdfData: buf, pdfjsBase: pdfjsBase, fields: fields, signers: currentRoles(), mergeFields: mergeFields, onChange: onChange } );
+				} ).catch( function ( e ) { if ( seq === inlineSeq ) { inlineHost.innerHTML = '<div class="ajra-err" style="display:block">' + esc( e.message ) + '</div>'; } } );
+			}
+			// The document and its fields sit under the form: the template's saved fields load automatically; edits apply to this request only.
+			function refreshInline() {
+				if ( 'template' === mode ) {
+					var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0];
+					if ( ! t || 'doc' === t.kind ) { hideInline(); return; }
+					showInline( function () { return fetch( tplFileUrl( t.id ), { credentials: 'same-origin' } ).then( function ( r ) { if ( ! r.ok ) { throw new Error( 'The template PDF could not be loaded.' ); } return r.arrayBuffer(); } ); }, t.layout || [], function ( f ) { tplLayout = f; renderVars(); } );
+				} else {
+					var file = $( 'ajra-es-pdf' ).files[0];
+					if ( ! file ) { hideInline(); return; }
+					showInline( function () { return file.arrayBuffer(); }, upLayout, function ( f ) { upLayout = f; } );
+				}
+			}
+			$( 'ajra-es-pdf' ) && $( 'ajra-es-pdf' ).addEventListener( 'change', function () { upLayout = []; refreshInline(); updateSend(); } );
 			box.addEventListener( 'input', updateSend );
 			$( 'ajra-es-add' ).addEventListener( 'click', function () { var cur = readRecipients(); cur.push( { party: cur.length + 1, name: '', email: '' } ); renderRecipients( cur ); } );
 			var msgToggle = $( 'ajra-es-msg-toggle' );
