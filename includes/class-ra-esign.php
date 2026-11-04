@@ -1512,6 +1512,24 @@ class AJCore_RA_Esign {
 		return is_array( $list ) ? array_map( 'strval', $list ) : array();
 	}
 
+	private function clear_ids( $row_name ) {
+		if ( self::is_shared() ) {
+			list( $db, $table ) = self::shared_db_and_table();
+			if ( $db ) {
+				$db->delete( $table, array( 'setting_name' => $row_name ), array( '%s' ) );
+				return;
+			}
+		}
+		delete_option( $row_name );
+	}
+
+	/** Forgets documents deleted from the local list so the next import brings them back. */
+	public function restore_deleted_documents() {
+		$count = count( $this->ignored_ids() );
+		$this->clear_ids( self::IGNORED_ROW );
+		return array( 'restored' => $count );
+	}
+
 	private function add_ids( $row_name, array $ids ) {
 		$all     = array_slice( array_values( array_unique( array_merge( $this->id_list( $row_name ), array_map( 'strval', $ids ) ) ) ), -5000 );
 		$encoded = wp_json_encode( $all );
@@ -1725,8 +1743,7 @@ class AJCore_RA_Esign {
 				}
 				$state = $personal ? $this->breezedoc_legacy_doc_state( $doc ) : $this->breezedoc_v1_doc_state( $doc );
 				if ( 'draft' === $state['status'] ) {
-					$counts['drafts']++;
-					continue;
+					$counts['drafts']++; // imported too, shown under the Drafts filter
 				}
 				$customer = $this->match_customer( $state['recipients'], $state['title'], $map, $names );
 				if ( ! $customer && ! $include_unmatched ) {
@@ -1796,6 +1813,7 @@ class AJCore_RA_Esign {
 		$catalog[] = $e( 'POST', '/ops/esign/send', 'Creates a document from a template (template_id, recipients[{party,name,email}], optional signing_order/message/expires_in_days/title), sends it, logs it.' );
 		$catalog[] = $e( 'POST', '/ops/esign/send-pdf', 'Multipart: uploads a PDF (pdf, recipients JSON, stripe_customer_id, title, page, message, expires_in_days), places signature+date fields per signer, sends, logs it. Team API key only.' );
 		$catalog[] = $e( 'GET', '/ops/esign/documents', 'Local log of sent signature requests with their last-known status.' );
+		$catalog[] = $e( 'POST', '/ops/esign/documents/restore', 'Clears the list of documents deleted from the local log so the next import brings them back.' );
 		$catalog[] = $e( 'POST', '/ops/esign/documents/delete', 'Deletes log rows (body: ids) — the local copy only, nothing is removed in BreezeDoc; the ids are remembered so imports skip them.' );
 		$catalog[] = $e( 'GET', '/ops/esign/settings', 'Auto-import frequency, last automatic run, and which BreezeDoc credentials are saved.' );
 		$catalog[] = $e( 'POST', '/ops/esign/settings/save', 'Sets the auto-import frequency (auto_import: off|hourly|twicedaily|daily). Master site only.' );
@@ -1843,6 +1861,7 @@ class AJCore_RA_Esign {
 				'/settings'                  => array( $r, 'rest_settings' ),
 				'/settings/save'             => array( 'POST', 'rest_settings_save' ),
 				'/documents/delete'          => array( 'POST', 'rest_delete_documents' ),
+				'/documents/restore'         => array( 'POST', 'rest_restore_documents' ),
 				'/diagnose'                  => array( $r, 'rest_diagnose' ),
 				'/documents/' . $id_re . '/' . $act_rw => array( 'POST', 'rest_document_action' ),
 				'/documents/' . $id_re . '/' . $act_ro => array( $r, 'rest_document_action' ),
@@ -1926,6 +1945,10 @@ class AJCore_RA_Esign {
 		);
 	}
 
+	public function rest_restore_documents() {
+		return $this->rest_result( $this->restore_deleted_documents() );
+	}
+
 	public function rest_delete_documents( WP_REST_Request $request ) {
 		return $this->rest_result( $this->delete_logged_documents( (array) $request->get_param( 'ids' ) ) );
 	}
@@ -1953,6 +1976,7 @@ class AJCore_RA_Esign {
 		return rest_ensure_response(
 			array(
 				'autoImport' => (string) ( $opt['auto_import'] ?? 'off' ),
+				'ignoredCount' => count( $this->ignored_ids() ),
 				'notifyOnSend' => ! empty( $opt['notify_on_send'] ),
 				'signedCopy'   => (string) ( $opt['signed_copy'] ?? 'off' ),
 				'fileSigned'   => ! empty( $opt['file_signed'] ),
@@ -2066,9 +2090,12 @@ class AJCore_RA_Esign {
 		$hook   = $this->breezedoc_webhook_status();
 		$labels = array( 'draft' => __( 'Draft', 'ajcore-ra' ), 'sent' => __( 'Awaiting signature', 'ajcore-ra' ), 'completed' => __( 'Completed', 'ajcore-ra' ), 'cancelled' => __( 'Cancelled', 'ajcore-ra' ), 'expired' => __( 'Expired', 'ajcore-ra' ) );
 		$group  = static function ( $status ) {
+			if ( 'draft' === $status ) {
+				return 'draft';
+			}
 			return 'completed' === $status ? 'completed' : ( in_array( $status, array( 'cancelled', 'expired' ), true ) ? 'closed' : 'sent' );
 		};
-		$counts = array( 'all' => count( $log['documents'] ), 'sent' => 0, 'completed' => 0, 'closed' => 0 );
+		$counts = array( 'all' => count( $log['documents'] ), 'sent' => 0, 'draft' => 0, 'completed' => 0, 'closed' => 0 );
 		foreach ( $log['documents'] as $doc ) {
 			$counts[ $group( $doc['status'] ) ]++;
 		}
@@ -2285,6 +2312,7 @@ class AJCore_RA_Esign {
 						<span style="text-align:right">
 							<button type="button" class="button button-small" id="ajra-es-import"><?php esc_html_e( 'Import from BreezeDoc', 'ajcore-ra' ); ?></button>
 							<button type="button" class="button button-small" id="ajra-es-link"><?php esc_html_e( 'Link customers', 'ajcore-ra' ); ?></button>
+							<?php $ignored_n = count( $this->ignored_ids() ); if ( $ignored_n ) : ?><button type="button" class="button button-small" id="ajra-es-restore"><?php echo esc_html( sprintf( /* translators: %d: count */ __( 'Restore deleted (%d)', 'ajcore-ra' ), $ignored_n ) ); ?></button><?php endif; ?>
 							<label style="display:block;font-weight:400;margin-top:3px"><input type="checkbox" id="ajra-es-import-all"> <?php esc_html_e( 'include documents not matching a customer', 'ajcore-ra' ); ?></label>
 							<span class="ajra-muted" id="ajra-es-import-out"></span>
 						</span>
@@ -2294,6 +2322,7 @@ class AJCore_RA_Esign {
 					<div class="ajra-seg" id="ajra-es-filters">
 						<a class="on" data-f="all"><?php echo esc_html( sprintf( '%s %d', __( 'All', 'ajcore-ra' ), $counts['all'] ) ); ?></a>
 						<a data-f="sent"><?php echo esc_html( sprintf( '%s %d', __( 'Awaiting', 'ajcore-ra' ), $counts['sent'] ) ); ?></a>
+						<a data-f="draft"><?php echo esc_html( sprintf( '%s %d', __( 'Drafts', 'ajcore-ra' ), $counts['draft'] ) ); ?></a>
 						<a data-f="completed"><?php echo esc_html( sprintf( '%s %d', __( 'Completed', 'ajcore-ra' ), $counts['completed'] ) ); ?></a>
 						<a data-f="closed"><?php echo esc_html( sprintf( '%s %d', __( 'Closed', 'ajcore-ra' ), $counts['closed'] ) ); ?></a>
 					</div>
@@ -2418,9 +2447,20 @@ class AJCore_RA_Esign {
 				}
 				step( '' ).then( function () {
 					if ( 0 === tot.seen ) { out.textContent = 'BreezeDoc returned no documents for this key\'s team — click Diagnose in Connection to see the raw response.'; return; }
-					out.textContent = tot.seen + ' found: ' + tot.imported + ' imported, ' + tot.existing + ' already there, ' + tot.unmatched + ' skipped (no matching customer), ' + tot.drafts + ' drafts skipped';
+					out.textContent = tot.seen + ' found: ' + tot.imported + ' imported, ' + tot.existing + ' already there, ' + tot.unmatched + ' skipped (no matching customer), ' + tot.drafts + ' drafts included';
 					if ( tot.imported ) { setTimeout( function () { window.location.reload(); }, 1500 ); }
 				} ).catch( function ( e ) { out.style.color = '#b32d2e'; out.textContent = e.message; } ).finally( function () { imp.disabled = false; } );
+			} ); }
+
+			// Bring back documents deleted from the local list: forget them, then import again.
+			var rst = $( 'ajra-es-restore' );
+			if ( rst ) { rst.addEventListener( 'click', function () {
+				if ( ! window.confirm( 'Restore documents you deleted from this list? They will be imported again.' ) ) { return; }
+				rst.disabled = true;
+				api( '/documents/restore', { method: 'POST' } ).then( function ( d ) {
+					$( 'ajra-es-import-out' ).textContent = ( d.restored || 0 ) + ' restored — importing…';
+					if ( $( 'ajra-es-import' ) ) { $( 'ajra-es-import' ).click(); }
+				} ).catch( function ( e ) { window.alert( e.message ); rst.disabled = false; } );
 			} ); }
 
 			// Link already-logged documents to customers (signer email, then company name in the title).
