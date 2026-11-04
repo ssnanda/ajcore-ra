@@ -463,8 +463,8 @@ class AJCore_RA_Esign {
 		);
 	}
 
-	public function breezedoc_list_templates() {
-		if ( ! $this->breezedoc_is_v1() ) {
+	private function list_templates_source( $v1 ) {
+		if ( ! $v1 ) {
 			$result = $this->breezedoc_api_request( 'GET', '/templates' );
 			if ( is_wp_error( $result ) ) {
 				return $result;
@@ -515,6 +515,35 @@ class AJCore_RA_Esign {
 			}
 		}
 		return $templates;
+	}
+
+	/** Templates from every saved credential: team (tpl_ ids) and personal (numeric ids), labelled when both exist. */
+	public function breezedoc_list_templates() {
+		$has_team = $this->breezedoc_is_v1();
+		$has_pat  = '' !== $this->setting( 'api_token' );
+		$all      = array();
+		$errors   = array();
+		foreach ( array( 'team' => $has_team, 'personal' => $has_pat ) as $source => $enabled ) {
+			if ( ! $enabled ) {
+				continue;
+			}
+			$list = $this->list_templates_source( 'team' === $source );
+			if ( is_wp_error( $list ) ) {
+				$errors[] = $list;
+				continue;
+			}
+			if ( $has_team && $has_pat ) {
+				$suffix = 'team' === $source ? __( ' (team)', 'ajcore-ra' ) : __( ' (personal)', 'ajcore-ra' );
+				foreach ( $list as $i => $t ) {
+					$list[ $i ]['title'] = ( '' !== $t['title'] ? $t['title'] : $t['id'] ) . $suffix;
+				}
+			}
+			$all = array_merge( $all, $list );
+		}
+		if ( empty( $all ) && ! empty( $errors ) ) {
+			return $errors[0];
+		}
+		return $all;
 	}
 
 	public function breezedoc_get_template( $template_id ) {
@@ -574,6 +603,25 @@ class AJCore_RA_Esign {
 			'status'       => $status,
 			'completed_at' => $completed,
 			'url'          => $url,
+			'recipients'   => $this->breezedoc_map_recipients( $doc['recipients'] ?? array() ),
+			'title'        => (string) ( $doc['title'] ?? '' ),
+		);
+	}
+
+	/** Same shape as breezedoc_v1_doc_state() for a legacy (Personal token) document. */
+	private function breezedoc_legacy_doc_state( $doc ) {
+		$completed = ! empty( $doc['completed_at'] ) ? gmdate( 'Y-m-d H:i:s', strtotime( (string) $doc['completed_at'] ) ) : '';
+		$was_sent  = false;
+		foreach ( (array) ( $doc['recipients'] ?? array() ) as $r ) {
+			if ( ! empty( $r['sent_at'] ) ) {
+				$was_sent = true;
+				break;
+			}
+		}
+		return array(
+			'status'       => '' !== $completed ? 'completed' : ( $was_sent ? 'sent' : 'draft' ),
+			'completed_at' => $completed,
+			'url'          => ! empty( $doc['slug'] ) ? 'https://breezedoc.com/documents/' . $doc['slug'] : '',
 			'recipients'   => $this->breezedoc_map_recipients( $doc['recipients'] ?? array() ),
 			'title'        => (string) ( $doc['title'] ?? '' ),
 		);
@@ -1048,14 +1096,25 @@ class AJCore_RA_Esign {
 		return rest_ensure_response( array( 'received' => true, 'refreshed' => $refreshed ) );
 	}
 
-	/** Raw samples from the Team API (team info, first templates, first documents) so a mismatch with what we expect is visible. */
+	/** Raw samples from each saved credential (team info, first templates, first documents) so a mismatch with what we expect is visible. */
 	public function esign_diagnose() {
-		if ( ! $this->breezedoc_is_v1() ) {
-			return new WP_Error( 'breezedoc_not_configured', __( 'Diagnose needs a Team API key.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		if ( ! $this->breezedoc_is_connected() ) {
+			return new WP_Error( 'breezedoc_not_configured', __( 'Diagnose needs a Team API key or Personal token.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$calls = array();
+		if ( $this->breezedoc_is_v1() ) {
+			$calls['team_me']        = array( '/v1/me', array() );
+			$calls['team_templates'] = array( '/v1/templates', array( 'limit' => 2 ) );
+			$calls['team_documents'] = array( '/v1/documents', array( 'limit' => 2 ) );
+		}
+		if ( '' !== $this->setting( 'api_token' ) ) {
+			$calls['personal_me']        = array( '/me', array() );
+			$calls['personal_templates'] = array( '/templates', array() );
+			$calls['personal_documents'] = array( '/documents', array() );
 		}
 		$out = array();
-		foreach ( array( 'me' => '/v1/me', 'templates' => '/v1/templates', 'documents' => '/v1/documents' ) as $key => $path ) {
-			$r         = $this->breezedoc_api_request( 'GET', $path, 'me' === $key ? array() : array( 'query' => array( 'limit' => 2 ) ) );
+		foreach ( $calls as $key => $call ) {
+			$r           = $this->breezedoc_api_request( 'GET', $call[0], $call[1] ? array( 'query' => $call[1] ) : array() );
 			$out[ $key ] = is_wp_error( $r ) ? 'ERROR (' . ( $r->get_error_data()['status'] ?? '?' ) . '): ' . $r->get_error_message() : $r;
 		}
 		return $out;
@@ -1074,14 +1133,15 @@ class AJCore_RA_Esign {
 	}
 
 	/**
-	 * Pulls historical documents from the BreezeDoc team into the local log (Team API key only).
-	 * The team may hold documents from other businesses, so by default only documents with a signer
-	 * whose email matches a portal customer are imported; drafts are always skipped. Processes up to
-	 * 300 documents per call (3 pages) and returns next_cursor so the caller can continue.
+	 * Pulls historical documents from BreezeDoc into the local log: the team's (Team API key, `doc_` ids)
+	 * and then your own (Personal token, numeric ids). The account may hold documents from other
+	 * businesses, so by default only documents with a signer whose email matches a portal customer are
+	 * imported; drafts are always skipped. Processes up to 300 documents per call and returns
+	 * next_cursor ("p:N" = your own documents, page N) so the caller can continue.
 	 */
 	public function import_documents( $cursor = '', $include_unmatched = false ) {
-		if ( ! $this->breezedoc_is_v1() ) {
-			return new WP_Error( 'breezedoc_not_configured', __( 'Import needs a BreezeDoc Team API key.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		if ( ! $this->breezedoc_is_connected() ) {
+			return new WP_Error( 'breezedoc_not_configured', __( 'Import needs a BreezeDoc Team API key or Personal token.', 'ajcore-ra' ), array( 'status' => 400 ) );
 		}
 		if ( ! $this->ensure_esign_documents_table() ) {
 			return new WP_Error( 'no_table', __( 'E-Signatures log table could not be created.', 'ajcore-ra' ) );
@@ -1092,12 +1152,23 @@ class AJCore_RA_Esign {
 		$counts = array( 'imported' => 0, 'existing' => 0, 'unmatched' => 0, 'drafts' => 0, 'seen' => 0 );
 		$cursor = sanitize_text_field( (string) $cursor );
 
-		for ( $page = 0; $page < 3; $page++ ) {
-			$query = array( 'limit' => 100 );
-			if ( '' !== $cursor ) {
-				$query['cursor'] = $cursor;
+		$personal = 0 === strpos( $cursor, 'p:' );
+		if ( ! $personal && ! $this->breezedoc_is_v1() ) {
+			$personal = true;
+			$cursor   = 'p:1';
+		}
+		$page_no = $personal ? max( 1, (int) substr( $cursor, 2 ) ) : 0;
+
+		for ( $i = 0; $i < 3; $i++ ) {
+			if ( $personal ) {
+				$result = $this->breezedoc_api_request( 'GET', '/documents', array( 'query' => array( 'page' => $page_no, 'order_by' => 'id', 'direction' => 'desc' ) ) );
+			} else {
+				$query = array( 'limit' => 100 );
+				if ( '' !== $cursor ) {
+					$query['cursor'] = $cursor;
+				}
+				$result = $this->breezedoc_api_request( 'GET', '/v1/documents', array( 'query' => $query ) );
 			}
-			$result = $this->breezedoc_api_request( 'GET', '/v1/documents', array( 'query' => $query ) );
 			if ( is_wp_error( $result ) ) {
 				return $result;
 			}
@@ -1107,7 +1178,7 @@ class AJCore_RA_Esign {
 					continue;
 				}
 				$counts['seen']++;
-				$state = $this->breezedoc_v1_doc_state( $doc );
+				$state = $personal ? $this->breezedoc_legacy_doc_state( $doc ) : $this->breezedoc_v1_doc_state( $doc );
 				if ( 'draft' === $state['status'] ) {
 					$counts['drafts']++;
 					continue;
@@ -1128,9 +1199,15 @@ class AJCore_RA_Esign {
 					$counts['unmatched']++;
 					continue;
 				}
-				$sent_raw = (string) ( $doc['sent_at'] ?? $doc['created_at'] ?? '' );
-				$sent_at  = $sent_raw && strtotime( $sent_raw ) ? get_date_from_gmt( gmdate( 'Y-m-d H:i:s', strtotime( $sent_raw ) ) ) : current_time( 'mysql' );
-				$data     = array(
+				$sent_raw = (string) ( $doc['sent_at'] ?? '' );
+				if ( '' === $sent_raw && ! empty( $doc['recipients'][0]['sent_at'] ) ) {
+					$sent_raw = (string) $doc['recipients'][0]['sent_at'];
+				}
+				if ( '' === $sent_raw ) {
+					$sent_raw = (string) ( $doc['created_at'] ?? '' );
+				}
+				$sent_at = $sent_raw && strtotime( $sent_raw ) ? get_date_from_gmt( gmdate( 'Y-m-d H:i:s', strtotime( $sent_raw ) ) ) : current_time( 'mysql' );
+				$data    = array(
 					'breezedoc_document_id' => $doc_id,
 					'breezedoc_template_id' => (string) ( $doc['template_id'] ?? '' ),
 					'template_title'        => $state['title'],
@@ -1144,7 +1221,7 @@ class AJCore_RA_Esign {
 					'created_at'            => current_time( 'mysql' ),
 					'updated_at'            => current_time( 'mysql' ),
 				);
-				$format   = array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s' );
+				$format  = array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s' );
 				if ( '' !== $state['completed_at'] ) {
 					$data['completed_at'] = $state['completed_at'];
 					$format[]             = '%s';
@@ -1152,9 +1229,21 @@ class AJCore_RA_Esign {
 				$pdb->insert( $table, $data, $format );
 				$counts['imported']++;
 			}
-			$cursor = isset( $result['next_cursor'] ) ? (string) $result['next_cursor'] : '';
-			if ( '' === $cursor ) {
-				break;
+			if ( $personal ) {
+				if ( empty( $result['next_page_url'] ) ) {
+					$cursor = '';
+					break;
+				}
+				$page_no++;
+				$cursor = 'p:' . $page_no;
+			} else {
+				$cursor = isset( $result['next_cursor'] ) ? (string) $result['next_cursor'] : '';
+				if ( '' === $cursor ) {
+					if ( '' !== $this->setting( 'api_token' ) ) {
+						$cursor = 'p:1'; // team finished: continue with your own documents
+					}
+					break;
+				}
 			}
 		}
 		$counts['next_cursor'] = $cursor;
@@ -1439,7 +1528,7 @@ class AJCore_RA_Esign {
 					<p style="margin:10px 0 0">
 						<?php if ( ! $ro ) : ?><button type="submit" class="button button-primary"><?php esc_html_e( 'Save', 'ajcore-ra' ); ?></button><?php endif; ?>
 						<button type="button" class="button" id="ajra-es-test"><?php esc_html_e( 'Test connection', 'ajcore-ra' ); ?></button>
-						<?php if ( $is_v1 ) : ?><button type="button" class="button" id="ajra-es-diagnose"><?php esc_html_e( 'Diagnose', 'ajcore-ra' ); ?></button><?php endif; ?>
+						<?php if ( $connected ) : ?><button type="button" class="button" id="ajra-es-diagnose"><?php esc_html_e( 'Diagnose', 'ajcore-ra' ); ?></button><?php endif; ?>
 						<span id="ajra-es-test-out" class="ajra-muted"></span>
 					</p>
 					<pre id="ajra-es-diag-out" style="max-height:260px;overflow:auto"></pre>
@@ -1520,7 +1609,7 @@ class AJCore_RA_Esign {
 			<div class="ajra-card">
 				<div class="ajra-head">
 					<h2><?php esc_html_e( 'Sent signature requests', 'ajcore-ra' ); ?></h2>
-					<?php if ( $is_v1 ) : ?>
+					<?php if ( $connected ) : ?>
 						<span style="text-align:right">
 							<button type="button" class="button button-small" id="ajra-es-import"><?php esc_html_e( 'Import from BreezeDoc', 'ajcore-ra' ); ?></button>
 							<label style="display:block;font-weight:400;margin-top:3px"><input type="checkbox" id="ajra-es-import-all"> <?php esc_html_e( 'include documents not matching a customer', 'ajcore-ra' ); ?></label>
