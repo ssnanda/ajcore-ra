@@ -830,11 +830,13 @@ class AJCore_RA_Esign {
 
 		// One signature + one date box per signer, stacked on the chosen page (page-fraction coords).
 		$fields = array();
+		$base_x = isset( $options['sig_x'] ) ? max( 0.0, min( 0.6, (float) $options['sig_x'] ) ) : 0.08;
+		$base_y = isset( $options['sig_y'] ) ? max( 0.05, min( 0.9, (float) $options['sig_y'] ) ) : 0.78;
 		foreach ( $recipients as $i => $r ) {
 			$col = $i % 2;
 			$row = intdiv( $i, 2 );
-			$x   = 0.08 + 0.48 * $col;
-			$y   = max( 0.05, 0.78 - 0.14 * $row );
+			$x   = min( 0.62, $base_x + 0.48 * $col );
+			$y   = max( 0.05, $base_y - 0.14 * $row );
 			$fields[] = array( 'party' => $r['party'], 'page' => $page, 'type' => 'signature', 'properties' => array( 'x' => $x, 'y' => $y, 'w' => 0.36, 'h' => 0.06 ) );
 			$fields[] = array( 'party' => $r['party'], 'page' => $page, 'type' => 'date', 'properties' => array( 'x' => $x, 'y' => $y + 0.07, 'w' => 0.2, 'h' => 0.03 ) );
 		}
@@ -1034,6 +1036,10 @@ class AJCore_RA_Esign {
 			'rawTitle'   => (string) $meta['title'],
 			'source'     => 'ajcore',
 			'page'       => (int) ( $meta['page'] ?? 0 ),
+			'sigX'       => (float) ( $meta['sig_x'] ?? 8 ),
+			'sigY'       => (float) ( $meta['sig_y'] ?? 78 ),
+			'kind'       => ( $meta['kind'] ?? 'pdf' ) === 'doc' ? 'doc' : 'pdf',
+			'body'       => (string) ( $meta['body'] ?? '' ),
 			'recipients' => $recipients,
 			'fields'     => array(),
 		);
@@ -1043,7 +1049,7 @@ class AJCore_RA_Esign {
 	 * Creates or updates an AJCore template. $file is a $_FILES-style array (required when creating).
 	 * $signers: role labels in signing order (Party 1, 2, …). $page: 0 = last page.
 	 */
-	public function save_local_template( $id, $title, $signers, $page, $file = null ) {
+	public function save_local_template( $id, $title, $signers, $page, $file = null, $kind = 'pdf', $body = '', $sig_x = null, $sig_y = null ) {
 		$title   = mb_substr( sanitize_text_field( (string) $title ), 0, 191 );
 		$signers = array_values( array_filter( array_map( static function ( $r ) {
 			return mb_substr( sanitize_text_field( (string) $r ), 0, 80 );
@@ -1063,11 +1069,19 @@ class AJCore_RA_Esign {
 			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
 		$has_file = is_array( $file ) && ! empty( $file['tmp_name'] ) && empty( $file['error'] );
-		if ( ! $existing && ! $has_file ) {
+		$kind     = 'doc' === $kind ? 'doc' : 'pdf';
+		if ( $existing && ( $existing['kind'] ?? 'pdf' ) === 'doc' ) {
+			$kind = 'doc'; // a template never changes kind after creation
+		}
+		$body = trim( str_replace( "\r\n", "\n", wp_kses_no_null( (string) $body ) ) );
+		if ( 'doc' === $kind && '' === $body ) {
+			return new WP_Error( 'no_body', __( 'Write the document text.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		if ( 'pdf' === $kind && ! $existing && ! $has_file ) {
 			return new WP_Error( 'no_file', __( 'Choose the template PDF.', 'ajcore-ra' ), array( 'status' => 400 ) );
 		}
 		$meta = $existing ? $existing : array( 'id' => 'ajt_' . strtolower( wp_generate_password( 10, false ) ), 'created' => current_time( 'mysql' ) );
-		if ( $has_file ) {
+		if ( 'pdf' === $kind && $has_file ) {
 			if ( filesize( $file['tmp_name'] ) > 25 * MB_IN_BYTES ) {
 				return new WP_Error( 'file_too_large', __( 'PDF must be 25 MB or smaller.', 'ajcore-ra' ), array( 'status' => 400 ) );
 			}
@@ -1086,6 +1100,17 @@ class AJCore_RA_Esign {
 			$meta['file']     = $stored;
 			$meta['filename'] = sanitize_file_name( (string) ( $file['name'] ?? $stored ) );
 		}
+		$meta['kind']    = $kind;
+		foreach ( array( 'sig_x' => $sig_x, 'sig_y' => $sig_y ) as $k => $val ) {
+			if ( null !== $val && '' !== $val ) {
+				$meta[ $k ] = max( 0, min( 90, (float) $val ) ); // percent from the left / top
+			}
+		}
+		if ( 'doc' === $kind ) {
+			$meta['body']     = mb_substr( $body, 0, 60000 );
+			$meta['file']     = '';
+			$meta['filename'] = sanitize_file_name( $title ) . '.pdf';
+		}
 		$meta['title']   = $title;
 		$meta['signers'] = $signers;
 		$meta['page']    = max( 0, (int) $page );
@@ -1101,8 +1126,8 @@ class AJCore_RA_Esign {
 		if ( ! isset( $all[ $id ] ) ) {
 			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
-		$path = $this->tpl_dir() . '/' . basename( (string) $all[ $id ]['file'] );
-		if ( is_file( $path ) ) {
+		$path = '' !== (string) $all[ $id ]['file'] ? $this->tpl_dir() . '/' . basename( (string) $all[ $id ]['file'] ) : '';
+		if ( '' !== $path && is_file( $path ) ) {
 			unlink( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
 		}
 		unset( $all[ $id ] );
@@ -1117,11 +1142,247 @@ class AJCore_RA_Esign {
 			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
 		$meta = $all[ $template_id ];
+		if ( ( $meta['kind'] ?? 'pdf' ) === 'doc' ) {
+			$pdf = $this->render_doc_template( $meta, $stripe_customer_id, $recipients );
+			$tmp = wp_tempnam( 'ajesign.pdf' );
+			if ( ! $tmp || false === file_put_contents( $tmp, $pdf ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+				return new WP_Error( 'tmp_failed', __( 'Could not write the generated PDF.', 'ajcore-ra' ), array( 'status' => 500 ) );
+			}
+			$options['sig_x'] = 0.08;
+			$options['sig_y'] = 0.30; // generated signature page: boxes in the upper-middle, clear of text
+			$result = $this->send_esign_pdf( array( 'tmp_name' => $tmp, 'name' => (string) $meta['filename'], 'error' => 0 ), (string) $meta['title'], $stripe_customer_id, $recipients, 0, $options );
+			@unlink( $tmp ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
+			return $result;
+		}
 		$path = $this->tpl_dir() . '/' . basename( (string) $meta['file'] );
 		if ( ! is_readable( $path ) ) {
 			return new WP_Error( 'file_missing', __( 'The template PDF is missing — edit the template and upload it again.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
+		if ( isset( $meta['sig_x'] ) ) {
+			$options['sig_x'] = (float) $meta['sig_x'] / 100;
+		}
+		if ( isset( $meta['sig_y'] ) ) {
+			$options['sig_y'] = (float) $meta['sig_y'] / 100;
+		}
 		return $this->send_esign_pdf( array( 'tmp_name' => $path, 'name' => (string) $meta['filename'], 'error' => 0 ), (string) $meta['title'], $stripe_customer_id, $recipients, (int) $meta['page'], $options );
+	}
+
+	// ── Document templates: merge fields + built-in PDF writer ──────────────────
+
+	/** Merge fields offered in the editor: token => label. */
+	public static function merge_field_catalog() {
+		return array(
+			'customer.name'    => 'Customer name',
+			'customer.email'   => 'Customer email',
+			'customer.phone'   => 'Customer phone',
+			'customer.address' => 'Customer address',
+			'customer.number'  => 'Customer number',
+			'signer.name'      => 'Signer 1 name',
+			'signer.email'     => 'Signer 1 email',
+			'date'             => 'Today (long date)',
+			'date.short'       => 'Today (numeric)',
+			'company'          => 'Your site / business name',
+		);
+	}
+
+	/** Values for the merge fields for one customer (blank when unknown). */
+	private function merge_values( $stripe_customer_id, array $recipients ) {
+		$v = array_fill_keys( array_keys( self::merge_field_catalog() ), '' );
+		$pdb = $this->get_pdb();
+		$id  = (string) $stripe_customer_id;
+		if ( '' !== $id ) {
+			foreach ( array( 'aj_portal_local_customers' => 'local_customer_id', 'aj_portal_stripe_customers' => 'stripe_customer_id' ) as $suffix => $col ) {
+				$tbl = $this->kit['portal_table']( $suffix );
+				if ( ! $this->kit['table_exists']( $pdb, $tbl ) ) {
+					continue;
+				}
+				$row = $pdb->get_row( $pdb->prepare( "SELECT * FROM `{$tbl}` WHERE `{$col}` = %s LIMIT 1", $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				if ( ! $row ) {
+					continue;
+				}
+				$v['customer.name']   = (string) ( $row['name'] ?? '' );
+				$v['customer.email']  = (string) ( $row['email'] ?? '' );
+				$v['customer.phone']  = (string) ( $row['phone'] ?? '' );
+				$v['customer.number'] = (string) ( $row['customer_number'] ?? '' );
+				$addr                 = $row['address'] ?? '';
+				$decoded              = is_string( $addr ) ? json_decode( $addr, true ) : null;
+				if ( is_array( $decoded ) ) {
+					$parts = array();
+					foreach ( array( 'line1', 'line2' ) as $k ) {
+						if ( ! empty( $decoded[ $k ] ) ) {
+							$parts[] = (string) $decoded[ $k ];
+						}
+					}
+					$city = trim( implode( ' ', array_filter( array( (string) ( $decoded['city'] ?? '' ) . ( ! empty( $decoded['city'] ) && ! empty( $decoded['state'] ) ? ',' : '' ), (string) ( $decoded['state'] ?? '' ), (string) ( $decoded['postal_code'] ?? '' ) ) ) ) );
+					if ( '' !== $city ) {
+						$parts[] = $city;
+					}
+					$addr = implode( ', ', $parts );
+				}
+				$v['customer.address'] = (string) $addr;
+				break;
+			}
+		}
+		if ( ! empty( $recipients[0] ) ) {
+			$v['signer.name']  = (string) ( $recipients[0]['name'] ?? '' );
+			$v['signer.email'] = (string) ( $recipients[0]['email'] ?? '' );
+		}
+		$v['date']       = wp_date( 'F j, Y' );
+		$v['date.short'] = wp_date( 'm/d/Y' );
+		$v['company']    = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
+		return $v;
+	}
+
+	/** Fills {{tokens}} in $text; $preview keeps unreplaced tokens visible. */
+	private function merge_text( $text, array $values, $preview = false ) {
+		return preg_replace_callback( '/\{\{\s*([a-z0-9_.]+)\s*\}\}/i', static function ( $m ) use ( $values, $preview ) {
+			$key = strtolower( $m[1] );
+			if ( $preview ) {
+				return $m[0];
+			}
+			return isset( $values[ $key ] ) ? (string) $values[ $key ] : '';
+		}, $text );
+	}
+
+	/** Merged PDF bytes for a document template. Last page is always a signature page. */
+	private function render_doc_template( array $meta, $stripe_customer_id, array $recipients, $preview = false ) {
+		$values = $this->merge_values( $stripe_customer_id, $recipients );
+		$text   = $this->merge_text( (string) $meta['body'], $values, $preview );
+		return self::build_text_pdf( (string) $meta['title'], $text, array() );
+	}
+
+	/**
+	 * Minimal dependency-free PDF writer: US Letter, Helvetica, word-wrapped. "# " = heading, "## " =
+	 * subheading, "- " = bullet, blank line = paragraph gap, "---pagebreak---" = new page. Always
+	 * appends a final page listing the signer roles so signature boxes never land on text.
+	 */
+	private static function build_text_pdf( $title, $text, array $roles ) {
+		$W = 612; $H = 792; $M = 64;
+		$enc = static function ( $s ) {
+			$s = str_replace( array( "\xe2\x80\x98", "\xe2\x80\x99", "\xe2\x80\x9c", "\xe2\x80\x9d", "\xe2\x80\x93", "\xe2\x80\x94", "\xe2\x80\xa2", "\xc2\xa0" ), array( "'", "'", '"', '"', '-', '-', '*', ' ' ), $s );
+			$c = function_exists( 'iconv' ) ? @iconv( 'UTF-8', 'Windows-1252//TRANSLIT//IGNORE', $s ) : false;
+			return false === $c ? preg_replace( '/[^\x20-\x7e]/', '?', $s ) : $c;
+		};
+		$esc = static function ( $s ) {
+			return str_replace( array( '\\', '(', ')' ), array( '\\\\', '\\(', '\\)' ), $s );
+		};
+		// Approximate Helvetica advance width (1000 units/em): narrow, wide and average classes.
+		$width = static function ( $s, $size, $bold ) {
+			$w = 0;
+			foreach ( str_split( $s ) as $ch ) {
+				if ( false !== strpos( 'iljtfI.,:;\'|!', $ch ) ) { $w += 270; }
+				elseif ( false !== strpos( 'mwMW@%', $ch ) ) { $w += 830; }
+				elseif ( ' ' === $ch ) { $w += 278; }
+				elseif ( ctype_upper( $ch ) ) { $w += 680; }
+				else { $w += 540; }
+			}
+			return $w * $size / 1000 * ( $bold ? 1.06 : 1 );
+		};
+		$pages = array( array() ); // each: list of array(x,y,size,bold,text)
+		$y     = $H - $M;
+		$pi    = 0;
+		$newpage = function () use ( &$pages, &$pi, &$y, $H, $M ) {
+			$pages[] = array();
+			$pi++;
+			$y = $H - $M;
+		};
+		$put = function ( $line, $size, $bold, $indent = 0, $lead = 1.35 ) use ( &$pages, &$pi, &$y, $M, $newpage ) {
+			if ( $y - $size * $lead < $M ) {
+				$newpage();
+			}
+			$pages[ $pi ][] = array( $M + $indent, $y - $size, $size, $bold, $line );
+			$y -= $size * $lead;
+		};
+		$wrap = function ( $para, $size, $bold, $indent ) use ( $width, $W, $M ) {
+			$max   = $W - 2 * $M - $indent;
+			$words = preg_split( '/\s+/', trim( $para ) );
+			$lines = array();
+			$cur   = '';
+			foreach ( $words as $w ) {
+				$try = '' === $cur ? $w : $cur . ' ' . $w;
+				if ( '' !== $cur && $width( $try, $size, $bold ) > $max ) {
+					$lines[] = $cur;
+					$cur     = $w;
+				} else {
+					$cur = $try;
+				}
+			}
+			if ( '' !== $cur ) {
+				$lines[] = $cur;
+			}
+			return $lines;
+		};
+		foreach ( explode( "\n", $enc( $text ) ) as $raw ) {
+			$line = rtrim( $raw );
+			if ( '---pagebreak---' === trim( $line ) ) {
+				$newpage();
+				continue;
+			}
+			if ( '' === trim( $line ) ) {
+				$y -= 7;
+				continue;
+			}
+			if ( 0 === strpos( $line, '## ' ) ) {
+				$y -= 4;
+				foreach ( $wrap( substr( $line, 3 ), 13, true, 0 ) as $l ) { $put( $l, 13, true ); }
+			} elseif ( 0 === strpos( $line, '# ' ) ) {
+				$y -= 6;
+				foreach ( $wrap( substr( $line, 2 ), 18, true, 0 ) as $l ) { $put( $l, 18, true, 0, 1.3 ); }
+				$y -= 4;
+			} elseif ( 0 === strpos( $line, '- ' ) ) {
+				$first = true;
+				foreach ( $wrap( substr( $line, 2 ), 10.5, false, 14 ) as $l ) {
+					if ( $first ) { $pages[ $pi ][] = array( $M + 2, max( $M, $y - 10.5 ), 10.5, false, '*' ); }
+					$put( $l, 10.5, false, 14 );
+					$first = false;
+				}
+			} else {
+				foreach ( $wrap( $line, 10.5, false, 0 ) as $l ) { $put( $l, 10.5, false ); }
+			}
+		}
+		// Signature page (always last).
+		$newpage();
+		$put( 'Signatures', 16, true );
+		$y -= 6;
+		$put( $enc( $title ), 10.5, false );
+		$put( 'Please sign and date in the boxes provided below.', 9, false );
+		unset( $roles );
+
+		// Serialize.
+		$objs   = array();
+		$objs[1] = '<< /Type /Catalog /Pages 2 0 R >>';
+		$kids   = array();
+		$n      = 5; // 3 = Helvetica, 4 = Helvetica-Bold
+		$page_objs = array();
+		foreach ( $pages as $items ) {
+			$stream = '';
+			foreach ( $items as $it ) {
+				$stream .= sprintf( "BT /%s %.1f Tf %.2f %.2f Td (%s) Tj ET\n", $it[3] ? 'F2' : 'F1', $it[2], $it[0], $it[1], $esc( $it[4] ) );
+			}
+			$content_no = $n++;
+			$page_no    = $n++;
+			$objs[ $content_no ] = '<< /Length ' . strlen( $stream ) . " >>\nstream\n" . $stream . 'endstream';
+			$objs[ $page_no ]    = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 $W $H] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents $content_no 0 R >>";
+			$kids[]              = $page_no . ' 0 R';
+		}
+		$objs[2] = '<< /Type /Pages /Kids [' . implode( ' ', $kids ) . '] /Count ' . count( $kids ) . ' >>';
+		$objs[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>';
+		$objs[4] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>';
+		ksort( $objs );
+		$out     = "%PDF-1.4\n";
+		$offsets = array();
+		foreach ( $objs as $no => $body ) {
+			$offsets[ $no ] = strlen( $out );
+			$out           .= $no . " 0 obj\n" . $body . "\nendobj\n";
+		}
+		$xref = strlen( $out );
+		$max  = max( array_keys( $objs ) );
+		$out .= "xref\n0 " . ( $max + 1 ) . "\n0000000000 65535 f \n";
+		for ( $i = 1; $i <= $max; $i++ ) {
+			$out .= sprintf( "%010d 00000 n \n", $offsets[ $i ] ?? 0 );
+		}
+		$out .= "trailer\n<< /Size " . ( $max + 1 ) . " /Root 1 0 R >>\nstartxref\n" . $xref . "\n%%EOF\n";
+		return $out;
 	}
 
 	/** Streams a template PDF (admin only). */
@@ -1130,6 +1391,15 @@ class AJCore_RA_Esign {
 		$id  = (string) $id;
 		if ( ! isset( $all[ $id ] ) ) {
 			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+		}
+		if ( ( $all[ $id ]['kind'] ?? 'pdf' ) === 'doc' ) {
+			$bytes = $this->render_doc_template( $all[ $id ], '', array(), true );
+			nocache_headers();
+			header( 'Content-Type: application/pdf' );
+			header( 'Content-Disposition: inline; filename="preview.pdf"' );
+			header( 'Content-Length: ' . strlen( $bytes ) );
+			echo $bytes; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+			exit;
 		}
 		$path = $this->tpl_dir() . '/' . basename( (string) $all[ $id ]['file'] );
 		if ( ! is_readable( $path ) ) {
@@ -2112,7 +2382,7 @@ class AJCore_RA_Esign {
 			$decoded = json_decode( $signers, true );
 			$signers = is_array( $decoded ) ? $decoded : array( $signers );
 		}
-		return $this->rest_result( $this->save_local_template( sanitize_text_field( (string) $request->get_param( 'id' ) ), (string) $request->get_param( 'title' ), (array) $signers, (int) $request->get_param( 'page' ), $files['pdf'] ?? null ) );
+		return $this->rest_result( $this->save_local_template( sanitize_text_field( (string) $request->get_param( 'id' ) ), (string) $request->get_param( 'title' ), (array) $signers, (int) $request->get_param( 'page' ), $files['pdf'] ?? null, (string) $request->get_param( 'kind' ), (string) $request->get_param( 'body' ), $request->get_param( 'sig_x' ), $request->get_param( 'sig_y' ) ) );
 	}
 
 	public function rest_template_delete( WP_REST_Request $request ) {
@@ -2534,14 +2804,24 @@ class AJCore_RA_Esign {
 				</div>
 				<div id="ajra-es-tpl-editor" style="display:none;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 14px;margin:0 0 12px">
 					<div class="ajra-err" id="ajra-es-tpl-err"></div>
-					<div class="ajra-grid">
-						<div><label><?php esc_html_e( 'Template name', 'ajcore-ra' ); ?></label><input type="text" id="ajra-es-tpl-title" maxlength="191"></div>
-						<div><label id="ajra-es-tpl-pdf-label"><?php esc_html_e( 'PDF (max 25 MB)', 'ajcore-ra' ); ?></label><input type="file" id="ajra-es-tpl-pdf" accept="application/pdf,.pdf"></div>
-					</div>
+						<div class="ajra-grid">
+							<div><label><?php esc_html_e( 'Template name', 'ajcore-ra' ); ?></label><input type="text" id="ajra-es-tpl-title" maxlength="191"></div>
+							<div><label><?php esc_html_e( 'Type', 'ajcore-ra' ); ?></label><select id="ajra-es-tpl-kind"><option value="pdf"><?php esc_html_e( 'Uploaded PDF', 'ajcore-ra' ); ?></option><option value="doc"><?php esc_html_e( 'Document with merge fields', 'ajcore-ra' ); ?></option></select></div>
+							<div id="ajra-es-tpl-pdfwrap"><label id="ajra-es-tpl-pdf-label"><?php esc_html_e( 'PDF (max 25 MB)', 'ajcore-ra' ); ?></label><input type="file" id="ajra-es-tpl-pdf" accept="application/pdf,.pdf"></div>
+						</div>
+						<div id="ajra-es-tpl-docwrap" style="display:none;margin-top:10px">
+							<label><?php esc_html_e( 'Document text', 'ajcore-ra' ); ?> <span class="ajra-muted">(# Heading, ## Subheading, - bullet, ---pagebreak---)</span></label>
+							<textarea id="ajra-es-tpl-body" rows="12" style="width:100%;font-family:monospace"></textarea>
+							<div id="ajra-es-tpl-merge" style="margin-top:6px"></div>
+						</div>
 					<div style="margin-top:10px"><label><?php esc_html_e( 'Signers, in signing order (role labels)', 'ajcore-ra' ); ?></label><div id="ajra-es-tpl-signers"></div>
 						<button type="button" class="button button-small" id="ajra-es-tpl-addsigner"><?php esc_html_e( '+ Add signer', 'ajcore-ra' ); ?></button></div>
-					<div style="margin-top:10px;max-width:260px"><label><?php esc_html_e( 'Signature page', 'ajcore-ra' ); ?></label><input type="number" id="ajra-es-tpl-page" min="1" placeholder="<?php esc_attr_e( 'blank = last page', 'ajcore-ra' ); ?>"></div>
-					<p class="ajra-muted" style="margin:8px 0"><?php esc_html_e( 'When sent, a signature box and a date box are placed for each signer near the bottom of that page. Sending a template needs the Team API key.', 'ajcore-ra' ); ?></p>
+						<div id="ajra-es-tpl-poswrap" class="ajra-grid" style="margin-top:10px;max-width:620px">
+							<div><label><?php esc_html_e( 'Signature page', 'ajcore-ra' ); ?></label><input type="number" id="ajra-es-tpl-page" min="1" placeholder="<?php esc_attr_e( 'blank = last page', 'ajcore-ra' ); ?>"></div>
+							<div><label><?php esc_html_e( 'Signature X % from left', 'ajcore-ra' ); ?></label><input type="number" id="ajra-es-tpl-sigx" min="0" max="60" step="1" value="8"></div>
+							<div><label><?php esc_html_e( 'Signature Y % from top', 'ajcore-ra' ); ?></label><input type="number" id="ajra-es-tpl-sigy" min="5" max="90" step="1" value="78"></div>
+						</div>
+						<p class="ajra-muted" style="margin:8px 0"><?php esc_html_e( 'A signature box and a date box are placed for each signer from that point (2 per row; further signers stack upward). Sending needs the Team API key.', 'ajcore-ra' ); ?></p>
 					<button type="button" class="button button-primary" id="ajra-es-tpl-save"><?php esc_html_e( 'Save template', 'ajcore-ra' ); ?></button>
 					<button type="button" class="button" id="ajra-es-tpl-cancel"><?php esc_html_e( 'Cancel', 'ajcore-ra' ); ?></button>
 				</div>
@@ -2767,8 +3047,33 @@ class AJCore_RA_Esign {
 				d.querySelector( '[data-x]' ).addEventListener( 'click', function () { d.remove(); } );
 				$( 'ajra-es-tpl-signers' ).appendChild( d );
 			}
+			var mergeFields = <?php echo wp_json_encode( self::merge_field_catalog() ); ?>;
+			function syncTplKind() {
+				var doc = 'doc' === $( 'ajra-es-tpl-kind' ).value;
+				$( 'ajra-es-tpl-pdfwrap' ).style.display = doc ? 'none' : '';
+				$( 'ajra-es-tpl-docwrap' ).style.display = doc ? 'block' : 'none';
+				$( 'ajra-es-tpl-poswrap' ).style.display = doc ? 'none' : '';
+			}
+			function buildMergeChips() {
+				var box = $( 'ajra-es-tpl-merge' ); if ( box.firstChild ) { return; }
+				Object.keys( mergeFields ).forEach( function ( k ) {
+					var b = document.createElement( 'button' ); b.type = 'button'; b.className = 'button button-small'; b.style.margin = '0 4px 4px 0'; b.textContent = mergeFields[ k ];
+					b.addEventListener( 'click', function () {
+						var ta = $( 'ajra-es-tpl-body' ), tok = '{{' + k + '}}', a = ta.selectionStart || ta.value.length, z = ta.selectionEnd || a;
+						ta.value = ta.value.slice( 0, a ) + tok + ta.value.slice( z ); ta.focus(); ta.selectionStart = ta.selectionEnd = a + tok.length;
+					} );
+					box.appendChild( b );
+				} );
+			}
 			function openTplEditor( t ) {
 				editingTpl = t ? t.id : '';
+				buildMergeChips();
+				$( 'ajra-es-tpl-kind' ).value = t && 'doc' === t.kind ? 'doc' : 'pdf';
+				$( 'ajra-es-tpl-kind' ).disabled = !! t;
+				$( 'ajra-es-tpl-body' ).value = t && t.body ? t.body : '';
+				$( 'ajra-es-tpl-sigx' ).value = t && t.sigX !== undefined ? t.sigX : 8;
+				$( 'ajra-es-tpl-sigy' ).value = t && t.sigY !== undefined ? t.sigY : 78;
+				syncTplKind();
 				$( 'ajra-es-tpl-title' ).value = t ? ( t.rawTitle || t.title ) : '';
 				$( 'ajra-es-tpl-pdf' ).value = '';
 				$( 'ajra-es-tpl-pdf-label' ).textContent = t ? 'Replace PDF (leave empty to keep the current one)' : 'PDF (max 25 MB)';
@@ -2782,11 +3087,14 @@ class AJCore_RA_Esign {
 			if ( $( 'ajra-es-tpl-new' ) ) {
 				$( 'ajra-es-tpl-new' ).addEventListener( 'click', function () { openTplEditor( null ); } );
 				$( 'ajra-es-tpl-addsigner' ).addEventListener( 'click', function () { tplSignerRow( '' ); } );
+				$( 'ajra-es-tpl-kind' ).addEventListener( 'change', syncTplKind );
 				$( 'ajra-es-tpl-cancel' ).addEventListener( 'click', function () { $( 'ajra-es-tpl-editor' ).style.display = 'none'; } );
 				$( 'ajra-es-tpl-save' ).addEventListener( 'click', function () {
 					var err = $( 'ajra-es-tpl-err' ), btn = $( 'ajra-es-tpl-save' ), fd = new FormData(), f = $( 'ajra-es-tpl-pdf' ).files[0];
 					var signers = Array.prototype.map.call( document.querySelectorAll( '.ajra-es-tpl-signer' ), function ( i ) { return i.value.trim(); } ).filter( Boolean );
-					fd.append( 'id', editingTpl ); fd.append( 'title', $( 'ajra-es-tpl-title' ).value ); fd.append( 'signers', JSON.stringify( signers ) ); fd.append( 'page', $( 'ajra-es-tpl-page' ).value || 0 );
+					fd.append( 'id', editingTpl ); fd.append( 'title', $( 'ajra-es-tpl-title' ).value ); fd.append( 'signers', JSON.stringify( signers ) );fd.append( 'page', $( 'ajra-es-tpl-page' ).value || 0 );
+					fd.append( 'kind', $( 'ajra-es-tpl-kind' ).value ); fd.append( 'body', $( 'ajra-es-tpl-body' ).value );
+					fd.append( 'sig_x', $( 'ajra-es-tpl-sigx' ).value ); fd.append( 'sig_y', $( 'ajra-es-tpl-sigy' ).value );
 					if ( f ) { fd.append( 'pdf', f ); }
 					btn.disabled = true;
 					api( '/templates/save', { method: 'POST', body: fd } ).then( function () { window.location.reload(); } )
