@@ -32,13 +32,13 @@
 		'.ajfe-side{width:300px;flex:none;position:sticky;top:var(--ajfe-sticky,44px);max-height:calc(100vh - 70px);overflow:auto;border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:10px;display:flex;flex-direction:column;gap:8px}' +
 		'.ajfe-side h4{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#64748b}' +
 		'.ajfe-own button,.ajfe-own select,.ajfe-own input,.ajfe-bar button,.ajfe-bar select{height:30px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:0 10px;font:inherit;color:#0f172a;box-sizing:border-box}' +
-		'.ajfe-own input,.ajfe-own select{width:100%}.ajfe-own{display:flex;flex-direction:column;gap:8px}.ajfe-mlist{display:flex;flex-direction:column;gap:3px;max-height:200px;overflow:auto}.ajfe-own details{border-top:1px solid #e2e8f0;padding-top:8px}.ajfe-own details>summary{cursor:pointer;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;margin-bottom:6px}.ajfe-mlist .ajfe-chip{height:26px;font-weight:500;font-size:12px}' +
+		'.ajfe-own input,.ajfe-own select{width:100%}.ajfe-own{display:flex;flex-direction:column;gap:8px}.ajfe-mlist{display:flex;flex-direction:column;gap:3px;max-height:200px;overflow:auto}.ajfe-own details{border-top:1px solid #e2e8f0;padding-top:6px}.ajfe-own details>summary{list-style:none}.ajfe-own details>summary::-webkit-details-marker{display:none}.ajfe-own details>summary:before{content:"▾"!important;display:inline!important;width:auto!important;height:auto!important;background:none!important;border-radius:0!important;margin-right:5px!important;color:#64748b!important;font-size:11px!important}.ajfe-own details:not([open])>summary:before{content:"▸"!important}.ajfe-own details>summary{cursor:pointer;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:600;margin-bottom:6px}.ajfe-mlist .ajfe-chip{height:26px;font-weight:500;font-size:12px}' +
 		'.ajfe-chip{display:flex;align-items:center;gap:8px;width:100%;text-align:left;cursor:grab;font-weight:600;user-select:none}.ajfe-chip:active{cursor:grabbing}' +
 		'.ajfe-chip.on{background:#4f46e5;border-color:#4f46e5;color:#fff}.ajfe-chip i{width:10px;height:10px;border-radius:2px;flex:none}' +
-		'.ajfe-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 10px;border-bottom:1px solid #e2e8f0;background:#f8fafc}' +
+		'.ajfe-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 8px;border-bottom:1px solid #e2e8f0;background:#f8fafc}.ajfe-bar button,.ajfe-bar select{height:28px!important;padding:0 8px!important}.ajfe-bar .ajfe-hint{white-space:nowrap;margin-left:auto}' +
 		'.ajfe-bar button{cursor:pointer;font-weight:600;white-space:nowrap}.ajfe-bar button:hover,.ajfe-own button:hover{background:#f1f5f9}' +
 		'.ajfe-bar .dng,.ajfe-own .dng{color:#b91c1c}.ajfe-bar .sp{flex:1}.ajfe-hint{color:#64748b;font-size:12px}' +
-		'.ajfe-stage{overflow:auto;background:#e2e8f0;padding:14px;text-align:center;height:calc(100vh - 230px);min-height:520px}' +
+		'.ajfe-stage{overflow:auto;background:#e2e8f0;padding:8px;text-align:center;height:calc(100vh - 230px);min-height:520px}' +
 		'.ajfe-wrap{position:relative;display:inline-block;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.25);text-align:left}' +
 		'.ajfe-wrap canvas{display:block}.ajfe-layer{position:absolute;inset:0}.ajfe-layer.tool{cursor:crosshair}.ajfe-layer.pv .ajfe-box{box-shadow:none}.ajfe-layer.drop{outline:3px dashed #4f46e5;outline-offset:-3px}' +
 		'.ajfe-box{position:absolute;box-sizing:border-box;border:1.5px solid;border-radius:3px;font-size:10px;line-height:1.1;overflow:hidden;cursor:move;user-select:none;touch-action:none;display:flex;align-items:center;padding:0 3px;white-space:nowrap}' +
@@ -106,7 +106,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 
 		// ── toolbar (above the page) ─────────────────────────────────────────────
 		var prev = el( 'button', { text: '◀', title: 'Previous page' } ), next = el( 'button', { text: '▶', title: 'Next page' } ), pgLabel = el( 'span', { text: 'Page 1' } );
-		var detect = el( 'button', { text: 'Auto-detect blanks', title: 'Suggest text and checkbox fields from underscores, lines and squares' } );
+		var detect = el( 'button', { text: 'Auto-detect', title: 'Suggest text and checkbox fields from underscores, lines and squares (blanks)' } );
 		var clearPg = el( 'button', { text: 'Clear page', cls: 'dng' } ), count = el( 'span', { cls: 'ajfe-hint' } );
 		var partySel = el( 'select', { title: 'Signer for new fields — and for the selected field' } ), addSg = el( 'button', { text: '+ Signer', title: 'Another person who signs this document' } ), rmSg = el( 'button', { text: '−', title: 'Remove the last signer' } );
 		partySel.style.maxWidth = '180px';
@@ -198,7 +198,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 		function renderInsp() {
 			insp.innerHTML = '';
 			if ( ! sel ) {
-				insp.appendChild( el( 'p', { cls: 'ajfe-hint', text: 'Select a box to edit it. Drag to move, drag the corner to resize.' } ) );
+				insp.appendChild( el( 'p', { cls: 'ajfe-hint',text: 'Select a box to edit it.' } ) );
 				return;
 			}
 			insp.appendChild( el( 'h4', { text: 'Selected field' } ) );
@@ -309,7 +309,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 		}
 		function updateCount() {
 			var onPage = fields.filter( function ( f ) { return f.page === pageNo; } ).length;
-			count.textContent = fields.length + ' field(s) · ' + onPage + ' on this page';
+			count.textContent = fields.length + ' fields · ' + onPage + ' here';
 		}
 		// Where a field of w × h pt lands for a cursor position: centred on the cursor, which is where the drag image was held.
 		function placeAt( clientX, clientY, wpt, hpt ) {
@@ -355,17 +355,27 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 		} );
 
 		// ── pages ────────────────────────────────────────────────────────────────
+		var fitW = 0, fitTimer = null;
 		function showPage( n ) {
 			if ( ! pdf || rendering || dead ) { return; }
 			pageNo = Math.max( 1, Math.min( pdf.numPages, n ) ); rendering = true; sel = null;
 			pdf.getPage( pageNo ).then( function ( page ) {
 				var v1 = page.getViewport( { scale: 1 } ); pageW = v1.width; pageH = v1.height;
-				var scale = Math.min( 2, Math.max( 0.6, Math.min( stage.clientWidth - 30, 1100 ) / v1.width ) ), vp = page.getViewport( { scale: scale } );
+var avail = stage.clientWidth - 20, scale = Math.min( 2.5, Math.max( 0.6, avail / v1.width ) ), vp = page.getViewport( { scale: scale } );
+				fitW = stage.clientWidth;
 				canvas.width = Math.floor( vp.width ); canvas.height = Math.floor( vp.height );
 				wrap.style.width = canvas.width + 'px'; wrap.style.height = canvas.height + 'px';
 				return page.render( { canvasContext: canvas.getContext( '2d' ), viewport: vp } ).promise;
 			} ).then( function () { pgLabel.textContent = 'Page ' + pageNo + ' / ' + pdf.numPages; rendering = false; paint(); renderInsp(); } )
 				.catch( function ( e ) { rendering = false; window.alert( 'Could not show the page: ' + ( e && e.message ? e.message : e ) ); } );
+		}
+		// The pane may not have its final width when the page first renders (hidden tab, panel still laying out): re-fit when it changes.
+		if ( window.ResizeObserver ) {
+			var ro = new ResizeObserver( function () {
+				clearTimeout( fitTimer );
+				fitTimer = setTimeout( function () { if ( pdf && ! dead && stage.clientWidth > 0 && Math.abs( stage.clientWidth - fitW ) > 24 ) { showPage( pageNo ); } }, 150 );
+			} );
+			ro.observe( stage );
 		}
 		prev.addEventListener( 'click', function () { showPage( pageNo - 1 ); } );
 		next.addEventListener( 'click', function () { showPage( pageNo + 1 ); } );
@@ -423,7 +433,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 			detect.disabled = true; detect.textContent = 'Detecting…';
 			var added = 0, n = 1;
 			function step() {
-				if ( n > pdf.numPages ) { detect.disabled = false; detect.textContent = 'Auto-detect blanks'; paint(); if ( added ) { changed(); } window.alert( added ? added + ' field(s) suggested — adjust or delete any that are wrong.' : 'No blanks found. Drag fields onto the page instead.' ); return; }
+				if ( n > pdf.numPages ) { detect.disabled = false; detect.textContent = 'Auto-detect'; paint(); if ( added ) { changed(); } window.alert( added ? added + ' field(s) suggested — adjust or delete any that are wrong.' : 'No blanks found. Drag fields onto the page instead.' ); return; }
 				pdf.getPage( n ).then( function ( page ) { return detectPage( page, n ); } ).then( function ( list ) {
 					list.forEach( function ( f ) { if ( ! fields.some( function ( x ) { return x.page === f.page && overlaps( x, f ); } ) ) { fields.push( f ); added++; } } );
 					n++; step();
@@ -445,7 +455,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 			getSigners: function () { return signers.slice(); },
 			refreshValues: function () { if ( previewMode ) { loadValues(); } },
 			setSigners: function ( list ) { signers = list && list.length ? list.slice() : [ 'Signer' ]; renderSigners(); renderInsp(); paint(); },
-			destroy: function () { dead = true; document.removeEventListener( 'keydown', onKey ); host.innerHTML = ''; }
+destroy: function () { dead = true; if ( window.ResizeObserver && typeof ro !== 'undefined' ) { ro.disconnect(); } document.removeEventListener( 'keydown', onKey ); host.innerHTML = ''; }
 		};
 	}
 
