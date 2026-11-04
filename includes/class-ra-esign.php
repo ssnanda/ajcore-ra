@@ -586,7 +586,7 @@ class AJCore_RA_Esign {
 		$template_id = sanitize_text_field( (string) $template_id );
 		if ( 0 === strpos( $template_id, 'ajt_' ) ) {
 			$all = $this->local_templates();
-			return isset( $all[ $template_id ] ) ? $this->local_template_shape( $all[ $template_id ] ) : new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+			return isset( $all[ $template_id ] ) ? $this->local_template_shape( $all[ $template_id ] ) : new WP_Error( 'not_found', __( 'Form not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
 		if ( 0 === strpos( $template_id, 'tpl_' ) ) {
 			$result = $this->breezedoc_api_request( 'GET', '/v1/templates/' . rawurlencode( $template_id ) );
@@ -1065,7 +1065,7 @@ class AJCore_RA_Esign {
 			return '' !== $r;
 		} ) );
 		if ( '' === $title ) {
-			return new WP_Error( 'no_title', __( 'Give the template a name.', 'ajcore-ra' ), array( 'status' => 400 ) );
+			return new WP_Error( 'no_title', __( 'Give the form a name.', 'ajcore-ra' ), array( 'status' => 400 ) );
 		}
 		if ( empty( $signers ) ) {
 			$signers = array( __( 'Signer', 'ajcore-ra' ) );
@@ -1074,7 +1074,7 @@ class AJCore_RA_Esign {
 		$id       = (string) $id;
 		$existing = isset( $all[ $id ] ) ? $all[ $id ] : null;
 		if ( '' !== $id && ! $existing ) {
-			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+			return new WP_Error( 'not_found', __( 'Form not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
 		$has_file = is_array( $file ) && ! empty( $file['tmp_name'] ) && empty( $file['error'] );
 		$kind     = 'doc' === $kind ? 'doc' : 'pdf';
@@ -1089,7 +1089,7 @@ class AJCore_RA_Esign {
 			return new WP_Error( 'no_body', __( 'Write the document text.', 'ajcore-ra' ), array( 'status' => 400 ) );
 		}
 		if ( 'pdf' === $kind && ! $existing && ! $has_file ) {
-			return new WP_Error( 'no_file', __( 'Choose the template PDF.', 'ajcore-ra' ), array( 'status' => 400 ) );
+			return new WP_Error( 'no_file', __( 'Choose the form PDF.', 'ajcore-ra' ), array( 'status' => 400 ) );
 		}
 		$meta = $existing ? $existing : array( 'id' => 'ajt_' . strtolower( wp_generate_password( 10, false ) ), 'created' => current_time( 'mysql' ) );
 		if ( 'pdf' === $kind && $has_file ) {
@@ -1102,11 +1102,11 @@ class AJCore_RA_Esign {
 			}
 			$dir = $this->tpl_dir();
 			if ( ! is_dir( $dir ) || ! is_writable( $dir ) ) {
-				return new WP_Error( 'no_dir', __( 'Could not store the template file (uploads folder is not writable).', 'ajcore-ra' ), array( 'status' => 500 ) );
+				return new WP_Error( 'no_dir', __( 'Could not store the form file (uploads folder is not writable).', 'ajcore-ra' ), array( 'status' => 500 ) );
 			}
 			$stored = $meta['id'] . '.pdf';
 			if ( ! ( is_uploaded_file( $file['tmp_name'] ) ? move_uploaded_file( $file['tmp_name'], $dir . '/' . $stored ) : copy( $file['tmp_name'], $dir . '/' . $stored ) ) ) {
-				return new WP_Error( 'store_failed', __( 'Could not store the template file.', 'ajcore-ra' ), array( 'status' => 500 ) );
+				return new WP_Error( 'store_failed', __( 'Could not store the form file.', 'ajcore-ra' ), array( 'status' => 500 ) );
 			}
 			$meta['file']     = $stored;
 			$meta['filename'] = sanitize_file_name( (string) ( $file['name'] ?? $stored ) );
@@ -1142,7 +1142,7 @@ class AJCore_RA_Esign {
 		$all = $this->local_templates();
 		$id  = (string) $id;
 		if ( ! isset( $all[ $id ] ) ) {
-			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+			return new WP_Error( 'not_found', __( 'Form not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
 		$meta          = $all[ $id ];
 		$meta['id']    = 'ajt_' . strtolower( wp_generate_password( 10, false ) );
@@ -1152,7 +1152,7 @@ class AJCore_RA_Esign {
 			$src = $this->tpl_dir() . '/' . basename( (string) $meta['file'] );
 			$new = $meta['id'] . '.pdf';
 			if ( ! is_readable( $src ) || ! copy( $src, $this->tpl_dir() . '/' . $new ) ) {
-				return new WP_Error( 'copy_failed', __( 'Could not copy the template file.', 'ajcore-ra' ), array( 'status' => 500 ) );
+				return new WP_Error( 'copy_failed', __( 'Could not copy the form file.', 'ajcore-ra' ), array( 'status' => 500 ) );
 			}
 			$meta['file'] = $new;
 		}
@@ -1166,7 +1166,7 @@ class AJCore_RA_Esign {
 		$all = $this->local_templates();
 		$id  = (string) $id;
 		if ( ! isset( $all[ $id ] ) ) {
-			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+			return new WP_Error( 'not_found', __( 'Form not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
 		$path = '' !== (string) $all[ $id ]['file'] ? $this->tpl_dir() . '/' . basename( (string) $all[ $id ]['file'] ) : '';
 		if ( '' !== $path && is_file( $path ) ) {
@@ -1181,7 +1181,7 @@ class AJCore_RA_Esign {
 	private function send_local_template( $template_id, $stripe_customer_id, array $recipients, array $options ) {
 		$all = $this->local_templates();
 		if ( ! isset( $all[ $template_id ] ) ) {
-			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+			return new WP_Error( 'not_found', __( 'Form not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
 		$meta = $all[ $template_id ];
 		if ( ( $meta['kind'] ?? 'pdf' ) === 'doc' ) {
@@ -1201,7 +1201,7 @@ class AJCore_RA_Esign {
 		}
 		$path = $this->tpl_dir() . '/' . basename( (string) $meta['file'] );
 		if ( ! is_readable( $path ) ) {
-			return new WP_Error( 'file_missing', __( 'The template PDF is missing — edit the template and upload it again.', 'ajcore-ra' ), array( 'status' => 404 ) );
+			return new WP_Error( 'file_missing', __( 'The form PDF is missing — edit the form and upload it again.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
 		if ( ! empty( $meta['layout'] ) && empty( $options['layout'] ) ) {
 			$options['layout'] = $meta['layout']; // a layout adjusted at send time wins
@@ -1221,6 +1221,8 @@ class AJCore_RA_Esign {
 	public static function merge_field_catalog() {
 		$c = array(
 			'customer.name'          => 'Customer — name',
+			'customer.business_name' => 'Customer — business name',
+			'customer.individual_name' => 'Customer — individual name',
 			'customer.email'         => 'Customer — email',
 			'customer.phone'         => 'Customer — phone',
 			'customer.address'       => 'Customer — full address',
@@ -1327,6 +1329,24 @@ class AJCore_RA_Esign {
 				$v['customer.phone']  = (string) ( $row['phone'] ?? '' );
 				$v['customer.number'] = (string) ( $row['customer_number'] ?? '' );
 				$v['customer.description'] = (string) ( $row['description'] ?? '' );
+				// Business / individual name sit in the metadata (or the raw Stripe record); any other metadata key is {{meta.key}}.
+				$meta = is_string( $row['metadata'] ?? null ) ? json_decode( (string) $row['metadata'], true ) : null;
+				$meta = is_array( $meta ) ? $meta : array();
+				$raw  = is_string( $row['raw_data'] ?? null ) ? json_decode( (string) $row['raw_data'], true ) : null;
+				if ( is_array( $raw ) ) {
+					foreach ( array( 'business_name', 'individual_name' ) as $mk ) {
+						if ( empty( $meta[ $mk ] ) && ! empty( $raw[ $mk ] ) ) {
+							$meta[ $mk ] = $raw[ $mk ];
+						}
+					}
+				}
+				$v['customer.business_name']   = isset( $meta['business_name'] ) && is_scalar( $meta['business_name'] ) ? (string) $meta['business_name'] : '';
+				$v['customer.individual_name'] = isset( $meta['individual_name'] ) && is_scalar( $meta['individual_name'] ) ? (string) $meta['individual_name'] : '';
+				foreach ( $meta as $mk => $mv ) {
+					if ( is_scalar( $mv ) ) {
+						$v[ 'meta.' . strtolower( preg_replace( '/[^a-z0-9_]+/i', '_', (string) $mk ) ) ] = (string) $mv;
+					}
+				}
 				$addr                 = $row['address'] ?? '';
 				$decoded              = is_string( $addr ) ? json_decode( $addr, true ) : null;
 				if ( is_array( $decoded ) ) {
@@ -1724,7 +1744,7 @@ class AJCore_RA_Esign {
 		$all = $this->local_templates();
 		$id  = (string) $id;
 		if ( ! isset( $all[ $id ] ) ) {
-			return new WP_Error( 'not_found', __( 'Template not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
+			return new WP_Error( 'not_found', __( 'Form not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
 		if ( ( $all[ $id ]['kind'] ?? 'pdf' ) === 'doc' ) {
 			$bytes = $this->render_doc_template( $all[ $id ], '', array(), true );
@@ -1740,7 +1760,7 @@ class AJCore_RA_Esign {
 		}
 		$path = $this->tpl_dir() . '/' . basename( (string) $all[ $id ]['file'] );
 		if ( ! is_readable( $path ) ) {
-			return new WP_Error( 'file_missing', __( 'The template PDF is missing.', 'ajcore-ra' ), array( 'status' => 404 ) );
+			return new WP_Error( 'file_missing', __( 'The form PDF is missing.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
 		nocache_headers();
 		header( 'Content-Type: application/pdf' );
@@ -2053,7 +2073,7 @@ class AJCore_RA_Esign {
 			$since = $run_at - 2 * DAY_IN_SECONDS;
 		}
 		for ( $i = 0; $i < 6 && time() < $deadline; $i++ ) {
-			$r = $esign->import_documents( $cursor, false, $since );
+			$r = $esign->import_documents( $cursor, true, $since );
 			if ( is_wp_error( $r ) ) {
 				$summary['error'] = $r->get_error_message();
 				break;
@@ -2480,7 +2500,7 @@ class AJCore_RA_Esign {
 	 * imported; drafts are always skipped. Processes up to 300 documents per call and returns
 	 * next_cursor ("p:N" = your own documents, page N) so the caller can continue.
 	 */
-	public function import_documents( $cursor = '', $include_unmatched = false, $since_ts = 0 ) {
+	public function import_documents( $cursor = '', $include_unmatched = false, $since_ts = 0, $sync = false ) {
 		if ( ! $this->breezedoc_is_connected() ) {
 			return new WP_Error( 'breezedoc_not_configured', __( 'Import needs a BreezeDoc Team API key or Personal token.', 'ajcore-ra' ), array( 'status' => 400 ) );
 		}
@@ -2492,8 +2512,24 @@ class AJCore_RA_Esign {
 		$map    = $this->customer_email_map();
 		$names  = $this->customer_name_index();
 		$fetch_budget = 25; // signer lookups per call (BreezeDoc allows 60 requests/minute)
-		$counts = array( 'imported' => 0, 'existing' => 0, 'unmatched' => 0, 'drafts' => 0, 'seen' => 0 );
+		$counts = array( 'imported' => 0, 'existing' => 0, 'unmatched' => 0, 'drafts' => 0, 'seen' => 0, 'updated' => 0, 'pruned' => 0 );
 		$cursor = sanitize_text_field( (string) $cursor );
+
+		// Sync: BreezeDoc is the source of truth. Every id seen across the whole listing is remembered so that, once the
+		// listing has finished without error, local rows that no longer exist in BreezeDoc can be removed.
+		$sk = 'ajcore_ra_esign_sync';
+		$st = array( 'seen' => array(), 'team' => false, 'personal' => false );
+		if ( $sync && '' !== $cursor ) {
+			$prev = get_transient( $sk );
+			if ( is_array( $prev ) && isset( $prev['seen'] ) ) {
+				$st = array_merge( $st, $prev );
+			}
+		}
+		$persist = function () use ( &$st, $sync, $sk ) {
+			if ( $sync ) {
+				set_transient( $sk, $st, 6 * HOUR_IN_SECONDS );
+			}
+		};
 
 		$personal = 0 === strpos( $cursor, 'p:' );
 		if ( ! $personal && ! $this->breezedoc_is_v1() ) {
@@ -2514,6 +2550,7 @@ class AJCore_RA_Esign {
 				$result = $this->breezedoc_api_request( 'GET', '/v1/documents', array( 'query' => $query ) );
 			}
 			if ( is_wp_error( $result ) ) {
+				$persist();
 				return $result;
 			}
 			foreach ( (array) ( $result['data'] ?? array() ) as $doc ) {
@@ -2522,14 +2559,38 @@ class AJCore_RA_Esign {
 					continue;
 				}
 				$counts['seen']++;
+				$st['seen'][ $doc_id ] = 1;
 				if ( $since_ts ) { // automatic runs only look at recent documents
 					$created = strtotime( (string) ( $doc['created_at'] ?? $doc['sent_at'] ?? '' ) );
 					if ( $created && $created < $since_ts ) {
 						continue;
 					}
 				}
-				if ( $pdb->get_var( $pdb->prepare( "SELECT id FROM `{$table}` WHERE breezedoc_document_id = %s", $doc_id ) ) ) {
+				$have = $pdb->get_row( $pdb->prepare( "SELECT id, status, template_title FROM `{$table}` WHERE breezedoc_document_id = %s", $doc_id ) );
+				if ( $have ) {
 					$counts['existing']++;
+					if ( $sync ) { // refresh what BreezeDoc says now (title, and status when the list gives it reliably)
+						$cur   = (string) $have->status;
+						$del   = 0 === strpos( $cur, 'deleted:' );
+						$base  = $del ? substr( $cur, 8 ) : $cur;
+						$upd   = array();
+						$now   = $personal ? $this->breezedoc_legacy_doc_state( $doc ) : $this->breezedoc_v1_doc_state( $doc );
+						$trust = $personal ? ! empty( $doc['completed_at'] ) : ( isset( $doc['status'] ) || ! empty( $doc['completed_at'] ) );
+						if ( $trust && '' !== $now['status'] && $now['status'] !== $base ) {
+							$upd['status'] = $del ? 'deleted:' . substr( $now['status'], 0, 20 ) : $now['status'];
+							if ( '' !== $now['completed_at'] ) {
+								$upd['completed_at'] = $now['completed_at'];
+							}
+						}
+						if ( '' !== $now['title'] && $now['title'] !== (string) $have->template_title ) {
+							$upd['template_title'] = $now['title'];
+						}
+						if ( $upd ) {
+							$upd['updated_at'] = current_time( 'mysql' );
+							$pdb->update( $table, $upd, array( 'id' => (int) $have->id ) );
+							$counts['updated']++;
+						}
+					}
 					continue;
 				}
 				// The list responses carry no signers: look them up so the document can be linked by email.
@@ -2539,6 +2600,7 @@ class AJCore_RA_Esign {
 						if ( 429 === (int) ( $fetched->get_error_data()['status'] ?? 0 ) ) {
 							$counts['next_cursor'] = $page_cursor; // rerun this page after a pause; imported rows are skipped as existing
 							$counts['wait']        = 30;
+							$persist();
 							return $counts;
 						}
 					} else {
@@ -2587,7 +2649,8 @@ class AJCore_RA_Esign {
 			}
 			if ( $personal ) {
 				if ( empty( $result['next_page_url'] ) ) {
-					$cursor = '';
+					$cursor        = '';
+					$st['personal'] = true;
 					break;
 				}
 				$page_no++;
@@ -2595,6 +2658,7 @@ class AJCore_RA_Esign {
 			} else {
 				$cursor = isset( $result['next_cursor'] ) ? (string) $result['next_cursor'] : '';
 				if ( '' === $cursor ) {
+					$st['team'] = true;
 					if ( '' !== $this->setting( 'api_token' ) ) {
 						$cursor = 'p:1'; // team finished: continue with your own documents
 					}
@@ -2603,7 +2667,55 @@ class AJCore_RA_Esign {
 			}
 		}
 		$counts['next_cursor'] = $cursor;
+		if ( $sync ) {
+			if ( '' === $cursor ) { // listing finished: drop local rows BreezeDoc no longer has
+				$pruned = $this->prune_missing_documents( $st );
+				if ( is_array( $pruned ) ) {
+					$counts['pruned_blocked'] = $pruned['blocked'];
+				} else {
+					$counts['pruned'] = (int) $pruned;
+				}
+				delete_transient( $sk );
+			} else {
+				$persist();
+			}
+		}
 		return $counts;
+	}
+
+	/**
+	 * Removes local rows whose BreezeDoc document is gone. Only runs after a complete listing of that account (team ids
+	 * `doc_…`, personal numeric ids), never on an empty listing, and refuses to remove more than half the log at once.
+	 *
+	 * @return int|array Rows removed, or array( 'blocked' => n ) when the safety limit stopped it.
+	 */
+	private function prune_missing_documents( array $st ) {
+		if ( empty( $st['seen'] ) ) {
+			return 0;
+		}
+		$pdb   = $this->get_pdb();
+		$table = $this->get_esign_documents_table();
+		$rows  = (array) $pdb->get_results( "SELECT id, breezedoc_document_id AS bid FROM `{$table}` WHERE breezedoc_document_id <> ''" );
+		$gone  = array();
+		foreach ( $rows as $r ) {
+			$bid = (string) $r->bid;
+			if ( isset( $st['seen'][ $bid ] ) ) {
+				continue;
+			}
+			if ( ( ! empty( $st['team'] ) && 0 === strpos( $bid, 'doc_' ) ) || ( ! empty( $st['personal'] ) && ctype_digit( $bid ) ) ) {
+				$gone[] = (int) $r->id;
+			}
+		}
+		if ( ! $gone ) {
+			return 0;
+		}
+		if ( count( $gone ) > max( 10, (int) ( count( $rows ) * 0.5 ) ) ) {
+			return array( 'blocked' => count( $gone ) );
+		}
+		foreach ( array_chunk( $gone, 100 ) as $chunk ) {
+			$pdb->query( "DELETE FROM `{$table}` WHERE id IN (" . implode( ',', array_map( 'intval', $chunk ) ) . ')' ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		}
+		return count( $gone );
 	}
 
 	// ── REST ────────────────────────────────────────────────────────────────────
@@ -2894,7 +3006,8 @@ class AJCore_RA_Esign {
 	}
 
 	public function rest_import( WP_REST_Request $request ) {
-		return $this->rest_result( $this->import_documents( (string) $request->get_param( 'cursor' ), filter_var( $request->get_param( 'include_unmatched' ), FILTER_VALIDATE_BOOLEAN ) ) );
+		$all = null === $request->get_param( 'include_unmatched' ) ? true : filter_var( $request->get_param( 'include_unmatched' ), FILTER_VALIDATE_BOOLEAN );
+		return $this->rest_result( $this->import_documents( (string) $request->get_param( 'cursor' ), $all, 0, filter_var( $request->get_param( 'sync' ), FILTER_VALIDATE_BOOLEAN ) ) );
 	}
 
 	public function rest_documents() {
@@ -2959,7 +3072,7 @@ class AJCore_RA_Esign {
 		$ro     = $this->read_only();
 		$rest   = rest_url( AJCore_Extensions::rest_namespace() );
 		$hook   = $this->breezedoc_webhook_status();
-		$labels = array( 'draft' => __( 'Draft', 'ajcore-ra' ), 'sent' => __( 'Awaiting signature', 'ajcore-ra' ), 'completed' => __( 'Completed', 'ajcore-ra' ), 'cancelled' => __( 'Cancelled', 'ajcore-ra' ), 'expired' => __( 'Expired', 'ajcore-ra' ) );
+		$labels = array( 'draft' => __( 'Not sent', 'ajcore-ra' ), 'sent' => __( 'Awaiting signature', 'ajcore-ra' ), 'completed' => __( 'Completed', 'ajcore-ra' ), 'cancelled' => __( 'Cancelled', 'ajcore-ra' ), 'expired' => __( 'Expired', 'ajcore-ra' ) );
 		$group  = static function ( $status ) {
 			if ( 0 === strpos( (string) $status, 'deleted:' ) ) {
 				return 'deleted';
@@ -3022,7 +3135,8 @@ class AJCore_RA_Esign {
 			.ajra-es .ajra-ti{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:13px}.ajra-es .ajra-ti:hover{background:#f1f5f9}.ajra-es .ajra-ti.on{background:#eef2ff;color:#3730a3;font-weight:600}
 			.ajra-es .ajra-ti span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ajra-es .ajra-ti em{font-style:normal;font-size:10px;color:#64748b;border:1px solid #e2e8f0;border-radius:4px;padding:0 4px}
 			.ajra-es .ajra-wsmain{flex:1;min-width:0}.ajra-es .ajra-wsbox{border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;padding:10px}
-			.ajra-es .ajra-wshead{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}.ajra-es .ajra-wsstrip{display:flex;flex-direction:column;gap:8px;padding-bottom:8px;border-bottom:1px solid #e2e8f0}.ajra-es .ajra-wsstrip input[type=text]{width:100%}.ajra-es .ajra-wsstrip .ajra-grid{grid-template-columns:repeat(3,1fr);gap:6px}
+			.ajra-es .ajra-wshead{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}.ajfe-side .ajra-grid{grid-template-columns:1fr!important;gap:8px!important}.ajfe-side .ajra-row{flex-direction:column;align-items:stretch}.ajfe-side .ajra-row .ajra-muted{width:auto!important}.ajfe-side #ajra-es-customer{width:100%}.ajfe-side .ajra-bar{flex-wrap:wrap}
+			.ajra-es .ajra-wsstrip{display:flex;flex-direction:column;gap:8px;padding-bottom:8px;border-bottom:1px solid #e2e8f0}.ajra-es .ajra-wsstrip input[type=text]{width:100%}.ajra-es .ajra-wsstrip .ajra-grid{grid-template-columns:repeat(3,1fr);gap:6px}
 			.ajra-es .ajra-choice{border:1px solid #cbd5e1;border-radius:10px;background:#fff;padding:14px;cursor:pointer;display:flex;flex-direction:column;gap:4px}.ajra-es .ajra-choice:hover{border-color:#4f46e5;box-shadow:0 0 0 2px #e0e7ff}
 			.ajra-es .ajra-wsrow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
 			.ajra-es .ajra-role{display:inline-flex;align-items:center;gap:2px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding-right:6px}.ajra-es .ajra-role input{border:0;box-shadow:none;width:110px;min-height:28px}.ajra-es .ajra-role a{text-decoration:none;color:#64748b}
@@ -3044,7 +3158,7 @@ class AJCore_RA_Esign {
 		<div class="ajra-es">
 			<div class="ajra-subnav" id="ajra-es-nav">
 				<a data-v="documents"><?php echo esc_html( sprintf( '%s (%d)', __( 'Documents', 'ajcore-ra' ), $counts['all'] ) ); ?></a>
-				<a data-v="templates"><?php echo esc_html( sprintf( '%s (%d)', __( 'Templates', 'ajcore-ra' ), count( $templates ) ) ); ?></a>
+				<a data-v="templates"><?php echo esc_html( sprintf( '%s (%d)', __( 'Forms', 'ajcore-ra' ), count( $templates ) ) ); ?></a>
 				<a data-v="new"><?php esc_html_e( 'New request', 'ajcore-ra' ); ?></a>
 				<a data-v="settings"><?php esc_html_e( 'Settings', 'ajcore-ra' ); ?></a>
 			</div>
@@ -3127,27 +3241,28 @@ class AJCore_RA_Esign {
 				<div class="notice notice-warning inline" data-view="settings"><p><?php esc_html_e( 'BreezeDoc is not connected. Add a Team API key above.', 'ajcore-ra' ); ?></p></div>
 			<?php else : ?>
 				<?php if ( $error ) : ?>
-					<div class="notice notice-error inline" data-view="templates new settings"><p><?php echo esc_html( sprintf( /* translators: %s: error */ __( 'Templates could not be loaded: %s', 'ajcore-ra' ), $error ) ); ?></p></div>
+					<div class="notice notice-error inline" data-view="templates new settings"><p><?php echo esc_html( sprintf( /* translators: %s: error */ __( 'Forms could not be loaded: %s', 'ajcore-ra' ), $error ) ); ?></p></div>
 				<?php endif; ?>
 
 				<div class="ajra-card" data-view="new">
 					<div class="ajra-head">
 						<h2><?php esc_html_e( 'New signature request', 'ajcore-ra' ); ?></h2>
 						<?php if ( $is_v1 ) : ?>
-							<div class="ajra-seg"><a class="on" data-mode="template"><?php esc_html_e( 'From template', 'ajcore-ra' ); ?></a><a data-mode="pdf"><?php esc_html_e( 'Upload PDF', 'ajcore-ra' ); ?></a></div>
+							<div class="ajra-seg"><a class="on" data-mode="template"><?php esc_html_e( 'From form', 'ajcore-ra' ); ?></a><a data-mode="pdf"><?php esc_html_e( 'Upload PDF', 'ajcore-ra' ); ?></a></div>
 						<?php endif; ?>
 					</div>
+					<div id="ajra-es-reqform">
 					<div id="ajra-es-error" class="ajra-err"></div>
 					<div class="ajra-grid">
 						<div>
 							<label><?php esc_html_e( 'Customer', 'ajcore-ra' ); ?></label>
 							<input type="search" id="ajra-es-customer-q" placeholder="<?php esc_attr_e( 'Search name or email…', 'ajcore-ra' ); ?>" style="margin-bottom:4px">
-							<select id="ajra-es-customer" size="6"></select>
+							<select id="ajra-es-customer" size="4"></select>
 						</div>
 						<div>
 							<div id="ajra-es-tpl-wrap">
-								<label><?php esc_html_e( 'Template', 'ajcore-ra' ); ?></label>
-								<select id="ajra-es-template"><option value=""><?php esc_html_e( '— pick a template —', 'ajcore-ra' ); ?></option></select>
+								<label><?php esc_html_e( 'Form', 'ajcore-ra' ); ?></label>
+								<select id="ajra-es-template"><option value=""><?php esc_html_e( '— pick a form —', 'ajcore-ra' ); ?></option></select>
 								<div id="ajra-es-vars" style="display:none;margin-top:8px"></div>
 							</div>
 							<div id="ajra-es-pdf-wrap" style="display:none">
@@ -3163,7 +3278,6 @@ class AJCore_RA_Esign {
 							<p id="ajra-es-add-wrap" style="display:none;margin:0"><button type="button" class="button button-small" id="ajra-es-add"><?php esc_html_e( '+ Add signer', 'ajcore-ra' ); ?></button></p>
 						</div>
 					</div>
-					<div id="ajra-es-inline" style="display:none;margin-top:14px"></div>
 					<textarea id="ajra-es-message" rows="2" style="display:none;margin-top:10px" placeholder="<?php esc_attr_e( 'Message to signers (needs BreezeDoc custom-email plan)', 'ajcore-ra' ); ?>"></textarea>
 					<div class="ajra-bar">
 						<?php if ( $is_v1 ) : ?>
@@ -3175,23 +3289,24 @@ class AJCore_RA_Esign {
 						<span class="ajra-muted" id="ajra-es-summary"></span>
 						<button type="button" class="button button-primary" id="ajra-es-send" disabled><?php esc_html_e( 'Send for signature', 'ajcore-ra' ); ?></button>
 					</div>
+					</div>
+					<div id="ajra-es-inline" style="display:none;margin-top:10px"></div>
 				</div>
 			<?php endif; ?>
 
 			<?php if ( $connected && ! $error ) : ?>
 			<div class="ajra-card" id="ajra-es-tpl-card" data-view="templates">
 				<div class="ajra-head">
-					<h2><?php esc_html_e( 'Templates', 'ajcore-ra' ); ?> <span class="ajra-muted" id="ajra-es-tpl-count"></span></h2>
+					<h2><?php esc_html_e( 'Forms', 'ajcore-ra' ); ?> <span class="ajra-muted" id="ajra-es-tpl-count"></span></h2>
 					<span>
-						<button type="button" class="button button-primary button-small" id="ajra-es-tpl-new"><?php esc_html_e( 'New template', 'ajcore-ra' ); ?></button>
-						<a class="button button-small" href="https://breezedoc.com" target="_blank" rel="noopener noreferrer" title="<?php esc_attr_e( 'Templates made in BreezeDoc itself', 'ajcore-ra' ); ?>"><?php esc_html_e( 'Create in BreezeDoc', 'ajcore-ra' ); ?></a>
+						<button type="button" class="button button-primary button-small" id="ajra-es-tpl-new"><?php esc_html_e( 'New form', 'ajcore-ra' ); ?></button>
 					</span>
 				</div>
 				<div class="ajra-ws">
 					<div class="ajra-tree" id="ajra-es-tree"></div>
 					<div class="ajra-wsmain" id="ajra-es-ws"></div>
 				</div>
-				<p class="ajra-muted" style="margin:10px 0 0"><?php esc_html_e( 'AJCore templates live in AJCore and can be created, edited and deleted here. BreezeDoc\'s own templates can only be created, edited or deleted in BreezeDoc.', 'ajcore-ra' ); ?></p>
+				<p class="ajra-muted" style="margin:10px 0 0"><?php esc_html_e( 'Forms live in AJCore: upload a PDF or build one, drag fields on, and fill them from customer data. BreezeDoc is only used to collect the signatures.', 'ajcore-ra' ); ?></p>
 			</div>
 			<?php endif; ?>
 
@@ -3224,9 +3339,8 @@ class AJCore_RA_Esign {
 					<h2><?php esc_html_e( 'Sent signature requests', 'ajcore-ra' ); ?></h2>
 					<?php if ( $connected ) : ?>
 						<span style="text-align:right">
-							<button type="button" class="button button-small" id="ajra-es-import"><?php esc_html_e( 'Import from BreezeDoc', 'ajcore-ra' ); ?></button>
+							<button type="button" class="button button-small" id="ajra-es-import" title="<?php esc_attr_e( 'Makes this list match BreezeDoc: adds new documents, updates changed ones, removes ones deleted in BreezeDoc', 'ajcore-ra' ); ?>"><?php esc_html_e( 'Sync', 'ajcore-ra' ); ?></button>
 							<button type="button" class="button button-small" id="ajra-es-link"><?php esc_html_e( 'Link customers', 'ajcore-ra' ); ?></button>
-							<label style="display:block;font-weight:400;margin-top:3px"><input type="checkbox" id="ajra-es-import-all"> <?php esc_html_e( 'include documents not matching a customer', 'ajcore-ra' ); ?></label>
 							<span class="ajra-muted" id="ajra-es-import-out"></span>
 						</span>
 					<?php endif; ?>
@@ -3235,7 +3349,7 @@ class AJCore_RA_Esign {
 					<div class="ajra-seg" id="ajra-es-filters">
 						<a class="on" data-f="all"><?php echo esc_html( sprintf( '%s %d', __( 'All', 'ajcore-ra' ), $counts['all'] ) ); ?></a>
 						<a data-f="sent"><?php echo esc_html( sprintf( '%s %d', __( 'Awaiting', 'ajcore-ra' ), $counts['sent'] ) ); ?></a>
-						<a data-f="draft"><?php echo esc_html( sprintf( '%s %d', __( 'Drafts', 'ajcore-ra' ), $counts['draft'] ) ); ?></a>
+						<a data-f="draft"><?php echo esc_html( sprintf( '%s %d', __( 'Not sent', 'ajcore-ra' ), $counts['draft'] ) ); ?></a>
 						<a data-f="completed"><?php echo esc_html( sprintf( '%s %d', __( 'Completed', 'ajcore-ra' ), $counts['completed'] ) ); ?></a>
 						<a data-f="closed"><?php echo esc_html( sprintf( '%s %d', __( 'Closed', 'ajcore-ra' ), $counts['closed'] ) ); ?></a>
 						<a data-f="deleted"><?php echo esc_html( sprintf( '%s %d', __( 'Deleted', 'ajcore-ra' ), $counts['deleted'] ) ); ?></a>
@@ -3370,26 +3484,27 @@ class AJCore_RA_Esign {
 			$( 'ajra-es-log-q' ).addEventListener( 'input', applyFilter );
 			applyFilter(); // Deleted rows stay out of All
 
-			// Import historical documents (loops until BreezeDoc has no more pages).
+			// Sync with BreezeDoc, the source of truth: adds new documents, updates changed ones and removes ones deleted there (loops until BreezeDoc has no more pages).
 			var imp = $( 'ajra-es-import' );
 			if ( imp ) { imp.addEventListener( 'click', function () {
-				var out = $( 'ajra-es-import-out' ), tot = { imported: 0, existing: 0, unmatched: 0, drafts: 0, seen: 0 };
+				var out = $( 'ajra-es-import-out' ), tot = { imported: 0, existing: 0, unmatched: 0, drafts: 0, seen: 0, updated: 0, pruned: 0 }, blocked = 0;
 				imp.disabled = true;
 				function step( cursor ) {
-					out.textContent = 'Importing… ' + tot.imported;
-					return api( '/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { cursor: cursor, include_unmatched: $( 'ajra-es-import-all' ).checked } ) } ).then( function ( d ) {
+					out.textContent = 'Syncing… ' + tot.seen + ' checked';
+					return api( '/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { cursor: cursor, include_unmatched: true, sync: true } ) } ).then( function ( d ) {
+						if ( d.pruned_blocked ) { blocked = d.pruned_blocked; }
 						Object.keys( tot ).forEach( function ( k ) { tot[ k ] += d[ k ] || 0; } );
 						if ( d.wait ) {
-							out.textContent = 'Waiting ' + d.wait + 's for BreezeDoc\'s rate limit… (' + tot.imported + ' imported so far)';
+							out.textContent = 'Waiting ' + d.wait + 's for BreezeDoc\'s rate limit… (' + tot.seen + ' checked so far)';
 							return new Promise( function ( res ) { setTimeout( res, d.wait * 1000 ); } ).then( function () { return step( d.next_cursor ); } );
 						}
 						return d.next_cursor ? step( d.next_cursor ) : null;
 					} );
 				}
 				step( '' ).then( function () {
-					if ( 0 === tot.seen ) { out.textContent = 'BreezeDoc returned no documents for this key\'s team — click Diagnose in Connection to see the raw response.'; return; }
-					out.textContent = tot.seen + ' found: ' + tot.imported + ' imported, ' + tot.existing + ' already there, ' + tot.unmatched + ' skipped (no matching customer), ' + tot.drafts + ' drafts included';
-					if ( tot.imported ) { setTimeout( function () { window.location.reload(); }, 1500 ); }
+					if ( 0 === tot.seen ) { out.textContent = 'BreezeDoc returned no documents — nothing was removed. Click Diagnose in Connection to see the raw response.'; return; }
+					out.textContent = tot.seen + ' in BreezeDoc: ' + tot.imported + ' added, ' + tot.updated + ' updated, ' + tot.pruned + ' removed (no longer in BreezeDoc)' + ( blocked ? ' — ' + blocked + ' more NOT removed: that is more than half the list, so check BreezeDoc first' : '' );
+					if ( tot.imported || tot.updated || tot.pruned ) { setTimeout( function () { window.location.reload(); }, 1500 ); }
 				} ).catch( function ( e ) { out.style.color = '#b32d2e'; out.textContent = e.message; } ).finally( function () { imp.disabled = false; } );
 			} ); }
 
@@ -3436,9 +3551,9 @@ class AJCore_RA_Esign {
 					var d = document.createElement( 'div' ); d.className = 'ajra-ti' + ( curTpl === id ? ' on' : '' );
 					d.innerHTML = '<span>' + esc( label ) + '</span>'; d.addEventListener( 'click', function () { selectTpl( id ); } ); return d;
 				}
-				if ( '__new' === curTpl ) { tplTree.appendChild( item( 'New template', '__new' ) ); }
+				if ( '__new' === curTpl ) { tplTree.appendChild( item( 'New form', '__new' ) ); }
 				templates.forEach( function ( t ) { tplTree.appendChild( item( t.rawTitle || t.title || t.id, t.id ) ); } );
-				if ( ! templates.length && '__new' !== curTpl ) { tplTree.innerHTML = '<div class="ajra-muted" style="padding:10px">No templates yet.</div>'; }
+				if ( ! templates.length && '__new' !== curTpl ) { tplTree.innerHTML = '<div class="ajra-muted" style="padding:10px">No forms yet.</div>'; }
 				$( 'ajra-es-tpl-count' ).textContent = templates.length ? '(' + templates.length + ')' : '';
 			}
 			function selectTpl( id ) {
@@ -3446,7 +3561,7 @@ class AJCore_RA_Esign {
 				curTpl = id; rememberTpl( id ); renderTree();
 				if ( '__new' === id ) { openChooser(); return; }
 				var t = templates.filter( function ( x ) { return x.id === id; } )[0];
-				if ( ! t ) { tplWs.innerHTML = '<div class="ajra-empty">Select a template on the left, or create a new one.</div>'; return; }
+				if ( ! t ) { tplWs.innerHTML = '<div class="ajra-empty">Select a form on the left, or create a new one.</div>'; return; }
 				openLocal( t, '' );
 			}
 			function openChooser() {
@@ -3526,8 +3641,8 @@ class AJCore_RA_Esign {
 				var host = $( 'ajra-es-t-host' );
 				// The panel holds only generic actions; it sits above the editor until it is mounted, then moves into the right panel.
 				var strip = document.createElement( 'div' ); strip.className = 'ajra-wsstrip';
-				strip.innerHTML = '<input type="text" id="ajra-es-t-title" maxlength="191" placeholder="Template name">' +
-					( isNew ? '' : '<div class="ajra-wsrow"><button type="button" class="button button-primary button-small" id="ajra-es-t-use">Use template</button><button type="button" class="button button-small" id="ajra-es-t-dup">Duplicate</button>' +
+				strip.innerHTML = '<input type="text" id="ajra-es-t-title" maxlength="191" placeholder="Form name">' +
+					( isNew ? '' : '<div class="ajra-wsrow"><button type="button" class="button button-primary button-small" id="ajra-es-t-use">Use form</button><button type="button" class="button button-small" id="ajra-es-t-dup">Duplicate</button>' +
 						( 'doc' === kind ? '' : '<button type="button" class="button button-small" id="ajra-es-t-replbtn">Replace PDF</button><input type="file" id="ajra-es-t-repl" accept="application/pdf,.pdf" style="display:none">' ) +
 						'<a class="button button-small" target="_blank" rel="noopener noreferrer" href="' + esc( tplFileUrl( t.id ) ) + '">Preview PDF</a><button type="button" class="button button-small" id="ajra-es-t-del" style="color:#b32d2e">Delete</button></div>' ) +
 					( 'doc' === kind ? '<div class="ajra-wsrow"><span class="ajra-muted">Signers</span><button type="button" class="button button-small" id="ajra-es-t-sm">−</button><strong id="ajra-es-t-sn"></strong><button type="button" class="button button-small" id="ajra-es-t-sp">+</button></div>' : '' ) +
@@ -3555,7 +3670,7 @@ class AJCore_RA_Esign {
 					q( 'ajra-es-t-sm' ).addEventListener( 'click', function () { if ( signerList.length > 1 ) { signerList.pop(); stepper(); } } );
 				} else if ( isNew ) { pdfPicker(); } else {
 					setHost( '<div class="ajra-empty" style="margin-top:8px">Loading PDF…</div>' );
-					fetch( tplFileUrl( t.id ), { credentials: 'same-origin' } ).then( function ( r ) { if ( ! r.ok ) { throw new Error( 'The template PDF could not be loaded.' ); } return r.arrayBuffer(); } ).then( mountPdf )
+					fetch( tplFileUrl( t.id ), { credentials: 'same-origin' } ).then( function ( r ) { if ( ! r.ok ) { throw new Error( 'The form PDF could not be loaded.' ); } return r.arrayBuffer(); } ).then( mountPdf )
 						.catch( function ( e ) { setHost( '<div class="ajra-empty" style="margin-top:8px">' + esc( e.message ) + '</div>' ); } );
 				}
 				if ( q( 'ajra-es-t-replbtn' ) ) {
@@ -3567,7 +3682,7 @@ class AJCore_RA_Esign {
 					api( '/templates/duplicate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { id: t.id } ) } ).then( function ( c ) { rememberTpl( c && c.id ? c.id : '' ); window.location.reload(); } ).catch( function ( e ) { window.alert( e.message ); } );
 				} ); }
 				if ( q( 'ajra-es-t-del' ) ) { q( 'ajra-es-t-del' ).addEventListener( 'click', function () {
-					if ( ! window.confirm( 'Delete the template "' + ( t.rawTitle || t.title ) + '"? This cannot be undone.' ) ) { return; }
+					if ( ! window.confirm( 'Delete the form "' + ( t.rawTitle || t.title ) + '"? This cannot be undone.' ) ) { return; }
 					api( '/templates/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { id: t.id } ) } ).then( function () { rememberTpl( '' ); window.location.reload(); } ).catch( function ( e ) { window.alert( e.message ); } );
 				} ); }
 				q( 'ajra-es-t-save' ).addEventListener( 'click', function () {
@@ -3586,7 +3701,7 @@ class AJCore_RA_Esign {
 				try { firstSel = window.sessionStorage.getItem( 'ajra_tpl_sel' ) || ''; } catch ( e ) { firstSel = ''; }
 				if ( '__new' === firstSel || ( firstSel && ! templates.some( function ( t ) { return t.id === firstSel; } ) ) ) { firstSel = ''; }
 				renderTree();
-				if ( firstSel ) { selectTpl( firstSel ); } else { tplWs.innerHTML = '<div class="ajra-empty">Select a template on the left, or create a new one.</div>'; }
+				if ( firstSel ) { selectTpl( firstSel ); } else { tplWs.innerHTML = '<div class="ajra-empty">Select a form on the left, or create a new one.</div>'; }
 			}
 
 			if ( $( 'ajra-es-our-save' ) ) { $( 'ajra-es-our-save' ).addEventListener( 'click', function () {
@@ -3711,11 +3826,11 @@ class AJCore_RA_Esign {
 				return '<div class="ajra-row ajra-es-r" data-party="' + party + '"><span class="ajra-muted" style="width:90px">' + esc( role || ( 'Party ' + party ) ) + '</span>' +
 					'<input type="text" class="n" placeholder="Name" value="' + esc( name ) + '"><input type="email" class="e" placeholder="Email" value="' + esc( email ) + '">' +
 					( first ? '<button type="button" class="button button-small ajra-es-use">Use customer</button>' : '' ) +
-					( 'pdf' === mode && ! first ? '<button type="button" class="button button-small ajra-es-del">×</button>' : '' ) + '</div>';
+					( ! first ? '<button type="button" class="button button-small ajra-es-del">×</button>' : '' ) + '</div>';
 			}
 			function renderRecipients( list ) {
 				box.innerHTML = ( list.length ? '<label>Signers (in signing order)</label>' : '' ) + list.map( function ( r, i ) { return row( r.party || i + 1, r.name, r.email, 0 === i, r.role ); } ).join( '' );
-				$( 'ajra-es-add-wrap' ).style.display = 'pdf' === mode ? 'block' : 'none';
+				$( 'ajra-es-add-wrap' ).style.display = 'block';
 				if ( inlineEd ) { inlineEd.setSigners( currentRoles() ); }
 				updateSend();
 			}
@@ -3730,7 +3845,7 @@ class AJCore_RA_Esign {
 			function updateSend() {
 				var rec = readRecipients(), missing = '';
 				if ( ! cust.value ) { missing = 'Pick a customer'; }
-				else if ( 'template' === mode && ! tpl.value ) { missing = 'Pick a template'; }
+				else if ( 'template' === mode && ! tpl.value ) { missing = 'Pick a form'; }
 				else if ( 'pdf' === mode && ! $( 'ajra-es-pdf' ).files[0] ) { missing = 'Choose a PDF'; }
 				else if ( ! rec.length ) { missing = 'No signers'; }
 				else if ( rec.some( function ( r ) { return ! r.name || ! r.email; } ) ) { missing = 'Fill in every signer'; }
@@ -3763,15 +3878,16 @@ class AJCore_RA_Esign {
 			}
 			tpl.addEventListener( 'change', function () { renderRecipients( currentTemplateRecipients() ); syncTplFields(); refreshInline(); } );
 			cust.addEventListener( 'change', updateSend );
-			var upLayout = [], inlineEd = null, inlineHost = $( 'ajra-es-inline' ), inlineSeq = 0;
+			var upLayout = [], inlineEd = null, inlineHost = $( 'ajra-es-inline' ), inlineSeq = 0, reqform = $( 'ajra-es-reqform' ), reqHome = reqform.parentNode;
+			function rehome() { if ( reqform.parentNode !== reqHome ) { reqHome.insertBefore( reqform, inlineHost ); } } // back into the card before the editor is torn down
 			function currentRoles() { return readRecipients().map( function ( r, i ) { return r.name || ( 'Signer ' + ( i + 1 ) ); } ); }
-			function hideInline() { inlineSeq++; if ( inlineEd ) { inlineEd.destroy(); inlineEd = null; } inlineHost.style.display = 'none'; inlineHost.innerHTML = ''; }
+			function hideInline() { inlineSeq++; rehome(); if ( inlineEd ) { inlineEd.destroy(); inlineEd = null; } inlineHost.style.display = 'none'; inlineHost.innerHTML = ''; }
 			function showInline( loader, fields, onChange ) {
-				var seq = ++inlineSeq; if ( inlineEd ) { inlineEd.destroy(); inlineEd = null; }
+				var seq = ++inlineSeq; rehome(); if ( inlineEd ) { inlineEd.destroy(); inlineEd = null; }
 				inlineHost.style.display = ''; inlineHost.innerHTML = '<div class="ajra-muted">Loading the document…</div>';
 				loader().then( function ( buf ) {
 					if ( seq !== inlineSeq ) { return; }
-					inlineEd = window.AJEsignFieldEditor.mount( inlineHost, { pdfData: buf, pdfjsBase: pdfjsBase, fields: fields, signers: currentRoles(), mergeFields: mergeFields, onChange: onChange } );
+					inlineEd = window.AJEsignFieldEditor.mount( inlineHost, { pdfData: buf, pdfjsBase: pdfjsBase, fields: fields, signers: currentRoles(), mergeFields: mergeFields, sideTop: reqform, onChange: onChange } );
 				} ).catch( function ( e ) { if ( seq === inlineSeq ) { inlineHost.innerHTML = '<div class="ajra-err" style="display:block">' + esc( e.message ) + '</div>'; } } );
 			}
 			// The document and its fields sit under the form: the template's saved fields load automatically; edits apply to this request only.
@@ -3779,7 +3895,7 @@ class AJCore_RA_Esign {
 				if ( 'template' === mode ) {
 					var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0];
 					if ( ! t || 'doc' === t.kind ) { hideInline(); return; }
-					showInline( function () { return fetch( tplFileUrl( t.id ), { credentials: 'same-origin' } ).then( function ( r ) { if ( ! r.ok ) { throw new Error( 'The template PDF could not be loaded.' ); } return r.arrayBuffer(); } ); }, t.layout || [], function ( f ) { tplLayout = f; renderVars(); } );
+					showInline( function () { return fetch( tplFileUrl( t.id ), { credentials: 'same-origin' } ).then( function ( r ) { if ( ! r.ok ) { throw new Error( 'The form PDF could not be loaded.' ); } return r.arrayBuffer(); } ); }, t.layout || [], function ( f ) { tplLayout = f; renderVars(); } );
 				} else {
 					var file = $( 'ajra-es-pdf' ).files[0];
 					if ( ! file ) { hideInline(); return; }

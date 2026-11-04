@@ -139,7 +139,7 @@
 		function renderInsp() {
 			insp.innerHTML = '';
 			if ( ! sel ) {
-				insp.appendChild( el( 'p', { cls: 'ajfe-hint', text: 'Select a box to set its type, signer and what it is filled with. Drag to move, drag the corner to resize.' } ) );
+				insp.appendChild( el( 'p', { cls: 'ajfe-hint', text: 'Select a box, then use Fill with → Insert customer field to print customer, business, address or our company details on the form (leave empty for the signer to fill in). Drag to move, drag the corner to resize.' } ) );
 				return;
 			}
 			insp.appendChild( el( 'h4', { text: 'Selected field' } ) );
