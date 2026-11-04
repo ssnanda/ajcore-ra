@@ -10,7 +10,8 @@
  *     mergeFields: { 'customer.name': 'Customer name', … },
  *     onChange:    function ( fields ) {},
  *     sideTop:     HTMLElement,                 // optional: shown at the top of the right panel (template settings)
- *     lockSigners: true                         // optional: hide Add/Remove signer (the host's signer rows decide)
+ *     lockSigners: true,                        // optional: hide Add/Remove signer (the host's signer rows decide)
+ *     resolveValues: function () -> Promise<{token: value}>  // optional: enables the "Preview with values" checkbox
  *   });  ed.getFields(); ed.setSigners( [ … ] ); ed.destroy();
  *   AJEsignFieldEditor.open( opts + onSave / onCancel )   // same editor in a full-screen dialog
  *
@@ -39,7 +40,7 @@
 		'.ajfe-bar .dng,.ajfe-own .dng{color:#b91c1c}.ajfe-bar .sp{flex:1}.ajfe-hint{color:#64748b;font-size:12px}' +
 		'.ajfe-stage{overflow:auto;background:#e2e8f0;padding:14px;text-align:center;height:calc(100vh - 230px);min-height:520px}' +
 		'.ajfe-wrap{position:relative;display:inline-block;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.25);text-align:left}' +
-		'.ajfe-wrap canvas{display:block}.ajfe-layer{position:absolute;inset:0}.ajfe-layer.tool{cursor:crosshair}.ajfe-layer.drop{outline:3px dashed #4f46e5;outline-offset:-3px}' +
+		'.ajfe-wrap canvas{display:block}.ajfe-layer{position:absolute;inset:0}.ajfe-layer.tool{cursor:crosshair}.ajfe-layer.pv .ajfe-box{box-shadow:none}.ajfe-layer.drop{outline:3px dashed #4f46e5;outline-offset:-3px}' +
 		'.ajfe-box{position:absolute;box-sizing:border-box;border:1.5px solid;border-radius:3px;font-size:10px;line-height:1.1;overflow:hidden;cursor:move;user-select:none;touch-action:none;display:flex;align-items:center;padding:0 3px;white-space:nowrap}' +
 		'.ajfe-box.sel{box-shadow:0 0 0 2px rgba(15,23,42,.55);z-index:2}' +
 		'.ajfe-box .rz{position:absolute;right:0;bottom:0;width:9px;height:9px;background:currentColor;cursor:nwse-resize;opacity:.8}' +
@@ -77,6 +78,7 @@
 		var signers = opts.signers && opts.signers.length ? opts.signers.slice() : [ 'Signer' ];
 		var merge = opts.mergeFields || {};
 		( opts.fields || [] ).forEach( function ( f ) { while ( signers.length < f.party ) { signers.push( 'Signer ' + ( signers.length + 1 ) ); } } );
+		var previewMode = false, values = {};
 		var pdf = null, pageNo = 1, pageW = 612, pageH = 792, tool = '', sel = null, rendering = false, dead = false;
 
 		host.innerHTML = '';
@@ -99,7 +101,14 @@
 		var detect = el( 'button', { text: 'Auto-detect blanks', title: 'Suggest text and checkbox fields from underscores, lines and squares' } );
 		var clearPg = el( 'button', { text: 'Clear page', cls: 'dng' } ), count = el( 'span', { cls: 'ajfe-hint' } );
 		bar.appendChild( prev ); bar.appendChild( pgLabel ); bar.appendChild( next ); bar.appendChild( detect ); bar.appendChild( clearPg );
-		bar.appendChild( el( 'span', { cls: 'sp' } ) ); bar.appendChild( count );
+		bar.appendChild( el( 'span', { cls: 'sp' } ) );
+		if ( opts.resolveValues ) {
+			var pvLabel = el( 'label', { title: 'Show the real customer values on the page, as they will print. You can still drag, drop and edit.' } ), pvBox = el( 'input', { type: 'checkbox' } );
+			pvLabel.style.cssText = 'display:inline-flex;align-items:center;gap:6px;font-weight:600;cursor:pointer'; pvBox.style.cssText = 'width:auto;height:auto';
+			pvLabel.appendChild( pvBox ); pvLabel.appendChild( document.createTextNode( 'Preview with values' ) ); bar.appendChild( pvLabel );
+			pvBox.addEventListener( 'change', function () { previewMode = pvBox.checked; layer.classList.toggle( 'pv', previewMode ); if ( previewMode ) { loadValues(); } else { paint(); } } );
+		}
+		bar.appendChild( count );
 
 		// ── right panel: palette + signer + inspector ────────────────────────────
 		var palette = el( 'div' ), chips = {};
@@ -172,18 +181,28 @@
 				insp.appendChild( el( 'h4', { text: 'Fill with' } ) );
 				var fill = el( 'input', { type: 'text', placeholder: 'empty = signer fills in', value: sel.fill || '' } );
 				fill.addEventListener( 'input', function () { sel.fill = fill.value; paint(); changed(); } );
-				var tokens = el( 'select' );
-				tokens.appendChild( el( 'option', { value: '', text: 'Insert customer field…' } ) );
-				tokens.appendChild( el( 'option', { value: '__ask', text: 'Ask when sending…' } ) );
-				Object.keys( merge ).forEach( function ( k ) { tokens.appendChild( el( 'option', { value: k, text: merge[ k ] } ) ); } );
-				tokens.addEventListener( 'change', function () {
-					if ( '__ask' === tokens.value ) {
+				function insertToken( k ) {
+					var add = '{{' + k + '}}';
+					if ( '__ask' === k ) {
 						var nm = window.prompt( 'Name of the value to ask for when sending (e.g. LLC name)' ), slug = ( nm || '' ).toLowerCase().replace( /[^a-z0-9]+/g, '_' ).replace( /^_+|_+$/g, '' );
-						tokens.value = ''; if ( slug ) { fill.value += '{{ask.' + slug + '}}'; sel.fill = fill.value; paint(); changed(); }
-						return;
+						if ( ! slug ) { return; }
+						add = '{{ask.' + slug + '}}';
 					}
-					if ( tokens.value ) { fill.value += '{{' + tokens.value + '}}'; sel.fill = fill.value; paint(); changed(); tokens.value = ''; } } );
-				fill.style.marginBottom = '6px'; insp.appendChild( fill ); insp.appendChild( tokens );
+					fill.value += add; sel.fill = fill.value; paint(); changed();
+				}
+				var pick = el( 'input', { type: 'search', placeholder: 'Search fields to insert…' } ), found = el( 'div', { cls: 'ajfe-mlist' } );
+				found.style.cssText = 'max-height:150px;display:none;margin-top:4px';
+				pick.addEventListener( 'input', function () {
+					var q = pick.value.toLowerCase().trim(), n = 0; found.innerHTML = '';
+					if ( q ) {
+						[ [ '__ask', 'Ask when sending…' ] ].concat( Object.keys( merge ).map( function ( k ) { return [ k, merge[ k ] ]; } ) ).forEach( function ( m ) {
+							if ( n >= 12 || ( m[1].toLowerCase().indexOf( q ) < 0 && m[0].toLowerCase().indexOf( q ) < 0 ) ) { return; }
+							n++; var bt = el( 'button', { cls: 'ajfe-chip', text: m[1] } ); bt.addEventListener( 'click', function () { insertToken( m[0] ); pick.value = ''; found.style.display = 'none'; found.innerHTML = ''; } ); found.appendChild( bt );
+						} );
+					}
+					found.style.display = n ? '' : 'none';
+				} );
+				fill.style.marginBottom = '6px'; insp.appendChild( fill ); insp.appendChild( pick ); insp.appendChild( found );
 				insp.appendChild( el( 'p', { cls: 'ajfe-hint', text: 'Filled boxes are printed on the PDF when you send. Empty boxes are filled by the signer.' + ( 'checkbox' === sel.type ? ' Any value ticks the box.' : '' ) } ) );
 			}
 			var del = el( 'button', { text: 'Delete field', cls: 'dng' } ); del.style.marginTop = '6px'; del.addEventListener( 'click', removeSel ); insp.appendChild( del );
@@ -195,6 +214,10 @@
 		} );
 
 		// ── boxes on the page ────────────────────────────────────────────────────
+		function loadValues() {
+			Promise.resolve( opts.resolveValues() ).then( function ( v ) { values = v || {}; paint(); } ).catch( function () { values = {}; paint(); } );
+		}
+		function resolveText( t ) { return String( t || '' ).replace( /\{\{\s*([a-z0-9_.]+)\s*\}\}/gi, function ( m, k ) { var v = values[ k.toLowerCase() ]; return v === undefined || v === null ? '' : String( v ); } ); }
 		function paint() {
 			layer.innerHTML = '';
 			fields.forEach( function ( f ) {
@@ -203,8 +226,18 @@
 				b.style.cssText = 'left:' + f.x * 100 + '%;top:' + f.y * 100 + '%;width:' + f.w * 100 + '%;height:' + f.h * 100 + '%;border-color:' + c + ';background:' + c + '22;color:' + c;
 				var label = ( TYPES.filter( function ( t ) { return t[0] === f.type; } )[0] || [ '', f.type ] )[1];
 				if ( 'checkbox' === f.type ) { label = '☐'; }
-				b.appendChild( el( 'span', { text: label } ) );
-				if ( f.fill ) { b.appendChild( el( 'i', { text: f.fill } ) ); }
+				var pvText = previewMode && f.fill && 'signature' !== f.type && 'initials' !== f.type ? resolveText( f.fill ).trim() : null;
+				if ( previewMode && f.fill && 'signature' !== f.type && 'initials' !== f.type ) { // live view: the value as it will be printed
+					var scale = canvas.width / pageW, fpx = Math.max( 7, Math.min( 11 * scale, f.h * canvas.height * 0.75 ) );
+					b.style.background = 'transparent'; b.style.color = '#000'; b.style.borderStyle = 'dashed'; b.style.borderColor = c + '88';
+					b.style.fontFamily = 'Helvetica,Arial,sans-serif'; b.style.fontSize = fpx + 'px'; b.style.padding = '0 2px';
+					if ( 'checkbox' === f.type ) { b.style.justifyContent = 'center'; b.style.fontWeight = '700'; b.appendChild( el( 'span', { text: pvText ? 'X' : '' } ) ); }
+					else if ( pvText ) { b.appendChild( el( 'span', { text: pvText } ) ); }
+					else { var em = el( 'span', { text: 'signer fills in' } ); em.style.cssText = 'color:#94a3b8;font-style:italic;font-size:9px'; b.appendChild( em ); }
+				} else {
+					b.appendChild( el( 'span', { text: label } ) );
+					if ( f.fill ) { b.appendChild( el( 'i', { text: f.fill } ) ); }
+				}
 				var rz = el( 'span', { cls: 'rz' } ); b.appendChild( rz );
 				b.addEventListener( 'pointerdown', function ( e ) {
 					e.stopPropagation(); e.preventDefault();
@@ -345,6 +378,7 @@
 		return {
 			getFields: function () { return fields.map( clean ); },
 			getSigners: function () { return signers.slice(); },
+			refreshValues: function () { if ( previewMode ) { loadValues(); } },
 			setSigners: function ( list ) { signers = list && list.length ? list.slice() : [ 'Signer' ]; renderSigners(); renderInsp(); paint(); },
 			destroy: function () { dead = true; document.removeEventListener( 'keydown', onKey ); host.innerHTML = ''; }
 		};
