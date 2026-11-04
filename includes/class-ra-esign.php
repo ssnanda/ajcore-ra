@@ -849,6 +849,15 @@ class AJCore_RA_Esign {
 			$fields[] = array( 'party' => $r['party'], 'page' => $page, 'type' => 'date', 'properties' => array( 'x' => $x, 'y' => $y + 0.07, 'w' => 0.2, 'h' => 0.03 ) );
 		}
 
+		if ( ! empty( $options['preview_only'] ) ) { // nothing is sent to BreezeDoc: return the filled PDF with the signer boxes outlined
+			$outs = array();
+			foreach ( $fields as $bf ) {
+				$pr     = $bf['properties'];
+				$outs[] = array( 'page' => $bf['page'], 'x' => $pr['x'], 'y' => $pr['y'], 'w' => $pr['w'], 'h' => $pr['h'], 'outline' => ucfirst( (string) $bf['type'] ) . ' (' . ( $bf['party'] ?? 1 ) . ')' );
+			}
+			$bytes = $outs ? $this->stamp_pdf( $content, $outs ) : $content;
+			return is_wp_error( $bytes ) ? $bytes : array( 'preview_pdf' => $bytes );
+		}
 		$title    = mb_substr( sanitize_text_field( (string) $title ), 0, 191 );
 		$filename = sanitize_file_name( (string) ( $file['name'] ?? 'document.pdf' ) );
 		if ( '' === $title ) {
@@ -1217,6 +1226,9 @@ class AJCore_RA_Esign {
 			if ( is_wp_error( $pdf ) ) {
 				return $pdf;
 			}
+			if ( ! empty( $options['preview_only'] ) ) {
+				return array( 'preview_pdf' => $pdf );
+			}
 			$tmp = wp_tempnam( 'ajesign.pdf' );
 			if ( ! $tmp || false === file_put_contents( $tmp, $pdf ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
 				return new WP_Error( 'tmp_failed', __( 'Could not write the generated PDF.', 'ajcore-ra' ), array( 'status' => 500 ) );
@@ -1535,6 +1547,15 @@ class AJCore_RA_Esign {
 					$y = $f['y'] * $size['height'];
 					$w = $f['w'] * $size['width'];
 					$h = $f['h'] * $size['height'];
+					if ( ! empty( $f['outline'] ) ) { // preview only: where the signer will sign / fill in
+						$pdf->SetDrawColor( 79, 70, 229 );
+						$pdf->SetLineWidth( 0.8 );
+						$pdf->Rect( $x, $y, $w, $h );
+						$pdf->SetFont( 'Helvetica', '', 6.5 );
+						$pdf->SetTextColor( 79, 70, 229 );
+						$pdf->Text( $x + 1.5, $y + 7, (string) $f['outline'] );
+						continue;
+					}
 					$pdf->SetTextColor( 0, 0, 0 );
 					if ( 'checkbox' === $f['type'] ) {
 						$fs = max( 6, min( 12, $h * 0.95 ) );
@@ -2760,6 +2781,7 @@ class AJCore_RA_Esign {
 			return array( 'surface' => 'OPS', 'method' => $method, 'path' => $path, 'auth' => 'Admin', 'purpose' => $purpose, 'app' => 'OPS e-signatures' );
 		};
 		$catalog[] = $e( 'GET', '/ops/esign/summary', 'Number of e-signature requests waiting for signature (sent, not fully signed).' );
+		$catalog[] = $e( 'POST', '/ops/esign/preview-filled', 'Builds the request as it would be sent (form id or uploaded pdf, customer, recipients, layout, vars) and returns the filled PDF with signer boxes outlined. Nothing is sent to BreezeDoc.' );
 		$catalog[] = $e( 'GET', '/ops/esign/test', 'Tests the BreezeDoc Team API key (or legacy Personal token).' );
 		$catalog[] = $e( 'GET', '/ops/esign/templates', 'Lists BreezeDoc templates (id, title, numbered signer parties).' );
 		$catalog[] = $e( 'POST', '/ops/esign/templates/duplicate', 'Copies an AJCore template (and its PDF). JSON: id.' );
@@ -2820,6 +2842,7 @@ class AJCore_RA_Esign {
 				'/our-details/save'          => array( 'POST', 'rest_our_details_save' ),
 				'/send'                      => array( 'POST', 'rest_send' ),
 				'/send-pdf'                  => array( 'POST', 'rest_send_pdf' ),
+				'/preview-filled'            => array( 'POST', 'rest_preview_filled' ),
 				'/documents'                 => array( $r, 'rest_documents' ),
 				'/import'                    => array( 'POST', 'rest_import' ),
 				'/link'                      => array( 'POST', 'rest_link' ),
@@ -2956,6 +2979,47 @@ class AJCore_RA_Esign {
 				$this->send_options( $request )
 			)
 		);
+	}
+
+	/** The request as it would be sent — customer values filled in, signer boxes outlined — without contacting BreezeDoc. */
+	public function rest_preview_filled( WP_REST_Request $request ) {
+		$files      = $request->get_file_params();
+		$recipients = $request->get_param( 'recipients' );
+		if ( is_string( $recipients ) ) {
+			$recipients = json_decode( $recipients, true );
+		}
+		$recipients = array_values( (array) $recipients );
+		foreach ( $recipients as $i => $r ) { // a preview doesn't need real signer details
+			$recipients[ $i ]['name']  = '' !== trim( (string) ( $r['name'] ?? '' ) ) ? $r['name'] : 'Signer ' . ( $i + 1 );
+			$recipients[ $i ]['email'] = is_email( (string) ( $r['email'] ?? '' ) ) ? $r['email'] : 'signer' . ( $i + 1 ) . '@example.com';
+		}
+		if ( empty( $recipients ) ) {
+			$recipients = array( array( 'name' => 'Signer 1', 'email' => 'signer1@example.com' ) );
+		}
+		$options                 = $this->send_options( $request );
+		$options['preview_only'] = true;
+		$cust                    = sanitize_text_field( (string) $request->get_param( 'stripe_customer_id' ) );
+		$tid                     = sanitize_text_field( (string) $request->get_param( 'template_id' ) );
+		if ( '' !== $tid ) {
+			if ( 0 !== strpos( $tid, 'ajt_' ) ) {
+				return new WP_Error( 'bad_preview', __( 'Only AJCore forms can be previewed.', 'ajcore-ra' ), array( 'status' => 400 ) );
+			}
+			$res = $this->send_esign_document_from_template( $tid, $cust, $recipients, $options );
+		} else {
+			$res = $this->send_esign_pdf( $files['pdf'] ?? null, (string) $request->get_param( 'title' ), $cust, $recipients, (int) $request->get_param( 'page' ), $options );
+		}
+		if ( is_wp_error( $res ) ) {
+			return $this->rest_result( $res );
+		}
+		if ( empty( $res['preview_pdf'] ) ) {
+			return new WP_Error( 'no_preview', __( 'Could not build the preview.', 'ajcore-ra' ), array( 'status' => 500 ) );
+		}
+		nocache_headers();
+		header( 'Content-Type: application/pdf' );
+		header( 'Content-Disposition: inline; filename="preview.pdf"' );
+		header( 'Content-Length: ' . strlen( $res['preview_pdf'] ) );
+		echo $res['preview_pdf']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+		exit;
 	}
 
 	public function rest_restore_rows( WP_REST_Request $request ) {
@@ -3230,7 +3294,7 @@ class AJCore_RA_Esign {
 			.ajra-es .ajra-ti{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:13px}.ajra-es .ajra-ti:hover{background:#f1f5f9}.ajra-es .ajra-ti.on{background:#eef2ff;color:#3730a3;font-weight:600}
 			.ajra-es .ajra-ti span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ajra-es .ajra-ti em{font-style:normal;font-size:10px;color:#64748b;border:1px solid #e2e8f0;border-radius:4px;padding:0 4px}
 			.ajra-es .ajra-wsmain{flex:1;min-width:0}.ajra-es .ajra-wsbox{border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;padding:10px}
-			.ajra-es .ajra-wshead{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}.ajfe-side .ajra-grid{grid-template-columns:1fr!important;gap:8px!important}.ajfe-side .ajra-row{flex-direction:column;align-items:stretch}.ajfe-side .ajra-row .ajra-muted{width:auto!important}.ajfe-side #ajra-es-customer{width:100%}.ajfe-side .ajra-bar{flex-wrap:wrap}
+			.ajra-es .ajra-wshead{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}.ajfe-side .ajra-grid{grid-template-columns:1fr!important;gap:8px!important}.ajfe-side #ajra-es-customer{height:auto}.ajfe-side #ajra-es-reqform{padding-bottom:10px}.ajfe-side .ajra-bar{border-top:1px solid #e2e8f0;padding-top:8px;margin-top:6px}.ajfe-side #ajra-es-send,.ajfe-side #ajra-es-preview{width:100%;justify-content:center;text-align:center;margin:0}.ajfe-side #ajra-es-summary{width:100%;order:-1}.ajfe-side .ajra-row{flex-direction:column;align-items:stretch}.ajfe-side .ajra-row .ajra-muted{width:auto!important}.ajfe-side #ajra-es-customer{width:100%}.ajfe-side .ajra-bar{flex-wrap:wrap}
 			.ajra-es .ajra-wsstrip{display:flex;flex-direction:column;gap:8px;padding-bottom:8px;border-bottom:1px solid #e2e8f0}.ajra-es .ajra-wsstrip input[type=text]{width:100%}.ajra-es .ajra-wsstrip .ajra-grid{grid-template-columns:repeat(3,1fr);gap:6px}
 			.ajra-es .ajra-choice{border:1px solid #cbd5e1;border-radius:10px;background:#fff;padding:14px;cursor:pointer;display:flex;flex-direction:column;gap:4px}.ajra-es .ajra-choice:hover{border-color:#4f46e5;box-shadow:0 0 0 2px #e0e7ff}
 			.ajra-es .ajra-wsrow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
@@ -3382,6 +3446,7 @@ class AJCore_RA_Esign {
 						<?php endif; ?>
 						<span class="ajra-sp"></span>
 						<span class="ajra-muted" id="ajra-es-summary"></span>
+						<button type="button" class="button" id="ajra-es-preview" disabled title="<?php esc_attr_e( 'See the form filled in for this customer, with the signer boxes outlined. Nothing is sent.', 'ajcore-ra' ); ?>"><?php esc_html_e( 'Preview', 'ajcore-ra' ); ?></button>
 						<button type="button" class="button button-primary" id="ajra-es-send" disabled><?php esc_html_e( 'Send for signature', 'ajcore-ra' ); ?></button>
 					</div>
 					</div>
@@ -3960,6 +4025,7 @@ class AJCore_RA_Esign {
 				else if ( ! rec.length ) { missing = 'No signers'; }
 				else if ( rec.some( function ( r ) { return ! r.name || ! r.email; } ) ) { missing = 'Fill in every signer'; }
 				send.disabled = '' !== missing;
+				if ( $( 'ajra-es-preview' ) ) { $( 'ajra-es-preview' ).disabled = '' !== missing; }
 				summary.textContent = missing || ( rec.length + ( 1 === rec.length ? ' signer' : ' signers' ) );
 			}
 			function setMode( m ) {
@@ -3997,7 +4063,7 @@ class AJCore_RA_Esign {
 				inlineHost.style.display = ''; inlineHost.innerHTML = '<div class="ajra-muted">Loading the document…</div>';
 				loader().then( function ( buf ) {
 					if ( seq !== inlineSeq ) { return; }
-					inlineEd = window.AJEsignFieldEditor.mount( inlineHost, { pdfData: buf, pdfjsBase: pdfjsBase, fields: fields, signers: currentRoles(), mergeFields: mergeFields, sideTop: reqform, onChange: onChange } );
+					inlineEd = window.AJEsignFieldEditor.mount( inlineHost, { pdfData: buf, pdfjsBase: pdfjsBase, fields: fields, signers: currentRoles(), mergeFields: mergeFields, sideTop: reqform, lockSigners: true, onChange: onChange } );
 				} ).catch( function ( e ) { if ( seq === inlineSeq ) { inlineHost.innerHTML = '<div class="ajra-err" style="display:block">' + esc( e.message ) + '</div>'; } } );
 			}
 			// The document and its fields sit under the form: the template's saved fields load automatically; edits apply to this request only.
@@ -4027,6 +4093,30 @@ class AJCore_RA_Esign {
 					cur.forEach( function ( r, i ) { r.party = i + 1; } ); renderRecipients( cur );
 				}
 			} );
+			if ( $( 'ajra-es-preview' ) ) { $( 'ajra-es-preview' ).addEventListener( 'click', function () {
+				var btn = this, rec = readRecipients(), headers = { 'X-WP-Nonce': nonce }, opt;
+				err.style.display = 'none';
+				if ( 'pdf' === mode ) {
+					var f = $( 'ajra-es-pdf' ).files[0]; if ( ! f ) { return; }
+					var fd = new FormData();
+					fd.append( 'pdf', f ); fd.append( 'recipients', JSON.stringify( rec ) ); fd.append( 'stripe_customer_id', cust.value ); fd.append( 'title', $( 'ajra-es-title' ).value ); fd.append( 'page', $( 'ajra-es-page' ).value || 0 );
+					if ( upLayout.length ) { fd.append( 'layout', JSON.stringify( upLayout ) ); }
+					fd.append( 'vars', JSON.stringify( readVars() ) );
+					opt = { method: 'POST', headers: headers, body: fd };
+				} else {
+					var body = { template_id: tpl.value, stripe_customer_id: cust.value, recipients: rec, vars: JSON.stringify( readVars() ) };
+					if ( tplLayout.length ) { body.layout = JSON.stringify( tplLayout ); }
+					headers[ 'Content-Type' ] = 'application/json';
+					opt = { method: 'POST', headers: headers, body: JSON.stringify( body ) };
+				}
+				btn.disabled = true; btn.textContent = 'Building…';
+				fetch( base + '/preview-filled', opt ).then( function ( r ) {
+					if ( ( r.headers.get( 'Content-Type' ) || '' ).indexOf( 'application/pdf' ) < 0 ) { return r.json().then( function ( d ) { throw new Error( d.message || 'Preview failed' ); } ); }
+					return r.blob();
+				} ).then( function ( blob ) { showPreview( 'Preview — not sent', { mode: 'pdf', url: URL.createObjectURL( blob ) } ); } )
+					.catch( function ( e ) { err.style.display = 'block'; err.textContent = e.message; } )
+					.finally( function () { btn.textContent = 'Preview'; updateSend(); } );
+			} ); }
 			send.addEventListener( 'click', function () {
 				err.style.display = 'none';
 				function fail( m ) { err.style.display = 'block'; err.textContent = m; updateSend(); send.textContent = 'Send for signature'; }
