@@ -1219,22 +1219,92 @@ class AJCore_RA_Esign {
 
 	/** Merge fields offered in the editor: token => label. */
 	public static function merge_field_catalog() {
-		return array(
-			'customer.name'    => 'Customer name',
-			'customer.email'   => 'Customer email',
-			'customer.phone'   => 'Customer phone',
-			'customer.address' => 'Customer address',
-			'customer.number'  => 'Customer number',
-			'signer.name'      => 'Signer 1 name',
-			'signer.email'     => 'Signer 1 email',
-			'date'             => 'Today (long date)',
-			'date.short'       => 'Today (numeric)',
-			'date.day'         => 'Today — day',
-			'date.month'       => 'Today — month name',
-			'date.year'        => 'Today — year (4 digits)',
-			'date.year2'       => 'Today — year (2 digits)',
-			'company'          => 'Your site / business name',
+		$c = array(
+			'customer.name'          => 'Customer — name',
+			'customer.email'         => 'Customer — email',
+			'customer.phone'         => 'Customer — phone',
+			'customer.address'       => 'Customer — full address',
+			'customer.address.line1' => 'Customer — street',
+			'customer.address.line2' => 'Customer — street line 2',
+			'customer.address.city'  => 'Customer — city',
+			'customer.address.state' => 'Customer — state',
+			'customer.address.zip'   => 'Customer — ZIP',
+			'customer.address.country' => 'Customer — country',
+			'customer.number'        => 'Customer — number',
+			'customer.description'   => 'Customer — description',
 		);
+		if ( class_exists( 'AJCore_RA_Business_Profile' ) ) {
+			foreach ( AJCore_RA_Business_Profile::fields() as $k => $def ) {
+				$c[ self::business_token( $k ) ] = 'Business — ' . wp_strip_all_tags( (string) $def['label'] );
+			}
+			$c['business.address'] = 'Business — full address';
+		}
+		foreach ( self::our_fields() as $k => $label ) {
+			$c[ 'our.' . $k ] = 'Our company — ' . $label;
+		}
+		$c += array(
+			'mailbox.pmb'            => 'Mailbox — PMB number',
+			'mailbox.start_date'     => 'Mailbox — start date',
+			'mailbox.id_type'        => 'Mailbox — ID type',
+			'mailbox.id_issuer'      => 'Mailbox — ID issuer',
+			'signer.name'            => 'Signer 1 — name',
+			'signer.email'           => 'Signer 1 — email',
+			'date'                   => 'Today (long date)',
+			'date.short'             => 'Today (numeric)',
+			'date.day'               => 'Today — day',
+			'date.month'             => 'Today — month name',
+			'date.year'              => 'Today — year (4 digits)',
+			'date.year2'             => 'Today — year (2 digits)',
+			'company'                => 'This site\'s business name',
+		);
+		return $c;
+	}
+
+	private static function business_token( $key ) {
+		return 'business_name' === $key ? 'business.name' : 'business.' . $key;
+	}
+
+	/** The company's own details (registered agent), used to fill forms. @return array<string,string> key => label */
+	public static function our_fields() {
+		return array(
+			'name'   => 'name',
+			'street' => 'street',
+			'city'   => 'city',
+			'state'  => 'state',
+			'zip'    => 'ZIP',
+			'county' => 'county',
+			'email'  => 'email',
+			'phone'  => 'phone',
+		);
+	}
+
+	const OUR_OPTION = 'ajcore_ra_esign_our';
+
+	private static function our_defaults() {
+		return array(
+			'name'   => 'NC LLC Agents (2356362)',
+			'street' => '1914 J N PEASE PL',
+			'city'   => 'CHARLOTTE',
+			'state'  => 'NC',
+			'zip'    => '28262',
+			'county' => 'Mecklenburg',
+			'email'  => 'agent@ncllcagents.com',
+			'phone'  => '(704) 307-2135',
+		);
+	}
+
+	/** Saved company details over the defaults. @return array<string,string> */
+	public static function our_details() {
+		$saved = get_option( self::OUR_OPTION, array() );
+		$out   = self::our_defaults();
+		if ( is_array( $saved ) ) {
+			foreach ( $out as $k => $v ) {
+				if ( isset( $saved[ $k ] ) ) {
+					$out[ $k ] = (string) $saved[ $k ];
+				}
+			}
+		}
+		return $out;
 	}
 
 	/** Values for the merge fields for one customer (blank when unknown). */
@@ -1256,6 +1326,7 @@ class AJCore_RA_Esign {
 				$v['customer.email']  = (string) ( $row['email'] ?? '' );
 				$v['customer.phone']  = (string) ( $row['phone'] ?? '' );
 				$v['customer.number'] = (string) ( $row['customer_number'] ?? '' );
+				$v['customer.description'] = (string) ( $row['description'] ?? '' );
 				$addr                 = $row['address'] ?? '';
 				$decoded              = is_string( $addr ) ? json_decode( $addr, true ) : null;
 				if ( is_array( $decoded ) ) {
@@ -1271,9 +1342,43 @@ class AJCore_RA_Esign {
 					}
 					$addr = implode( ', ', $parts );
 				}
+				if ( is_array( $decoded ) ) {
+					$v['customer.address.line1']   = (string) ( $decoded['line1'] ?? '' );
+					$v['customer.address.line2']   = (string) ( $decoded['line2'] ?? '' );
+					$v['customer.address.city']    = (string) ( $decoded['city'] ?? '' );
+					$v['customer.address.state']   = (string) ( $decoded['state'] ?? '' );
+					$v['customer.address.zip']     = (string) ( $decoded['postal_code'] ?? $decoded['zip'] ?? '' );
+					$v['customer.address.country'] = (string) ( $decoded['country'] ?? '' );
+				}
 				$v['customer.address'] = (string) $addr;
 				break;
 			}
+		}
+		// Business profile (name, street, city, phone, …).
+		if ( '' !== $id && class_exists( 'AJCore_RA_Business_Profile' ) ) {
+			$bp = AJCore_RA_Business_Profile::load( $id );
+			$bv = isset( $bp['values'] ) && is_array( $bp['values'] ) ? $bp['values'] : array();
+			foreach ( array_keys( AJCore_RA_Business_Profile::fields() ) as $k ) {
+				$v[ self::business_token( $k ) ] = isset( $bv[ $k ] ) && is_scalar( $bv[ $k ] ) ? (string) $bv[ $k ] : '';
+			}
+			$csz = trim( implode( ' ', array_filter( array( ( $bv['city'] ?? '' ) . ( ! empty( $bv['city'] ) && ! empty( $bv['state'] ) ? ',' : '' ), (string) ( $bv['state'] ?? '' ), (string) ( $bv['zip'] ?? '' ) ) ) ) );
+			$v['business.address'] = implode( ', ', array_filter( array( (string) ( $bv['street'] ?? '' ), $csz ) ) );
+		}
+		// Mailbox profile.
+		if ( '' !== $id ) {
+			$ptbl = $this->kit['portal_table']( 'aj_portal_customer_profiles' );
+			if ( $this->kit['table_exists']( $pdb, $ptbl ) ) {
+				$prow = $pdb->get_row( $pdb->prepare( "SELECT pmb_number, mailbox_start_date, id_type, id_issuer FROM `{$ptbl}` WHERE customer_id = %s LIMIT 1", $id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				if ( $prow ) {
+					$v['mailbox.pmb']        = (string) $prow['pmb_number'];
+					$v['mailbox.start_date'] = (string) $prow['mailbox_start_date'];
+					$v['mailbox.id_type']    = (string) $prow['id_type'];
+					$v['mailbox.id_issuer']  = (string) $prow['id_issuer'];
+				}
+			}
+		}
+		foreach ( self::our_details() as $k => $val ) {
+			$v[ 'our.' . $k ] = $val;
 		}
 		if ( ! empty( $recipients[0] ) ) {
 			$v['signer.name']  = (string) ( $recipients[0]['name'] ?? '' );
@@ -2562,6 +2667,8 @@ class AJCore_RA_Esign {
 				'/templates/save'            => array( 'POST', 'rest_template_save' ),
 				'/templates/delete'          => array( 'POST', 'rest_template_delete' ),
 				'/templates/duplicate'       => array( 'POST', 'rest_template_duplicate' ),
+				'/our-details'               => array( 'GET', 'rest_our_details' ),
+				'/our-details/save'          => array( 'POST', 'rest_our_details_save' ),
 				'/send'                      => array( 'POST', 'rest_send' ),
 				'/send-pdf'                  => array( 'POST', 'rest_send_pdf' ),
 				'/documents'                 => array( $r, 'rest_documents' ),
@@ -2606,7 +2713,7 @@ class AJCore_RA_Esign {
 
 	public function rest_templates() {
 		$result = $this->breezedoc_list_templates();
-		return is_wp_error( $result ) ? $result : rest_ensure_response( array( 'templates' => $result ) );
+		return is_wp_error( $result ) ? $result : rest_ensure_response( array( 'templates' => $result, 'mergeFields' => self::merge_field_catalog() ) );
 	}
 
 	public function rest_template_save( WP_REST_Request $request ) {
@@ -2617,6 +2724,21 @@ class AJCore_RA_Esign {
 			$signers = is_array( $decoded ) ? $decoded : array( $signers );
 		}
 		return $this->rest_result( $this->save_local_template( sanitize_text_field( (string) $request->get_param( 'id' ) ), (string) $request->get_param( 'title' ), (array) $signers, (int) $request->get_param( 'page' ), $files['pdf'] ?? null, (string) $request->get_param( 'kind' ), (string) $request->get_param( 'body' ),$request->get_param( 'sig_x' ), $request->get_param( 'sig_y' ), $request->get_param( 'layout' ) ) );
+	}
+
+	public function rest_our_details() {
+		return rest_ensure_response( array( 'values' => self::our_details(), 'fields' => self::our_fields() ) );
+	}
+
+	public function rest_our_details_save( WP_REST_Request $request ) {
+		$in  = $request->get_param( 'values' );
+		$in  = is_array( $in ) ? $in : ( is_string( $in ) ? json_decode( $in, true ) : array() );
+		$out = array();
+		foreach ( array_keys( self::our_fields() ) as $k ) {
+			$out[ $k ] = isset( $in[ $k ] ) ? mb_substr( sanitize_text_field( (string) $in[ $k ] ), 0, 200 ) : self::our_details()[ $k ];
+		}
+		update_option( self::OUR_OPTION, $out, false );
+		return $this->rest_our_details();
 	}
 
 	public function rest_template_duplicate( WP_REST_Request $request ) {
@@ -3073,6 +3195,16 @@ class AJCore_RA_Esign {
 			</div>
 			<?php endif; ?>
 
+			<div class="ajra-card" id="ajra-es-our" data-view="settings">
+				<div class="ajra-head"><h2><?php esc_html_e( 'Our company details', 'ajcore-ra' ); ?> <span class="ajra-muted"><?php esc_html_e( '— available as fields when filling forms', 'ajcore-ra' ); ?></span></h2></div>
+				<div class="ajra-grid">
+					<?php foreach ( self::our_details() as $our_k => $our_v ) : ?>
+						<div><label><?php echo esc_html( ucfirst( self::our_fields()[ $our_k ] ) ); ?></label><input type="text" class="ajra-es-our" data-k="<?php echo esc_attr( $our_k ); ?>" value="<?php echo esc_attr( $our_v ); ?>" maxlength="200"></div>
+					<?php endforeach; ?>
+				</div>
+				<p style="margin:8px 0 0"><button type="button" class="button button-primary button-small" id="ajra-es-our-save"><?php esc_html_e( 'Save', 'ajcore-ra' ); ?></button> <span class="ajra-muted" id="ajra-es-our-msg"></span></p>
+			</div>
+
 			<details class="ajra-card" id="ajra-es-roadmap" data-view="settings">
 				<summary style="cursor:pointer;font-weight:600"><?php esc_html_e( 'Roadmap — what is planned and what BreezeDoc does not allow yet', 'ajcore-ra' ); ?></summary>
 				<table class="widefat striped" style="margin-top:10px">
@@ -3456,6 +3588,14 @@ class AJCore_RA_Esign {
 				renderTree();
 				if ( firstSel ) { selectTpl( firstSel ); } else { tplWs.innerHTML = '<div class="ajra-empty">Select a template on the left, or create a new one.</div>'; }
 			}
+
+			if ( $( 'ajra-es-our-save' ) ) { $( 'ajra-es-our-save' ).addEventListener( 'click', function () {
+				var vals = {}, msg = $( 'ajra-es-our-msg' ), btn = this;
+				document.querySelectorAll( '.ajra-es-our' ).forEach( function ( i ) { vals[ i.getAttribute( 'data-k' ) ] = i.value; } );
+				btn.disabled = true; msg.textContent = '';
+				api( '/our-details/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { values: vals } ) } )
+					.then( function () { msg.style.color = ''; msg.textContent = 'Saved'; } ).catch( function ( e ) { msg.style.color = '#b32d2e'; msg.textContent = e.message; } ).finally( function () { btn.disabled = false; } );
+			} ); }
 
 			// Select local copies and delete them (the BreezeDoc documents are untouched).
 			var selAll = $( 'ajra-es-sel-all' ), delBtn = $( 'ajra-es-del' );
