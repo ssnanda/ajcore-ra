@@ -50,6 +50,7 @@ class AJCore_RA_Esign {
 		add_filter( 'ajcore_endpoint_catalog', array( __CLASS__, 'catalog' ) );
 		add_filter( 'ajcore_admin_portal_tabs', array( __CLASS__, 'admin_tab' ), 9 );
 		add_action( 'ajcore_admin_portal_tab_render', array( __CLASS__, 'render_admin_tab' ) );
+		add_action( 'ajcore_portal_dashboard_metrics', array( __CLASS__, 'dashboard_metric' ) );
 		add_action( 'admin_post_ajcore_ra_save_esign', array( __CLASS__, 'handle_save' ) );
 		add_action( 'admin_init', array( __CLASS__, 'maybe_publish_shared' ) );
 		add_action( self::CRON_HOOK, array( __CLASS__, 'run_auto_import' ) );
@@ -872,7 +873,14 @@ class AJCore_RA_Esign {
 		if ( empty( $created['title'] ) ) {
 			$created['title'] = $title;
 		}
-		return $this->breezedoc_v1_send_and_log( $created, '', $stripe_customer_id, $options, $idem );
+		$logged = $this->breezedoc_v1_send_and_log( $created, '', $stripe_customer_id, $options, $idem );
+		if ( ! is_wp_error( $logged ) && ! empty( $logged['breezedocDocumentId'] ) ) {
+			$keep = $this->sent_path( $logged['breezedocDocumentId'] );
+			if ( '' !== $keep ) {
+				file_put_contents( $keep, $content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+			}
+		}
+		return $logged;
 	}
 
 	/** Pre-Team-key flow (Personal Access Token, integer template ids). */
@@ -1000,6 +1008,13 @@ class AJCore_RA_Esign {
 				$result = $this->breezedoc_api_request( 'POST', $base . '/cancel', array( 'idempotency_key' => $idem ) );
 				return is_wp_error( $result ) ? $result : $this->refresh_esign_row( $row );
 			case 'download':
+				if ( 'completed' !== (string) $row->status ) {
+					$keep = $this->sent_path( $doc_id );
+					if ( '' !== $keep && is_readable( $keep ) ) {
+						return array( 'sent' => true, 'url' => '', 'certificateUrl' => '' );
+					}
+					return new WP_Error( 'not_signed_yet', __( 'BreezeDoc only provides the PDF once the document is fully signed, and AJCore has no copy of this one.', 'ajcore-ra' ), array( 'status' => 404 ) );
+				}
 				$result = $this->breezedoc_api_request( 'GET', $base . '/download' );
 				if ( is_wp_error( $result ) ) {
 					return $result;
@@ -1024,6 +1039,19 @@ class AJCore_RA_Esign {
 			file_put_contents( $dir . '/index.php', "<?php // Silence is golden.\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
 		}
 		return $dir;
+	}
+
+	/** The exact PDF AJCore sent to BreezeDoc, kept so a request can be previewed and downloaded while it is still waiting for signatures. */
+	private function sent_path( $breezedoc_document_id ) {
+		$name = sanitize_file_name( (string) $breezedoc_document_id );
+		if ( '' === $name ) {
+			return '';
+		}
+		$dir = $this->tpl_dir() . '/sent';
+		if ( ! is_dir( $dir ) ) {
+			wp_mkdir_p( $dir );
+		}
+		return $dir . '/' . $name . '.pdf';
 	}
 
 	/** @return array<string,array> id => meta (title, file, filename, signers[], page, created) */
@@ -1797,7 +1825,12 @@ class AJCore_RA_Esign {
 		$base   = array( 'mode' => 'none', 'url' => '', 'certificateUrl' => '', 'pages' => array(), 'openUrl' => (string) $row->document_url, 'message' => '' );
 		if ( 0 === strpos( $doc_id, 'doc_' ) ) {
 			if ( 'completed' !== (string) $row->status ) {
-				$base['message'] = __( 'BreezeDoc provides the PDF once the document is fully signed.', 'ajcore-ra' );
+				$keep = $this->sent_path( $doc_id );
+				if ( '' !== $keep && is_readable( $keep ) ) {
+					$base['mode'] = 'sent'; // the copy AJCore sent; the client builds the URL from the row id
+					return $base;
+				}
+				$base['message'] = __( 'BreezeDoc only provides the PDF once the document is fully signed, and AJCore keeps a copy only of documents it sent itself (this one was sent before that, or from BreezeDoc).', 'ajcore-ra' );
 				return $base;
 			}
 			$result = $this->breezedoc_api_request( 'GET', '/v1/documents/' . rawurlencode( $doc_id ) . '/download' );
@@ -2726,6 +2759,7 @@ class AJCore_RA_Esign {
 		$e = static function ( $method, $path, $purpose ) {
 			return array( 'surface' => 'OPS', 'method' => $method, 'path' => $path, 'auth' => 'Admin', 'purpose' => $purpose, 'app' => 'OPS e-signatures' );
 		};
+		$catalog[] = $e( 'GET', '/ops/esign/summary', 'Number of e-signature requests waiting for signature (sent, not fully signed).' );
 		$catalog[] = $e( 'GET', '/ops/esign/test', 'Tests the BreezeDoc Team API key (or legacy Personal token).' );
 		$catalog[] = $e( 'GET', '/ops/esign/templates', 'Lists BreezeDoc templates (id, title, numbered signer parties).' );
 		$catalog[] = $e( 'POST', '/ops/esign/templates/duplicate', 'Copies an AJCore template (and its PDF). JSON: id.' );
@@ -2767,7 +2801,7 @@ class AJCore_RA_Esign {
 		};
 		$id_re  = '(?P<id>\d+)';
 		$tpl_re = '(?P<id>[A-Za-z0-9_]+)';
-		$act_ro = '(?P<action>download|events|preview)';
+		$act_ro = '(?P<action>download|events|preview|sent-file)';
 		$act_rw = '(?P<action>refresh|remind|cancel)';
 		$r      = WP_REST_Server::READABLE;
 
@@ -2781,6 +2815,7 @@ class AJCore_RA_Esign {
 				'/templates/save'            => array( 'POST', 'rest_template_save' ),
 				'/templates/delete'          => array( 'POST', 'rest_template_delete' ),
 				'/templates/duplicate'       => array( 'POST', 'rest_template_duplicate' ),
+				'/summary'                   => array( 'GET', 'rest_summary' ),
 				'/our-details'               => array( 'GET', 'rest_our_details' ),
 				'/our-details/save'          => array( 'POST', 'rest_our_details_save' ),
 				'/send'                      => array( 'POST', 'rest_send' ),
@@ -3021,7 +3056,29 @@ class AJCore_RA_Esign {
 		if ( 'refresh' === $action ) {
 			return $this->rest_result( $this->refresh_esign_document_status( (int) $request['id'] ) );
 		}
+		if ( 'sent-file' === $action ) {
+			return $this->stream_sent_copy( (int) $request['id'], filter_var( $request->get_param( 'download' ), FILTER_VALIDATE_BOOLEAN ) ); // streams and exits, or returns a WP_Error
+		}
 		return $this->rest_result( $this->esign_document_action( (int) $request['id'], $action ) );
+	}
+
+	/** Streams the PDF AJCore sent for a request (inline, or as a download). */
+	private function stream_sent_copy( $local_id, $as_download ) {
+		$row = $this->get_esign_row( $local_id );
+		if ( is_wp_error( $row ) ) {
+			return $row;
+		}
+		$path = $this->sent_path( (string) $row->breezedoc_document_id );
+		if ( '' === $path || ! is_readable( $path ) ) {
+			return new WP_Error( 'no_copy', __( 'AJCore has no copy of this document.', 'ajcore-ra' ), array( 'status' => 404 ) );
+		}
+		$name = sanitize_file_name( ( (string) $row->template_title ?: 'document' ) . '.pdf' );
+		nocache_headers();
+		header( 'Content-Type: application/pdf' );
+		header( 'Content-Disposition: ' . ( $as_download ? 'attachment' : 'inline' ) . '; filename="' . str_replace( '"', '', $name ) . '"' );
+		header( 'Content-Length: ' . filesize( $path ) );
+		readfile( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_readfile
+		exit;
 	}
 
 	public function rest_webhook_status() {
@@ -3047,8 +3104,44 @@ class AJCore_RA_Esign {
 	// ── Admin tab (Client Portal > E-Signatures) ────────────────────────────────
 
 	public static function admin_tab( $tabs ) {
-		$tabs[ self::TAB ] = array( 'label' => __( 'E-Signatures', 'ajcore-ra' ) );
+		$n                 = self::instance()->waiting_count();
+		$tabs[ self::TAB ] = array( 'label' => $n > 0 ? sprintf( '%s (%d)', __( 'E-Signatures', 'ajcore-ra' ), $n ) : __( 'E-Signatures', 'ajcore-ra' ) );
 		return $tabs;
+	}
+
+	/** Requests sent and not yet fully signed (BreezeDoc "Waiting"). Cached for 30 seconds. */
+	public function waiting_count() {
+		$cached = get_transient( 'ajcore_ra_esign_waiting' );
+		if ( false !== $cached ) {
+			return (int) $cached;
+		}
+		$n = 0;
+		if ( $this->kit ) {
+			$pdb = $this->get_pdb();
+			$t   = $this->get_esign_documents_table();
+			if ( $pdb && $this->kit['table_exists']( $pdb, $t ) ) {
+				$n = (int) $pdb->get_var( "SELECT COUNT(*) FROM `{$t}` WHERE status = 'sent'" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			}
+		}
+		set_transient( 'ajcore_ra_esign_waiting', $n, 30 );
+		return $n;
+	}
+
+	/** Card on AJCore's Client Portal Dashboard. */
+	public static function dashboard_metric() {
+		$n   = self::instance()->waiting_count();
+		$url = add_query_arg( array( 'page' => 'ajforms-client-portal', 'tab' => self::TAB ), admin_url( 'admin.php' ) ) . '#documents';
+		printf(
+			'<a class="ajcore-dashboard-metric" href="%s"><span class="ajcore-dashboard-label">%s</span><strong>%d</strong><small>%s</small></a>',
+			esc_url( $url ),
+			esc_html__( 'Signatures waiting', 'ajcore-ra' ),
+			(int) $n,
+			esc_html__( 'Sent, not yet fully signed', 'ajcore-ra' )
+		);
+	}
+
+	public function rest_summary() {
+		return rest_ensure_response( array( 'waiting' => $this->waiting_count() ) );
 	}
 
 	public static function render_admin_tab( $tab ) {
@@ -3074,7 +3167,7 @@ class AJCore_RA_Esign {
 		$ro     = $this->read_only();
 		$rest   = rest_url( AJCore_Extensions::rest_namespace() );
 		$hook   = $this->breezedoc_webhook_status();
-		$labels = array( 'draft' => __( 'Not sent', 'ajcore-ra' ), 'sent' => __( 'Awaiting signature', 'ajcore-ra' ), 'completed' => __( 'Completed', 'ajcore-ra' ), 'cancelled' => __( 'Cancelled', 'ajcore-ra' ), 'expired' => __( 'Expired', 'ajcore-ra' ) );
+		$labels = array( 'draft' => __( 'Not sent', 'ajcore-ra' ), 'sent' => __( 'Waiting', 'ajcore-ra' ), 'completed' => __( 'Completed', 'ajcore-ra' ), 'cancelled' => __( 'Cancelled', 'ajcore-ra' ), 'expired' => __( 'Expired', 'ajcore-ra' ) );
 		$group  = static function ( $status ) {
 			if ( 0 === strpos( (string) $status, 'deleted:' ) ) {
 				return 'deleted';
@@ -3349,8 +3442,8 @@ class AJCore_RA_Esign {
 				</div>
 				<div class="ajra-toolbar">
 					<div class="ajra-seg" id="ajra-es-filters">
-						<a class="on" data-f="all"><?php echo esc_html( sprintf( '%s %d', __( 'All', 'ajcore-ra' ), $counts['all'] ) ); ?></a>
-						<a data-f="sent"><?php echo esc_html( sprintf( '%s %d', __( 'Waiting', 'ajcore-ra' ), $counts['sent'] ) ); ?></a>
+						<a data-f="all"><?php echo esc_html( sprintf( '%s %d', __( 'All', 'ajcore-ra' ), $counts['all'] ) ); ?></a>
+						<a class="on" data-f="sent"><?php echo esc_html( sprintf( '%s %d', __( 'Waiting', 'ajcore-ra' ), $counts['sent'] ) ); ?></a>
 						<a data-f="draft"><?php echo esc_html( sprintf( '%s %d', __( 'Not sent', 'ajcore-ra' ), $counts['draft'] ) ); ?></a>
 						<a data-f="completed"><?php echo esc_html( sprintf( '%s %d', __( 'Completed', 'ajcore-ra' ), $counts['completed'] ) ); ?></a>
 						<a data-f="closed"><?php echo esc_html( sprintf( '%s %d', __( 'Closed', 'ajcore-ra' ), $counts['closed'] ) ); ?></a>
@@ -3396,18 +3489,13 @@ class AJCore_RA_Esign {
 									<button type="button" class="button button-small" data-act="refresh" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Refresh', 'ajcore-ra' ); ?></button>
 									<?php if ( $is_new ) : ?>
 										<?php if ( 'sent' === $doc['status'] ) : ?>
-											<button type="button" class="button button-small" data-act="remind" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Remind', 'ajcore-ra' ); ?></button>
+											<button type="button" class="button button-small" data-act="remind" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Resend', 'ajcore-ra' ); ?></button>
 											<button type="button" class="button button-small" data-act="cancel" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Cancel', 'ajcore-ra' ); ?></button>
 										<?php endif; ?>
-										<?php if ( 'completed' === $doc['status'] ) : ?>
-											<button type="button" class="button button-small" data-act="preview" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Preview', 'ajcore-ra' ); ?></button>
-											<button type="button" class="button button-small" data-act="download" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Signed PDF', 'ajcore-ra' ); ?></button>
-										<?php endif; ?>
-										<button type="button" class="button button-small" data-act="events" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'History', 'ajcore-ra' ); ?></button>
+										<button type="button" class="button button-small" data-act="download" data-id="<?php echo esc_attr( $doc['id'] ); ?>" title="<?php esc_attr_e( 'Signed PDF when completed; the copy AJCore sent while waiting', 'ajcore-ra' ); ?>"><?php esc_html_e( 'Download', 'ajcore-ra' ); ?></button>
+										<button type="button" class="button button-small" data-act="events" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Activity', 'ajcore-ra' ); ?></button>
 									<?php endif; ?>
-									<?php if ( ! $is_new && 'completed' === $doc['status'] ) : ?>
-										<button type="button" class="button button-small" data-act="preview" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Preview', 'ajcore-ra' ); ?></button>
-									<?php endif; ?>
+									<button type="button" class="button button-small" data-act="preview" data-id="<?php echo esc_attr( $doc['id'] ); ?>"><?php esc_html_e( 'Preview', 'ajcore-ra' ); ?></button>
 									<?php if ( $doc['documentUrl'] ) : ?>
 										<a class="button button-small" href="<?php echo esc_url( $doc['documentUrl'] ); ?>" target="_blank" rel="noopener noreferrer"><?php esc_html_e( 'Open', 'ajcore-ra' ); ?></a>
 									<?php endif; ?>
@@ -3474,7 +3562,7 @@ class AJCore_RA_Esign {
 			} ); } );
 
 			// Sent list: filter pills + search.
-			var rows = Array.prototype.slice.call( document.querySelectorAll( '#ajra-es-log tr[data-row]' ) ), filter = 'all';
+			var rows = Array.prototype.slice.call( document.querySelectorAll( '#ajra-es-log tr[data-row]' ) ), filter = 'sent';
 			var acct = 'all';
 			document.querySelectorAll( '#ajra-es-accts a' ).forEach( function ( a ) { a.addEventListener( 'click', function () {
 				acct = a.getAttribute( 'data-a' );
@@ -3762,15 +3850,19 @@ class AJCore_RA_Esign {
 			$( 'ajra-es-mclose' ).addEventListener( 'click', closeModal );
 			modal.addEventListener( 'click', function ( ev ) { if ( ev.target === modal ) { closeModal(); } } );
 			document.addEventListener( 'keydown', function ( ev ) { if ( 'Escape' === ev.key ) { closeModal(); } } );
-			function showPreview( title, d ) {
+			function sentUrl( id, dl ) { return base + '/documents/' + id + '/sent-file?_wpnonce=' + encodeURIComponent( nonce ) + ( dl ? '&download=1' : '' ); }
+			function showPreview( title, d, id ) {
 				$( 'ajra-es-mtitle' ).textContent = title;
 				var open = $( 'ajra-es-mopen' ), cert = $( 'ajra-es-mcert' );
-				open.style.display = cert.style.display = 'none';
+				open.style.display = cert.style.display = 'none'; open.textContent = 'Open in new tab'; open.removeAttribute( 'href' );
 				mbody.innerHTML = '';
 				if ( 'pdf' === d.mode && d.url ) {
 					mbody.innerHTML = '<iframe src="' + esc( d.url ) + '" title="Document preview"></iframe>';
 					open.href = d.url; open.style.display = '';
 					if ( d.certificateUrl ) { cert.href = d.certificateUrl; cert.style.display = ''; }
+				} else if ( 'sent' === d.mode ) {
+					mbody.innerHTML = '<iframe src="' + esc( sentUrl( id ) ) + '" title="Document preview"></iframe>';
+					open.href = sentUrl( id, true ); open.textContent = 'Download'; open.style.display = '';
 				} else if ( 'images' === d.mode && d.pages && d.pages.length ) {
 					mbody.innerHTML = d.pages.map( function ( u ) { return '<img src="' + esc( u ) + '" alt="">'; } ).join( '' );
 				} else {
@@ -3803,9 +3895,9 @@ class AJCore_RA_Esign {
 				b.disabled = true; b.textContent = '…';
 				api( '/documents/' + id + '/' + act, { method: ( 'download' === act || 'events' === act || 'preview' === act ) ? 'GET' : 'POST' } ).then( function ( d ) {
 					if ( 'preview' === act ) {
-						showPreview( ( tr.children[2] ? tr.children[2].textContent.trim() : '' ) || 'Document', d );
+						showPreview( ( tr.children[2] ? tr.children[2].textContent.trim() : '' ) || 'Document', d, id );
 					} else if ( 'download' === act ) {
-						if ( d.url ) { window.open( d.url, '_blank', 'noopener' ); } else { window.alert( 'No download URL returned.' ); }
+						if ( d.sent ) { window.location.href = sentUrl( id, true ); } else if ( d.url ) { window.open( d.url, '_blank', 'noopener' ); } else { window.alert( 'No download URL returned.' ); }
 						if ( d.certificateUrl ) { window.open( d.certificateUrl, '_blank', 'noopener' ); }
 					} else if ( 'events' === act ) {
 						var nx = tr.nextElementSibling;
