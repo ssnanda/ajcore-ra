@@ -1092,6 +1092,7 @@ class AJCore_RA_Esign {
 			'source'     => 'ajcore',
 			'page'       => (int) ( $meta['page'] ?? 0 ),
 			'layout'     => isset( $meta['layout'] ) ? $meta['layout'] : array(),
+			'blanks'     => isset( $meta['blanks'] ) ? $meta['blanks'] : array(),
 			'sigX'       => (float) ( $meta['sig_x'] ?? 8 ),
 			'sigY'       => (float) ( $meta['sig_y'] ?? 78 ),
 			'kind'       => ( $meta['kind'] ?? 'pdf' ) === 'doc' ? 'doc' : 'pdf',
@@ -1105,7 +1106,7 @@ class AJCore_RA_Esign {
 	 * Creates or updates an AJCore template. $file is a $_FILES-style array (required when creating).
 	 * $signers: role labels in signing order (Party 1, 2, …). $page: 0 = last page.
 	 */
-	public function save_local_template( $id, $title, $signers, $page, $file = null,$kind = 'pdf', $body = '', $sig_x = null, $sig_y = null, $layout = null ) {
+	public function save_local_template( $id, $title, $signers, $page, $file = null,$kind = 'pdf', $body = '', $sig_x = null, $sig_y = null, $layout = null, $blanks = null ) {
 		$title   = mb_substr( sanitize_text_field( (string) $title ), 0, 191 );
 		$signers = array_values( array_filter( array_map( static function ( $r ) {
 			return mb_substr( sanitize_text_field( (string) $r ), 0, 80 );
@@ -1162,6 +1163,9 @@ class AJCore_RA_Esign {
 		$meta['kind']    = $kind;
 		if ( null !== $layout ) {
 			$meta['layout'] = self::clean_layout( $layout );
+		}
+		if ( null !== $blanks ) {
+			$meta['blanks'] = self::clean_blanks( $blanks );
 		}
 		foreach ( array( 'sig_x' => $sig_x, 'sig_y' => $sig_y ) as $k => $val ) {
 			if ( null !== $val && '' !== $val ) {
@@ -1501,6 +1505,34 @@ class AJCore_RA_Esign {
 		}
 		$text = $this->merge_text( (string) $meta['body'], $values, $preview );
 		return self::build_text_pdf( (string) $meta['title'], $text, array() );
+	}
+
+	/** Sanitizes the blanks (suggested containers) saved with a form: page, fractional box, line|box. */
+	private static function clean_blanks( $raw ) {
+		if ( is_string( $raw ) ) {
+			$raw = json_decode( $raw, true );
+		}
+		$out = array();
+		foreach ( is_array( $raw ) ? $raw : array() as $b ) {
+			if ( ! is_array( $b ) ) {
+				continue;
+			}
+			$w     = min( 1, max( 0.004, (float) ( $b['w'] ?? 0 ) ) );
+			$h     = min( 1, max( 0.003, (float) ( $b['h'] ?? 0 ) ) );
+			$out[] = array(
+				'page' => max( 1, (int) ( $b['page'] ?? 1 ) ),
+				'x'    => max( 0, min( 1 - $w, (float) ( $b['x'] ?? 0 ) ) ),
+				'y'    => max( 0, min( 1 - $h, (float) ( $b['y'] ?? 0 ) ) ),
+				'w'    => $w,
+				'h'    => $h,
+				'kind' => 'box' === ( $b['kind'] ?? '' ) ? 'box' : 'line',
+				'label' => mb_substr( sanitize_text_field( (string) ( $b['label'] ?? '' ) ), 0, 60 ),
+			);
+			if ( count( $out ) >= 600 ) {
+				break;
+			}
+		}
+		return $out;
 	}
 
 	/** Sanitizes a field layout (array or JSON): type, signer party, page, fractional box, optional fill text. */
@@ -3078,7 +3110,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			$decoded = json_decode( $signers, true );
 			$signers = is_array( $decoded ) ? $decoded : array( $signers );
 		}
-		return $this->rest_result( $this->save_local_template( sanitize_text_field( (string) $request->get_param( 'id' ) ), (string) $request->get_param( 'title' ), (array) $signers, (int) $request->get_param( 'page' ), $files['pdf'] ?? null, (string) $request->get_param( 'kind' ), (string) $request->get_param( 'body' ),$request->get_param( 'sig_x' ), $request->get_param( 'sig_y' ), $request->get_param( 'layout' ) ) );
+		return $this->rest_result( $this->save_local_template( sanitize_text_field( (string) $request->get_param( 'id' ) ), (string) $request->get_param( 'title' ), (array) $signers, (int) $request->get_param( 'page' ), $files['pdf'] ?? null, (string) $request->get_param( 'kind' ), (string) $request->get_param( 'body' ),$request->get_param( 'sig_x' ), $request->get_param( 'sig_y' ), $request->get_param( 'layout' ), $request->get_param( 'blanks' ) ) );
 	}
 
 	public function rest_our_details() {
@@ -4075,7 +4107,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 				function setHost( html ) { if ( fieldEd ) { fieldEd.destroy(); fieldEd = null; } host.innerHTML = html; host.insertBefore( strip, host.firstChild ); }
 				function mountPdf( buf ) {
 					if ( fieldEd ) { fieldEd.destroy(); fieldEd = null; }
-					fieldEd = FE.mount( host, { pdfData: buf, pdfjsBase: pdfjsBase, fields: layout, signers: signerList, mergeFields: mergeFields, sideTop: strip, onChange: function ( f ) { layout = f; } } );
+					fieldEd = FE.mount( host, { pdfData: buf, pdfjsBase: pdfjsBase, fields: layout, blanks: t && t.blanks ? t.blanks : [], signers: signerList, mergeFields: mergeFields, sideTop: strip, onChange: function ( f ) { layout = f; } } );
 				}
 				function pdfPicker() {
 					setHost( '<div class="ajra-empty" style="text-align:left;margin-top:8px"><label>Choose the PDF (max 25 MB)</label><br><input type="file" id="ajra-es-t-file" accept="application/pdf,.pdf"></div>' );
@@ -4111,7 +4143,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 					var btn = this, fd = new FormData();
 					fd.append( 'id', t ? t.id : '' ); fd.append( 'title', q( 'ajra-es-t-title' ).value ); fd.append( 'kind', kind );
 					if ( 'doc' === kind ) { fd.append( 'signers', JSON.stringify( signerList ) ); fd.append( 'body', docEl ? docEl.innerHTML : '' ); }
-					else { fd.append( 'signers', JSON.stringify( fieldEd ? fieldEd.getSigners() : signerList ) ); fd.append( 'layout', JSON.stringify( fieldEd ? fieldEd.getFields() : layout ) ); if ( newFile ) { fd.append( 'pdf', newFile ); } }
+					else { fd.append( 'signers', JSON.stringify( fieldEd ? fieldEd.getSigners() : signerList ) ); fd.append( 'layout', JSON.stringify( fieldEd ? fieldEd.getFields() : layout ) ); fd.append( 'blanks', JSON.stringify( fieldEd ? fieldEd.getBlanks() : ( t && t.blanks ? t.blanks : [] ) ) ); if ( newFile ) { fd.append( 'pdf', newFile ); } }
 					btn.disabled = true; err.style.display = 'none';
 					api( '/templates/save', { method: 'POST', body: fd } ).then( function ( saved ) { rememberTpl( saved && saved.id ? saved.id : '' ); window.location.reload(); } )
 						.catch( function ( e ) { err.style.display = 'block'; err.textContent = e.message; btn.disabled = false; } );

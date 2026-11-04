@@ -12,7 +12,8 @@
  *     sideTop:     HTMLElement,                 // optional: shown at the top of the right panel (template settings)
  *     lockSigners: true,                        // optional: hide Add/Remove signer (the host's signer rows decide)
  *     resolveValues: function () -> Promise<{token: value}|null>  // optional: enables the "Preview with values" checkbox (null = no customer yet)
- *     previewDefault: true                      // optional: start with the preview on
+ *     previewDefault: true,                     // optional: start with the preview on
+ *     blanks:      [ {page,x,y,w,h,kind} ]       // optional: suggested containers saved with a form (kind = line | box); read back with getBlanks()
 *   });  ed.getFields(); ed.setSigners( [ … ] ); ed.destroy();
  *   AJEsignFieldEditor.open( opts + onSave / onCancel )   // same editor in a full-screen dialog
  *
@@ -43,7 +44,7 @@
 		'.ajfe-wrap{position:relative;display:inline-block;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.25);text-align:left}' +
 		'.ajfe-wrap canvas{display:block}.ajfe-layer{position:absolute;inset:0}.ajfe-layer.tool{cursor:crosshair}.ajfe-layer.pv .ajfe-box{box-shadow:none}.ajfe-layer.drop{outline:3px dashed #4f46e5;outline-offset:-3px}' +
 		'.ajfe-box{position:absolute;box-sizing:border-box;border:1.5px solid;border-radius:3px;font-size:10px;line-height:1.1;overflow:hidden;cursor:move;user-select:none;touch-action:none;display:flex;align-items:center;padding:0 3px;white-space:nowrap}' +
-		'.ajfe-box.sel{box-shadow:0 0 0 2px rgba(15,23,42,.55);z-index:2}' +
+		'.ajfe-box{z-index:3}.ajfe-box.sel{box-shadow:0 0 0 2px rgba(15,23,42,.55);z-index:4}.ajfe-blank{position:absolute;box-sizing:border-box;border:1.5px dashed #94a3b8;background:rgba(148,163,184,.12);border-radius:3px;cursor:pointer;z-index:1}.ajfe-blank:hover{border-color:#475569}.ajfe-blank.sel{border:2px solid #0f172a;background:rgba(15,23,42,.14);z-index:2}.ajfe-bar2{display:none;flex-wrap:wrap;gap:6px;align-items:center;padding:5px 8px;border-bottom:1px solid #e2e8f0;background:#fffbeb;font-size:12px}.ajfe-bar2 button{height:26px!important;padding:0 8px!important;border:1px solid #cbd5e1;border-radius:6px;background:#fff;font:inherit;font-weight:600;cursor:pointer}.ajfe-bar2 .dng{color:#b91c1c}.ajfe-layer:focus{outline:none}.ajfe-assign{display:none;padding:8px;border-bottom:1px solid #e2e8f0;background:#f8fafc;font-size:12px}.ajfe-assign button{height:26px;padding:0 8px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;font:inherit;font-weight:600;cursor:pointer}.ajfe-assign button:disabled{opacity:.5;cursor:default}' +
 		'.ajfe-box .rz{position:absolute;right:0;bottom:0;width:9px;height:9px;background:currentColor;cursor:nwse-resize;opacity:.8}' +
 		'.ajfe-box i{font-style:italic;opacity:.8;margin-left:4px;overflow:hidden;text-overflow:ellipsis}' +
 		'.ajfe-ov{position:fixed;inset:0;z-index:100000;background:rgba(15,23,42,.6);display:flex;padding:14px}' +
@@ -51,6 +52,10 @@
 		'.ajfe-pn .ajfe-root{padding:12px;flex:1;overflow:auto}.ajfe-pn .ajfe-stage{height:calc(100vh - 190px)}.ajfe-pn .ajfe-side{position:static}' +
 		'.ajfe-top{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid #e2e8f0}.ajfe-top .sp{flex:1}' +
 		'.ajfe-top button{height:30px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;padding:0 12px;font:inherit;font-weight:600;cursor:pointer}.ajfe-top .pri{background:#4f46e5;border-color:#4f46e5;color:#fff}' +
+		'.ajfe-body{display:flex;min-width:0}.ajfe-body .ajfe-stage{flex:1;min-width:0}.ajfe-left{display:none;width:210px;flex:none;border-right:1px solid #e2e8f0;background:#fff;overflow:auto;height:calc(100vh - 230px);min-height:520px;font-size:12px}.ajfe-pn .ajfe-left{height:calc(100vh - 190px)}' +
+		'.ajfe-left button{height:24px;padding:0 7px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;font:inherit;font-weight:600;cursor:pointer}.ajfe-left button:disabled{opacity:.45;cursor:default}.ajfe-left .dng{color:#b91c1c}' +
+		'.ajfe-brow{display:flex;gap:6px;align-items:center;padding:4px 8px;cursor:pointer;border-bottom:1px solid #f1f5f9}.ajfe-brow:hover{background:#f8fafc}.ajfe-brow.sel{background:#eef2ff}.ajfe-brow.multi{background:#fee2e2}.ajfe-brow input{width:auto!important;height:auto!important;margin:0}.ajfe-brow span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+		'.ajfe-blank.multi{border:2px solid #dc2626;background:rgba(220,38,38,.16)}.ajfe-bl{position:absolute;top:-15px;left:0;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:10px/14px system-ui,sans-serif;color:#0f172a;background:#fff;border:1px solid #cbd5e1;border-radius:3px;padding:0 4px;pointer-events:none}.ajfe-rb{position:absolute;border:1.5px dashed #dc2626;background:rgba(220,38,38,.1);pointer-events:none;z-index:6}' +
 		'@media(max-width:900px){.ajfe-root{flex-direction:column}.ajfe-side{width:auto;align-self:stretch}}';
 
 	function el( tag, attrs, kids ) {
@@ -62,12 +67,29 @@
 		return n;
 	}
 	function round( n ) { return Math.round( n * 10000 ) / 10000; }
-	// Default size (pt) of the text box a customer / company field drops as: names 180, addresses 260, dates 90.
+	// Width (pt) of some text set in Times 11 pt, the size it is stamped at, plus a little padding.
+	var measureCtx = null;
+	function fitW( text ) {
+		measureCtx = measureCtx || document.createElement( 'canvas' ).getContext( '2d' );
+		measureCtx.font = '11px "Times New Roman", Times, serif';
+		return Math.max( 30, Math.min( 330, Math.ceil( measureCtx.measureText( String( text || '' ) ).width ) + 8 ) );
+	}
+	// Default size (pt) of the text box a variable drops as, by what it holds: a ZIP is short, a county medium, an address long.
 	function tokenSize( tok ) {
 		var t = String( tok || '' ).toLowerCase();
+		if ( /csz/.test( t ) ) { return [ 170, 14 ]; }
 		if ( /address|street/.test( t ) ) { return [ 260, 14 ]; }
-		if ( /(^|\.|_)name$|individual_name|business_name/.test( t ) || '__ask' === t ) { return [ 180, 14 ]; }
+		if ( /zip|postal/.test( t ) ) { return [ 52, 14 ]; }
+		if ( /(^|[._])state$/.test( t ) ) { return [ 30, 14 ]; }
+		if ( /county/.test( t ) ) { return [ 95, 14 ]; }
+		if ( /city/.test( t ) ) { return [ 115, 14 ]; }
+		if ( /phone/.test( t ) ) { return [ 105, 14 ]; }
+		if ( /email/.test( t ) ) { return [ 175, 14 ]; }
+		if ( /number|pmb|year2|date\.day/.test( t ) ) { return [ 60, 14 ]; }
+		if ( /date\.year/.test( t ) ) { return [ 44, 14 ]; }
+		if ( /date\.month/.test( t ) ) { return [ 80, 14 ]; }
 		if ( 0 === t.indexOf( 'date' ) ) { return [ 90, 14 ]; }
+		if ( /(^|[._])name$|individual_name|business_name/.test( t ) || '__ask' === t || 0 === t.indexOf( 'ask.' ) ) { return [ 180, 14 ]; }
 		return [ 160, 14 ];
 	}
 function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: round( f.x ), y: round( f.y ), w: round( f.w ), h: round( f.h ), fill: f.fill || '', checked: !! f.checked }; }
@@ -88,26 +110,37 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 		var merge = opts.mergeFields || {};
 		( opts.fields || [] ).forEach( function ( f ) { while ( signers.length < f.party ) { signers.push( 'Signer ' + ( signers.length + 1 ) ); } } );
 		var previewMode = !! ( opts.previewDefault && opts.resolveValues ), values = null;
+		var blanks = ( opts.blanks || [] ).map( function ( b ) { return { page: b.page, x: b.x, y: b.y, w: b.w, h: b.h,kind: 'box' === b.kind ? 'box' : 'line', label: b.label || '' }; } ), selBlank = null, pendingScroll = false, multi = [], undoStack = []; // blanks: suggested containers from Auto-detect (not saved, never sent)
 		var pdf = null, pageNo = 1, pageW = 612, pageH = 792, tool = '', sel = null, rendering = false, dead = false;
 
 		host.innerHTML = '';
 		var root = el( 'div', { cls: 'ajfe-root' } ), main = el( 'div', { cls: 'ajfe-main' } ), side = el( 'div', { cls: 'ajfe-side' } );
 		var bar = el( 'div', { cls: 'ajfe-bar' } ), stage = el( 'div', { cls: 'ajfe-stage' } ), wrap = el( 'div', { cls: 'ajfe-wrap' } );
-		var canvas = el( 'canvas' ), layer = el( 'div', { cls: 'ajfe-layer' } );
-		wrap.appendChild( canvas ); wrap.appendChild( layer ); stage.appendChild( wrap );
-		main.appendChild( bar ); main.appendChild( stage ); root.appendChild( main ); root.appendChild( side ); host.appendChild( root );
+var canvas = el( 'canvas' ), layer = el( 'div', { cls: 'ajfe-layer' } ); layer.tabIndex = 0;
+		wrap.appendChild( canvas );wrap.appendChild( layer ); stage.appendChild( wrap );
+		var leftList = el( 'div', { cls: 'ajfe-left' } ), pbody = el( 'div', { cls: 'ajfe-body' } ); pbody.appendChild( leftList ); pbody.appendChild( stage );
+var bar2 = el( 'div', { cls: 'ajfe-bar2' } ); main.appendChild( bar );main.appendChild( bar2 ); main.appendChild( pbody ); root.appendChild( main ); root.appendChild( side ); host.appendChild( root );
 
-		function changed() { if ( opts.onChange ) { opts.onChange( fields.map( clean ) ); } }
+function changed() { if ( opts.onChange ) { opts.onChange( fields.map( clean ), blanks ); } }
 		function onKey( e ) {
 			var tag = ( e.target && e.target.tagName ) || '';
-			if ( 'Escape' === e.key ) { if ( tool ) { setTool( '' ); } return; }
+			if ( 'Escape' === e.key ) { if ( tool ) { setTool( '' ); } else if ( selBlank ) { selBlank = null; paint(); renderBlankBar(); } return; }
+			if ( ( 'z' === e.key || 'Z' === e.key ) && ( e.ctrlKey || e.metaKey ) && undoStack.length && ! /INPUT|SELECT|TEXTAREA/.test( tag ) && host.contains( document.activeElement ) ) { e.preventDefault(); undoDelete(); return; }
+			if ( ( selBlank || multi.length ) && ! /INPUT|SELECT|TEXTAREA/.test( tag ) && ! e.target.isContentEditable && host.contains( document.activeElement ) ) {
+				if ( ( 'Delete' === e.key || 'Backspace' === e.key ) && multi.length > 1 ) { e.preventDefault(); deleteBlanks( multi.slice() ); return; }
+				if ( ! selBlank ) { return; }
+				if ( 'Delete' === e.key || 'Backspace' === e.key ) { e.preventDefault(); removeBlank( selBlank ); return; }
+				if ( 'ArrowRight' === e.key || 'ArrowDown' === e.key ) { e.preventDefault(); stepBlank( 1 ); return; }
+				if ( 'ArrowLeft' === e.key || 'ArrowUp' === e.key ) { e.preventDefault(); stepBlank( -1 ); return; }
+				if ( 'Enter' === e.key || 't' === e.key.toLowerCase() ) { e.preventDefault(); makeField( selBlank ); return; }
+			}
 			if ( ( 'Delete' === e.key || 'Backspace' === e.key ) && sel && ! /INPUT|SELECT|TEXTAREA/.test( tag ) && ! e.target.isContentEditable && host.contains( document.activeElement ) ) { e.preventDefault(); removeSel(); }
 		}
 		document.addEventListener( 'keydown', onKey );
 
 		// ── toolbar (above the page) ─────────────────────────────────────────────
 		var prev = el( 'button', { text: '◀', title: 'Previous page' } ), next = el( 'button', { text: '▶', title: 'Next page' } ), pgLabel = el( 'span', { text: 'Page 1' } );
-		var detect = el( 'button', { text: 'Auto-detect', title: 'Suggest text and checkbox fields from underscores, lines and squares (blanks)' } );
+		var detect = el( 'button', { text: 'Auto-detect', title: 'Mark the blanks (lines and boxes) on the page. They are only containers: drop a field on one to fill it.' } );
 		var clearPg = el( 'button', { text: 'Clear page', cls: 'dng' } ), count = el( 'span', { cls: 'ajfe-hint' } );
 		var partySel = el( 'select', { title: 'Signer for new fields — and for the selected field' } ), addSg = el( 'button', { text: '+ Signer', title: 'Another person who signs this document' } ), rmSg = el( 'button', { text: '−', title: 'Remove the last signer' } );
 		partySel.style.maxWidth = '180px';
@@ -136,7 +169,7 @@ function clean( f ) { return { type: f.type, party: f.party, page: f.page, x: ro
 			document.body.appendChild( g );
 			try { e.dataTransfer.setDragImage( g, wpt * sc / 2, hpt * sc / 2 ); } catch ( err ) { /* browser default */ }
 			setTimeout( function () { g.remove(); }, 0 );
-			dragging = { w: wpt, h: hpt };
+dragging = { w: wpt, h: hpt, type: isBox ? 'checkbox' : 'text' };
 		}
 		var fieldsSec = section( 'Fields — drag onto the page', true );
 		var searchAll = el( 'input', { type: 'search', placeholder: 'Search fields…' } );
@@ -173,7 +206,7 @@ grpA.appendChild( groupLabel( 'Signer fills in' ) ); grpA.appendChild( palA );
 			var g = groups[ groupOf( m[0] ) ], shown = String( m[1] ).replace( /^(Customer|Business|Our company|Mailbox|Signer 1|Asked) — /, '' );
 			var c = el( 'button', { cls: 'ajfe-chip', draggable: 'true', title: '__ask' === m[0] ? 'A value you type in each time you send' : '{{' + m[0] + '}}' } );
 			c.appendChild( el( 'span', { text: shown } ) ); c.setAttribute( 'data-label', String( m[1] ).toLowerCase() + ' ' + m[0].toLowerCase() + ' ' + g.def[1].toLowerCase() );
-			c.addEventListener( 'dragstart', function ( e ) { var sz = tokenSize( m[0] ); e.dataTransfer.setData( 'text/plain', 'ajfe:merge:' + m[0] ); e.dataTransfer.effectAllowed = 'copy'; ghost( e, sz[0], sz[1], shown, false ); } );
+c.addEventListener( 'dragstart', function ( e ) { var sz = mergeSize( m[0] ); e.dataTransfer.setData( 'text/plain', 'ajfe:merge:' + m[0] ); e.dataTransfer.effectAllowed = 'copy'; ghost( e, sz[0], sz[1], shown, false ); } );
 			c.addEventListener( 'dragend', function () { dragging = null; hideHint(); } );
 			c.addEventListener( 'click', function () { setTool( tool === 'merge:' + m[0] ? '' : 'merge:' + m[0] ); } );
 			mChips[ m[0] ] = c; g.list.appendChild( c ); g.n++;
@@ -239,7 +272,7 @@ TYPES.forEach( function ( t ) { if ( ! chips[ t[0] ] && t[0] !== sel.type ) { re
 			if ( 'signature' !== sel.type && 'initials' !== sel.type && 'checkbox' !== sel.type ) {
 insp.appendChild( el( 'h4', { text: 'label' === sel.type ? 'Text to print' : 'Fill with' } ) );
 				var fill = el( 'input', { type: 'text', placeholder: 'label' === sel.type ? 'Type text, or insert a variable below' : 'empty = signer fills in', value: sel.fill || '' } );
-				fill.addEventListener( 'input', function () { sel.fill = fill.value; paint(); changed(); } );
+fill.addEventListener( 'input', function () { sel.fill = fill.value; if ( 'label' === sel.type && ! sel.manualW && ! /\{\{/.test( fill.value ) ) { sel.w = Math.min( 1 - sel.x, fitW( fill.value || 'Label' ) / pageW ); } paint(); changed(); } );
 				function insertToken( k ) {
 					var add = '{{' + k + '}}';
 					if ( '__ask' === k ) {
@@ -263,6 +296,15 @@ insp.appendChild( el( 'h4', { text: 'label' === sel.type ? 'Text to print' : 'Fi
 				} );
 				fill.style.marginBottom = '6px'; insp.appendChild( fill ); insp.appendChild( pick ); insp.appendChild( found );
 			}
+			if ( 'signature' !== sel.type && 'initials' !== sel.type && 'checkbox' !== sel.type ) {
+				var fit = el( 'button', { text: 'Fit width to text', title: 'Make this box as wide as its text' } ); fit.style.marginTop = '4px';
+				fit.addEventListener( 'click', function () {
+					var txt = previewMode && values ? resolveText( sel.fill ).trim() : '', w;
+					if ( txt ) { w = fitW( txt ); } else { var m = /\{\{\s*([a-z0-9_.]+)\s*\}\}/i.exec( sel.fill || '' ); w = m ? mergeSize( m[1].toLowerCase() )[0] : fitW( sel.fill || 'Text' ); }
+					sel.w = Math.min( 1 - sel.x, w / pageW ); paint(); changed();
+				} );
+				insp.appendChild( fit );
+			}
 			var del = el( 'button', { text: 'Delete field', cls: 'dng' } ); del.style.marginTop = '6px'; del.addEventListener( 'click', removeSel ); insp.appendChild( del );
 		}
 		function removeSel() { if ( ! sel ) { return; } fields.splice( fields.indexOf( sel ), 1 ); sel = null; paint(); renderInsp(); changed(); }
@@ -276,8 +318,160 @@ insp.appendChild( el( 'h4', { text: 'label' === sel.type ? 'Text to print' : 'Fi
 Promise.resolve( opts.resolveValues() ).then( function ( v ) { values = v || null; paint(); } ).catch( function () { values = null; paint(); } );
 		}
 		function resolveText( t ) { return String( t || '' ).replace( /\{\{\s*([a-z0-9_.]+)\s*\}\}/gi, function ( m, k ) { var v = values[ k.toLowerCase() ]; return v === undefined || v === null ? '' : String( v ); } ); }
+		// ── blanks: containers found by Auto-detect. Review them, delete the wrong ones, drop a field on a blank to fill it. ──
+		function compat( kind, type ) { return 'box' === kind ? 'checkbox' === type : 'checkbox' !== type; }
+		function sortBlanks() { blanks.sort( function ( a, b ) { return a.page - b.page || ( Math.abs( a.y - b.y ) > 0.008 ? a.y - b.y : a.x - b.x ); } ); }
+		function blankAtPoint( cx, cy, type ) {
+			var r = layer.getBoundingClientRect(), px = ( cx - r.left ) / r.width, py = ( cy - r.top ) / r.height, mx = 4 / r.width, my = 4 / r.height, hit = null;
+			blanks.forEach( function ( bk ) { if ( bk.page === pageNo && compat( bk.kind, type ) && px >= bk.x - mx && px <= bk.x + bk.w + mx && py >= bk.y - my && py <= bk.y + bk.h + my ) { hit = bk; } } );
+			return hit;
+		}
+		function scrollToBlank() {
+			var d = layer.querySelector( '.ajfe-blank.sel' ); if ( ! d ) { return; }
+			var top = d.getBoundingClientRect().top - stage.getBoundingClientRect().top + stage.scrollTop;
+			if ( top < stage.scrollTop + 40 || top > stage.scrollTop + stage.clientHeight - 90 ) { stage.scrollTop = Math.max( 0, top - stage.clientHeight / 3 ); }
+		}
+		function selectBlank( b ) {
+			selBlank = b; sel = b ? null : sel; renderInsp();
+			if ( b && b.page !== pageNo ) { pendingScroll = true; showPage( b.page ); } else { paint(); scrollToBlank(); }
+			renderBlankBar();
+		}
+		function stepBlank( d ) {
+			if ( ! blanks.length ) { return; } sortBlanks();
+			var i = selBlank ? blanks.indexOf( selBlank ) : ( d > 0 ? -1 : 0 );
+			selectBlank( blanks[ ( i + d + blanks.length ) % blanks.length ] );
+		}
+function inMulti( b ) { return multi.indexOf( b ) >= 0; }
+		function toggleMulti( b ) { var i = multi.indexOf( b ); if ( i >= 0 ) { multi.splice( i, 1 ); } else { multi.push( b ); } }
+		// Deleting is undoable (Ctrl/Cmd+Z or the Undo button).
+		function deleteBlanks( list ) {
+			if ( ! list.length ) { return; }
+			undoStack.push( list.slice() );
+			list.forEach( function ( b ) { var i = blanks.indexOf( b ); if ( i >= 0 ) { blanks.splice( i, 1 ); } } );
+			multi = multi.filter( function ( b ) { return blanks.indexOf( b ) >= 0; } );
+			if ( selBlank && blanks.indexOf( selBlank ) < 0 ) { selBlank = blanks[ 0 ] || null; }
+			changed(); paint(); renderBlankBar();
+		}
+		function undoDelete() { var l = undoStack.pop(); if ( ! l ) { return; } l.forEach( function ( b ) { blanks.push( b ); } ); sortBlanks(); paint(); renderBlankBar(); changed(); }
+function dropBlank( b ) { var i = blanks.indexOf( b ); if ( i >= 0 ) { blanks.splice( i, 1 ); multi = multi.filter( function ( x ) { return x !== b; } ); changed(); } if ( selBlank === b ) { selBlank = blanks.length ? blanks[ Math.min( i, blanks.length - 1 ) ] : null; } return i; }
+function removeBlank( b ) { var i = blanks.indexOf( b ); deleteBlanks( [ b ] ); if ( blanks.length ) { selectBlank( blanks[ Math.min( Math.max( i, 0 ), blanks.length - 1 ) ] ); } }
+function removeKind( kind ) { deleteBlanks( blanks.filter( function ( b ) { return b.kind === kind; } ) ); }
+		function makeField( b ) {
+			var type = 'box' === b.kind ? 'checkbox' : 'text';
+			dropBlank( b );
+			var f = { type: type, party: parseInt( partySel.value, 10 ) || 1, page: b.page, x: b.x, y: b.y, w: b.w, h: b.h, fill: '', checked: false };
+			fields.push( f ); sel = f; selBlank = blanks.length ? selBlank : null; paint(); renderInsp(); renderBlankBar(); changed();
+		}
+		// Assign…: queue variables, then fill blanks in reading order — or one whole row (left to right) — in one go.
+		var assignBox = el( 'div', { cls: 'ajfe-assign' } ), seq = [], rowOnly = true, assignOpen = false;
+main.insertBefore( assignBox, pbody );
+		function seqLabel( q ) { return '__skip' === q.tok ? 'skip a blank' : '__tick' === q.tok ? '☑ checked box' : '__box' === q.tok ? '☐ empty box' : String( merge[ q.tok ] || q.tok ).replace( /^(Customer|Business|Our company|Mailbox|Signer 1|Asked) — /, '' ); }
+		function renderAssign() {
+			assignBox.innerHTML = ''; assignBox.style.display = assignOpen && blanks.length ? 'block' : 'none';
+			if ( ! assignOpen ) { return; }
+			var head = el( 'div' ); head.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px';
+			head.appendChild( el( 'strong', { text: 'Assign in order' } ) );
+			var rl = el( 'label' ), rc = el( 'input', { type: 'checkbox' } ); rl.style.cssText = 'display:inline-flex;align-items:center;gap:4px;cursor:pointer'; rc.style.cssText = 'width:auto;height:auto'; rc.checked = rowOnly;
+			rl.appendChild( rc ); rl.appendChild( document.createTextNode( 'only the selected blank\'s row' ) ); rc.addEventListener( 'change', function () { rowOnly = rc.checked; } ); head.appendChild( rl );
+			var go = el( 'button', { text: 'Apply (' + seq.length + ')' } ), cl = el( 'button', { text: 'Close' } ); go.disabled = ! seq.length;
+			go.addEventListener( 'click', applySeq ); cl.addEventListener( 'click', function () { assignOpen = false; renderAssign(); } ); head.appendChild( go ); head.appendChild( cl );
+			assignBox.appendChild( head );
+			var chipsRow = el( 'div' ); chipsRow.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px';
+			if ( ! seq.length ) { chipsRow.appendChild( el( 'span', { cls: 'ajfe-hint', text: 'Pick variables below in the order they should fill the blanks (left to right, then down). Use “skip” to leave one.' } ) ); }
+			seq.forEach( function ( q, i ) { var ch = el( 'button', { text: ( i + 1 ) + '. ' + seqLabel( q ) + ' ✕', title: 'Remove' } ); ch.addEventListener( 'click', function () { seq.splice( i, 1 ); renderAssign(); } ); chipsRow.appendChild( ch ); } );
+			assignBox.appendChild( chipsRow );
+			var q = el( 'input', { type: 'search', placeholder: 'Search variables to add…' } ), res = el( 'div' ); q.style.cssText = 'width:100%;max-width:340px;height:28px;border:1px solid #cbd5e1;border-radius:6px;padding:0 8px'; res.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-top:6px';
+			function fillRes() {
+				res.innerHTML = ''; var term = q.value.toLowerCase().trim(), n = 0;
+				[ [ '__skip', 'skip a blank' ], [ '__tick', '☑ checked box' ], [ '__box', '☐ empty box' ], [ '__ask', 'Ask when sending…' ] ].concat( Object.keys( merge ).map( function ( k ) { return [ k, merge[ k ] ]; } ) ).forEach( function ( m ) {
+					if ( n >= 14 || ( term && m[1].toLowerCase().indexOf( term ) < 0 && m[0].toLowerCase().indexOf( term ) < 0 ) ) { return; }
+					if ( ! term && n >= 8 ) { return; }
+					n++; var b = el( 'button', { text: '+ ' + String( m[1] ).replace( /^(Customer|Business|Our company|Mailbox|Signer 1|Asked) — /, '' ) } );
+					b.addEventListener( 'click', function () {
+						if ( '__ask' === m[0] ) { var nm = window.prompt( 'Name of the value to ask for when sending (e.g. LLC name)' ), slug = ( nm || '' ).toLowerCase().replace( /[^a-z0-9]+/g, '_' ).replace( /^_+|_+$/g, '' ); if ( ! slug ) { return; } seq.push( { tok: 'ask.' + slug, fill: '{{ask.' + slug + '}}' } ); }
+						else { seq.push( { tok: m[0], fill: m[0].indexOf( '__' ) === 0 ? '' : '{{' + m[0] + '}}' } ); }
+						renderAssign();
+					} );
+					res.appendChild( b );
+				} );
+			}
+			q.addEventListener( 'input', fillRes ); fillRes(); assignBox.appendChild( q ); assignBox.appendChild( res );
+		}
+		function applySeq() {
+			if ( ! blanks.length || ! seq.length ) { return; }
+			sortBlanks();
+			var start = selBlank || blanks[ 0 ], pool;
+			if ( rowOnly ) { pool = blanks.filter( function ( b ) { return b.page === start.page && Math.abs( b.y - start.y ) < 0.012; } ).sort( function ( a, b ) { return a.x - b.x; } ); }
+			else { pool = blanks.slice( blanks.indexOf( start ) ); }
+			var made = 0;
+			seq.forEach( function ( q ) {
+				var box = '__tick' === q.tok || '__box' === q.tok, i = -1, k;
+				for ( k = 0; k < pool.length; k++ ) { if ( ( box && 'box' === pool[ k ].kind ) || ( ! box && 'line' === pool[ k ].kind ) ) { i = k; break; } }
+				if ( i < 0 ) { return; }
+				var b = pool.splice( i, 1 )[ 0 ];
+				if ( '__skip' === q.tok ) { return; } // consumed from the queue, the blank itself stays
+				var f = { type: box ? 'checkbox' : 'text', party: parseInt( partySel.value, 10 ) || 1, page: b.page, x: b.x, y: b.y, w: b.w, h: b.h, fill: box ? '' : q.fill, checked: '__tick' === q.tok };
+				blanks.splice( blanks.indexOf( b ), 1 ); fields.push( f ); made++;
+			} );
+seq = []; multi = []; selBlank = blanks.length ? blanks[ 0 ] : null; sel = null;
+			paint(); renderInsp(); renderBlankBar(); renderAssign(); changed();
+			if ( made ) { updateCount(); }
+		}
+		function renderBlankList() {
+			leftList.innerHTML = '';
+			if ( ! blanks.length ) { leftList.style.display = 'none'; return; }
+			leftList.style.display = 'block'; sortBlanks();
+			var head = el( 'div' ); head.style.cssText = 'position:sticky;top:0;z-index:2;background:#fff;padding:6px 8px;border-bottom:1px solid #e2e8f0;display:flex;gap:5px;align-items:center;flex-wrap:wrap';
+			head.appendChild( el( 'strong', { text: 'Blanks (' + blanks.length + ')' } ) );
+			var all = el( 'button', { text: multi.length === blanks.length ? 'None' : 'All', title: 'Tick all / none' } ), del = el( 'button', { text: 'Delete (' + multi.length + ')', cls: 'dng', title: 'Delete the ticked blanks' } ); del.disabled = ! multi.length;
+			all.addEventListener( 'click', function () { multi = multi.length === blanks.length ? [] : blanks.slice(); paint(); renderBlankBar(); } );
+			del.addEventListener( 'click', function () { deleteBlanks( multi.slice() ); } );
+			head.appendChild( all ); head.appendChild( del ); leftList.appendChild( head );
+			var selRow = null;
+			blanks.forEach( function ( b ) {
+				var row = el( 'div', { cls: 'ajfe-brow' + ( b === selBlank ? ' sel' : '' ) + ( inMulti( b ) ? ' multi' : '' ), title: 'Click to jump · double-click to rename' } ), cb = el( 'input', { type: 'checkbox' } );
+				cb.checked = inMulti( b );
+				cb.addEventListener( 'click', function ( e ) { e.stopPropagation(); } );
+				cb.addEventListener( 'change', function () { toggleMulti( b ); paint(); renderBlankBar(); } );
+				row.appendChild( cb ); row.appendChild( el( 'span', { text: 'p' + b.page + ' · ' + ( 'box' === b.kind ? '☐ ' : '' ) + ( b.label || ( 'box' === b.kind ? 'Box' : 'Blank' ) ) } ) );
+				row.addEventListener( 'click', function ( e ) { if ( e.shiftKey || e.ctrlKey || e.metaKey ) { toggleMulti( b ); selBlank = b; paint(); renderBlankBar(); } else { multi = []; selectBlank( b ); } layer.focus( { preventScroll: true } ); } );
+				row.addEventListener( 'dblclick', function () { var nl = window.prompt( 'Label for this blank', b.label || '' ); if ( null !== nl ) { b.label = nl.trim().slice( 0, 60 ); changed(); paint(); renderBlankList(); } } );
+				if ( b === selBlank ) { selRow = row; }
+				leftList.appendChild( row );
+			} );
+			if ( selRow ) { selRow.scrollIntoView( { block: 'nearest' } ); }
+		}
+		function renderBlankBar() {
+			renderBlankList();
+			bar2.innerHTML = '';
+			if ( ! blanks.length ) { bar2.style.display = 'none'; assignBox.style.display = 'none'; return; }
+			bar2.style.display = 'flex'; sortBlanks();
+			var lines = blanks.filter( function ( b ) { return 'line' === b.kind; } ).length, boxes = blanks.length - lines, idx = selBlank ? blanks.indexOf( selBlank ) + 1 : 0;
+			function btn( text, fn, cls, title ) { var b = el( 'button', { text: text, cls: cls || '', title: title || '' } ); b.addEventListener( 'click', function () { fn(); layer.focus( { preventScroll: true } ); } ); bar2.appendChild( b ); return b; }
+			bar2.appendChild( el( 'strong', { text: 'Blanks ' + ( idx ? idx + ' / ' : '' ) + blanks.length } ) );
+			btn( '◀', function () { stepBlank( -1 ); }, '', 'Previous (←)' ); btn( '▶', function () { stepBlank( 1 ); }, '', 'Next (→)' );
+			if ( multi.length > 1 ) { btn( 'Delete ' + multi.length + ' selected', function () { deleteBlanks( multi.slice() ); }, 'dng', 'Delete key' ); }
+			if ( undoStack.length ) { btn( 'Undo', undoDelete, '', 'Ctrl/Cmd+Z' ); }
+			if ( selBlank && multi.length < 2 ) {
+				btn( 'Remove', function () { removeBlank( selBlank ); }, 'dng', 'Delete key' );
+				btn( 'box' === selBlank.kind ? 'Make checkbox' : 'Make text field', function () { makeField( selBlank ); }, '', 'Enter or T' );
+			}
+			if ( boxes ) { btn( 'Remove all ☐ (' + boxes + ')', function () { removeKind( 'box' ); }, 'dng', 'Remove every checkbox-shaped blank' ); }
+			if ( lines ) { btn( 'Remove all lines (' + lines + ')', function () { removeKind( 'line' ); }, 'dng', 'Remove every underline-shaped blank' ); }
+			btn( 'Assign…', function () { assignOpen = ! assignOpen; renderAssign(); }, '', 'Fill blanks in order, or a whole row, with a queue of variables' );
+btn( 'Clear', function () { deleteBlanks( blanks.slice() ); }, 'dng', 'Remove all blanks (Undo brings them back)' );
+			bar2.appendChild( el( 'span', { cls: 'ajfe-hint', text:'← → step · Del remove · Shift-click or drag a rectangle to select several · drag a field onto a blank to fill it' } ) );
+		}
+		function placeTool( cx, cy ) { if ( 0 === tool.indexOf( 'merge:' ) ) { dropMerge( tool.slice( 6 ), cx, cy ); } else { dropAt( tool, cx, cy ); } }
 		function paint() {
 			layer.innerHTML = '';
+			blanks.forEach( function ( bk ) {
+				if ( bk.page !== pageNo ) { return; }
+var d = el( 'div', { cls: 'ajfe-blank' + ( bk === selBlank ? ' sel' : '' ) + ( inMulti( bk ) ? ' multi' : '' ) } ); if ( bk.label ) { d.title = bk.label; if ( bk === selBlank ) { d.appendChild( el( 'span', { cls: 'ajfe-bl', text: bk.label } ) ); } }
+				d.style.cssText = 'left:' + bk.x * 100 + '%;top:' + bk.y * 100 + '%;width:' + bk.w * 100 + '%;height:' + bk.h * 100 + '%';
+				d.addEventListener( 'pointerdown', function ( e ) { e.stopPropagation(); e.preventDefault(); layer.focus( { preventScroll: true } );if ( tool ) { placeTool( e.clientX, e.clientY ); } else if ( e.shiftKey || e.ctrlKey || e.metaKey ) { if ( selBlank && ! inMulti( selBlank ) ) { multi.push( selBlank ); } toggleMulti( bk ); selBlank = bk; sel = null; paint(); renderBlankBar(); } else { multi = []; selectBlank( bk ); } } );
+				layer.appendChild( d );
+			} );
 			fields.forEach( function ( f ) {
 				if ( f.page !== pageNo ) { return; }
 				var c = color( f.party ), b = el( 'div', { cls: 'ajfe-box' + ( f === sel ? ' sel' : '' ) } );
@@ -312,12 +506,13 @@ if ( f.fill && 'checkbox' !== f.type && 'label' !== f.type ) { b.appendChild( el
 				b.addEventListener( 'pointerdown', function ( e ) {
 					e.stopPropagation(); e.preventDefault();
 						var resizing = e.target === rz, sx = e.clientX, sy = e.clientY, ox = f.x, oy = f.y, ow = f.w, oh = f.h, W = wrap.clientWidth, H = wrap.clientHeight, moved = false, wasSel = sel === f;
+layer.focus( { preventScroll: true } ); if ( selBlank ) { selBlank = null; renderBlankBar(); }
 						if ( sel !== f ) { sel = f; renderInsp(); syncSignerSel(); layer.querySelectorAll( '.sel' ).forEach( function ( n ) { n.classList.remove( 'sel' ); } ); b.classList.add( 'sel' ); }
 					function mv( ev ) {
 						if ( ! moved && Math.abs( ev.clientX - sx ) + Math.abs( ev.clientY - sy ) < 3 ) { return; } // a click, not a drag
 						var dx = ( ev.clientX - sx ) / W, dy = ( ev.clientY - sy ) / H; moved = true;
 						if ( resizing && 'checkbox' === f.type ) { f.w = Math.max( 0.012, Math.min( 1 - f.x, ow + dx ) ); f.h = Math.min( 1 - f.y, f.w * pageW / pageH ); f.w = f.h * pageH / pageW; b.style.width = f.w * 100 + '%'; b.style.height = f.h * 100 + '%'; }
-						else if ( resizing ) { f.w = Math.max( 0.008, Math.min( 1 - f.x, ow + dx ) ); f.h = Math.max( 0.006, Math.min( 1 - f.y, oh + dy ) ); b.style.width = f.w * 100 + '%'; b.style.height = f.h * 100 + '%'; }
+else if ( resizing ) { f.manualW = true; f.w = Math.max( 0.008, Math.min( 1 - f.x, ow + dx ) ); f.h = Math.max( 0.006, Math.min( 1 - f.y, oh + dy ) ); b.style.width = f.w * 100 + '%'; b.style.height = f.h * 100 + '%'; }
 						else { f.x = Math.max( 0, Math.min( 1 - f.w, ox + dx ) ); f.y = Math.max( 0, Math.min( 1 - f.h, oy + dy ) ); b.style.left = f.x * 100 + '%'; b.style.top = f.y * 100 + '%'; }
 					}
 						function up() {
@@ -343,17 +538,26 @@ if ( f.fill && 'checkbox' !== f.type && 'label' !== f.type ) { b.appendChild( el
 		var hint = null;
 		function showHint( clientX, clientY ) {
 			if ( ! dragging ) { return; }
-			var p = placeAt( clientX, clientY, dragging.w, dragging.h );
+			var p = placeAt( clientX, clientY, dragging.w, dragging.h ), bk = blankAtPoint( clientX, clientY, dragging.type );
+			if ( bk ) { p = { x: bk.x, y: bk.y, w: bk.w, h: bk.h }; } // it will snap into this blank
 			if ( ! hint ) { hint = el( 'div' ); hint.style.cssText = 'position:absolute;pointer-events:none;box-sizing:border-box;border:1.5px dashed #4f46e5;background:rgba(79,70,229,.12);border-radius:3px;z-index:3'; }
 			if ( hint.parentNode !== layer ) { layer.appendChild( hint ); }
-			hint.style.left = p.x * 100 + '%'; hint.style.top = p.y * 100 + '%'; hint.style.width = p.w * 100 + '%'; hint.style.height = p.h * 100 + '%';
+hint.style.left = p.x * 100 + '%'; hint.style.top = p.y * 100 + '%'; hint.style.width = p.w * 100 + '%'; hint.style.height = p.h * 100 + '%';
+			hint.style.borderStyle = bk ? 'solid' : 'dashed'; hint.style.background = bk ? 'rgba(79,70,229,.28)' : 'rgba(79,70,229,.12)';
 		}
 		function hideHint() { if ( hint && hint.parentNode ) { hint.parentNode.removeChild( hint ); } }
 		function dropAt( type, clientX, clientY, fillText, sizePt ) {
 			var t = TYPES.filter( function ( x ) { return x[0] === type; } )[0]; if ( ! t ) { return; }
-			var sz = sizePt || [ t[2], t[3] ], p = placeAt( clientX, clientY, sz[0], sz[1] );
+var sz = sizePt || [ t[2], t[3] ], p = placeAt( clientX, clientY, sz[0], sz[1] ), bk = blankAtPoint( clientX, clientY, type );
+			if ( bk ) { p = { x: bk.x, y: bk.y, w: bk.w, h: bk.h }; dropBlank( bk ); renderBlankBar(); } // the field takes the blank's place and size
 var f = { type: type, party: parseInt( partySel.value, 10 ) || 1, page: pageNo, x: p.x, y: p.y, w: p.w, h: p.h, fill: fillText || ( 'date' === type ? '{{date.short}}' : '' ), checked: false };
 			fields.push( f ); sel = f; paint(); renderInsp(); changed();
+		}
+		// A variable's real text, when known: our company's own text, or the chosen customer's value once the preview has it.
+		function mergeSize( tok ) {
+			var v = values && values[ tok ];
+			if ( ! v && 0 === String( tok ).indexOf( 'our.' ) ) { var lab = String( merge[ tok ] || '' ), i = lab.indexOf( ': ' ); if ( i >= 0 ) { v = lab.slice( i + 2 ); } }
+			return v ? [ fitW( String( v ) ), 14 ] : tokenSize( tok );
 		}
 		function dropMerge( token, cx, cy ) {
 			var fill = '{{' + token + '}}';
@@ -362,13 +566,32 @@ var f = { type: type, party: parseInt( partySel.value, 10 ) || 1, page: pageNo, 
 				if ( ! slug ) { return; }
 				fill = '{{ask.' + slug + '}}';
 			}
-			dropAt( 'text', cx, cy, fill, tokenSize( token ) );
+dropAt( 'text', cx, cy, fill, mergeSize( token ) );
 		}
 		layer.addEventListener( 'pointerdown', function ( e ) {
 			if ( e.target !== layer ) { return; }
-			if ( ! tool ) { sel = null; paint(); renderInsp(); return; }
-			if ( 0 === tool.indexOf( 'merge:' ) ) { dropMerge( tool.slice( 6 ), e.clientX, e.clientY ); return; }
-			dropAt( tool, e.clientX, e.clientY );
+			layer.focus( { preventScroll: true } );
+			if ( ! tool ) {
+				var r0 = layer.getBoundingClientRect(), sx = e.clientX, sy = e.clientY, band = null, additive = e.shiftKey || e.ctrlKey || e.metaKey;
+				function mv( ev ) {
+					if ( ! band && Math.abs( ev.clientX - sx ) + Math.abs( ev.clientY - sy ) < 6 ) { return; }
+					if ( ! band ) { band = el( 'div', { cls: 'ajfe-rb' } ); layer.appendChild( band ); }
+					var l = Math.min( sx, ev.clientX ) - r0.left, t = Math.min( sy, ev.clientY ) - r0.top;
+					band.style.cssText = 'left:' + l + 'px;top:' + t + 'px;width:' + Math.abs( ev.clientX - sx ) + 'px;height:' + Math.abs( ev.clientY - sy ) + 'px';
+				}
+				function up( ev ) {
+					document.removeEventListener( 'pointermove', mv ); document.removeEventListener( 'pointerup', up );
+					if ( ! band ) { sel = null; multi = []; if ( selBlank ) { selBlank = null; renderBlankBar(); } paint(); renderInsp(); return; }
+					var x0 = ( Math.min( sx, ev.clientX ) - r0.left ) / r0.width, x1 = ( Math.max( sx, ev.clientX ) - r0.left ) / r0.width, y0 = ( Math.min( sy, ev.clientY ) - r0.top ) / r0.height, y1 = ( Math.max( sy, ev.clientY ) - r0.top ) / r0.height;
+					var hit = blanks.filter( function ( b ) { return b.page === pageNo && b.x < x1 && b.x + b.w > x0 && b.y < y1 && b.y + b.h > y0; } );
+					if ( ! additive ) { multi = []; }
+					hit.forEach( function ( b ) { if ( ! inMulti( b ) ) { multi.push( b ); } } );
+					sel = null; selBlank = multi[ multi.length - 1 ] || selBlank; paint(); renderInsp(); renderBlankBar();
+				}
+				document.addEventListener( 'pointermove', mv ); document.addEventListener( 'pointerup', up );
+				return;
+			}
+			placeTool( e.clientX, e.clientY );
 		} );
 		layer.addEventListener( 'dragover', function ( e ) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; layer.classList.add( 'drop' ); showHint( e.clientX, e.clientY ); } );
 		layer.addEventListener( 'dragleave', function () { layer.classList.remove( 'drop' ); hideHint(); } );
@@ -390,7 +613,7 @@ var avail = stage.clientWidth - 20, scale = Math.min( 2.5, Math.max( 0.6, avail 
 				canvas.width = Math.floor( vp.width ); canvas.height = Math.floor( vp.height );
 				wrap.style.width = canvas.width + 'px'; wrap.style.height = canvas.height + 'px';
 				return page.render( { canvasContext: canvas.getContext( '2d' ), viewport: vp } ).promise;
-			} ).then( function () { pgLabel.textContent = 'Page ' + pageNo + ' / ' + pdf.numPages; rendering = false; paint(); renderInsp(); } )
+			} ).then( function () { pgLabel.textContent = 'Page ' + pageNo + ' / ' + pdf.numPages;rendering = false; paint(); renderInsp(); if ( pendingScroll ) { pendingScroll = false; scrollToBlank(); } } )
 				.catch( function ( e ) { rendering = false; window.alert( 'Could not show the page: ' + ( e && e.message ? e.message : e ) ); } );
 		}
 		// The pane may not have its final width when the page first renders (hidden tab, panel still laying out): re-fit when it changes.
@@ -407,12 +630,17 @@ var avail = stage.clientWidth - 20, scale = Math.min( 2.5, Math.max( 0.6, avail 
 		// ── auto-detect: underscore runs, drawn underlines, squares ──────────────
 		function detectPage( page, no ) {
 			var v = page.getViewport( { scale: 1 } ), W = v.width, H = v.height, found = [];
-			function add( type, x, topY, w, h ) { found.push( { type: type, party: parseInt( partySel.value, 10 ) || 1, page: no, x: x / W, y: topY / H, w: w / W, h: h / H, fill: '' } ); }
+var textItems = [];
+				function add( type, x, topY, w, h, label ) { found.push( { type: type, party: parseInt( partySel.value, 10 ) || 1, page: no, x: x / W, y: topY / H, w: w / W, h: h / H, fill: '', label: label || '' } ); }
+				function tidy( t ) { t = String( t || '' ).replace( /_+/g, ' ' ).replace( /\s+/g, ' ' ).trim().replace( /[:\s]+$/, '' ); return t.length > 44 ? '…' + t.slice( -43 ) : t; }
 			return page.getTextContent().then( function ( tc ) {
 				tc.items.forEach( function ( it ) {
-					var s = it.str; if ( ! s || s.indexOf( '___' ) < 0 ) { return; }
-					var tr = it.transform, fh = Math.abs( tr[3] ) || it.height || 10, L = s.length, re = /_{3,}/g, m;
-					while ( ( m = re.exec( s ) ) ) { add( 'text', tr[4] + it.width * m.index / L, H - ( tr[5] + fh * 0.9 ), it.width * m[0].length / L, fh * 1.15 ); }
+						var s = it.str; if ( ! s ) { return; }
+						var tr = it.transform, fh = Math.abs( tr[3] ) || it.height || 10, L = s.length;
+						if ( s.replace( /[_\s]/g, '' ) ) { textItems.push( { s: s, x0: tr[4], x1: tr[4] + it.width, yb: H - tr[5] } ); }
+						if ( s.indexOf( '___' ) < 0 ) { return; }
+						var re = /_{3,}/g, m, prevEnd = 0;
+						while ( ( m = re.exec( s ) ) ) { add( 'text', tr[4] + it.width * m.index / L, H - ( tr[5] + fh * 0.9 ), it.width * m[0].length / L, fh * 1.15, tidy( s.slice( prevEnd, m.index ) ) ); prevEnd = m.index + m[0].length; }
 				} );
 				return page.getOperatorList();
 			} ).then( function ( ol ) {
@@ -445,10 +673,24 @@ var avail = stage.clientWidth - 20, scale = Math.min( 2.5, Math.max( 0.6, avail 
 						add( 'checkbox', a.x, H - Math.max( a.y, b.y ), a.len, a.len );
 					} );
 				} );
-				return found;
-			} );
-		}
-		function overlaps( a, b ) {
+					// Name each blank after the text around it: the words before a line, the header above it, the word after a box.
+					found.forEach( function ( f ) {
+						if ( f.label ) { return; }
+						var bx = f.x * W, bw = f.w * W, btop = f.y * H, bbot = btop + f.h * H, best = null, bd = 1e9;
+						if ( 'checkbox' === f.type ) {
+							textItems.forEach( function ( t ) { var gap = t.x0 - ( bx + bw ); if ( Math.abs( t.yb - ( bbot - 1 ) ) < 9 && gap > -3 && gap < 22 && gap < bd ) { bd = gap; best = t; } } );
+							if ( best ) { f.label = tidy( best.s.split( /\s+/ ).slice( 0, 2 ).join( ' ' ) ); }
+						} else {
+							textItems.forEach( function ( t ) { var gap = bx - t.x1; if ( Math.abs( t.yb - ( bbot - 2 ) ) < 9 && gap > -4 && gap < 260 && gap < bd ) { bd = gap; best = t; } } );
+							if ( ! best ) { bd = 1e9; textItems.forEach( function ( t ) { var up = btop - t.yb; if ( t.x0 <= bx + bw && t.x1 >= bx && up > -2 && up < 34 && up < bd ) { bd = up; best = t; } } ); }
+							if ( best ) { f.label = tidy( best.s ); }
+						}
+						if ( ! f.label ) { f.label = 'checkbox' === f.type ? 'Box' : 'Blank'; }
+					} );
+					return found;
+				} );
+			}
+			function overlaps( a, b ) {
 			var ix = Math.max( 0, Math.min( a.x + a.w, b.x + b.w ) - Math.max( a.x, b.x ) ), iy = Math.max( 0, Math.min( a.y + a.h, b.y + b.h ) - Math.max( a.y, b.y ) );
 			return ix * iy > 0.35 * Math.min( a.w * a.h, b.w * b.h );
 		}
@@ -457,9 +699,16 @@ var avail = stage.clientWidth - 20, scale = Math.min( 2.5, Math.max( 0.6, avail 
 			detect.disabled = true; detect.textContent = 'Detecting…';
 			var added = 0, n = 1;
 			function step() {
-				if ( n > pdf.numPages ) { detect.disabled = false; detect.textContent = 'Auto-detect'; paint(); if ( added ) { changed(); } window.alert( added ? added + ' field(s) suggested — adjust or delete any that are wrong.' : 'No blanks found. Drag fields onto the page instead.' ); return; }
+				if ( n > pdf.numPages ) {
+					detect.disabled = false; detect.textContent = 'Auto-detect'; sortBlanks();
+if ( added ) { changed(); selectBlank( blanks[ 0 ] ); } else { paint(); renderBlankBar(); window.alert( 'No blanks found. Drag fields onto the page instead.' ); }
+					return;
+				}
 				pdf.getPage( n ).then( function ( page ) { return detectPage( page, n ); } ).then( function ( list ) {
-					list.forEach( function ( f ) { if ( ! fields.some( function ( x ) { return x.page === f.page && overlaps( x, f ); } ) ) { fields.push( f ); added++; } } );
+					list.forEach( function ( f ) {
+						var bk = { page: f.page, x: f.x, y: f.y, w: f.w, h: f.h,kind: 'checkbox' === f.type ? 'box' : 'line', label: f.label || '' };
+if ( ! fields.some( function ( x ) { return x.page === bk.page && overlaps( x, bk ); } ) && ! blanks.some( function ( x ) { return x.page === bk.page && overlaps( x, bk ); } ) ) { blanks.push( bk ); added++; }
+					} );
 					n++; step();
 				} ).catch( function () { n++; step(); } );
 			}
@@ -467,7 +716,7 @@ var avail = stage.clientWidth - 20, scale = Math.min( 2.5, Math.max( 0.6, avail 
 		} );
 
 		// ── start ────────────────────────────────────────────────────────────────
-		renderSigners(); setTool( '' ); renderInsp(); updateCount();
+		renderSigners(); setTool( '' ); renderInsp(); updateCount(); renderBlankBar();
 		loadPdfjs( opts.pdfjsBase, function () {
 			if ( dead ) { return; }
 			window.pdfjsLib.getDocument( { data: new Uint8Array( opts.pdfData ) } ).promise.then( function ( d ) { pdf = d; showPage( 1 ); } )
@@ -476,6 +725,7 @@ var avail = stage.clientWidth - 20, scale = Math.min( 2.5, Math.max( 0.6, avail 
 
 		return {
 			getFields: function () { return fields.map( clean ); },
+			getBlanks: function () { return blanks.map( function ( b ) { return { page: b.page, x: round( b.x ), y: round( b.y ), w: round( b.w ), h:round( b.h ), kind: b.kind, label: b.label || '' }; } ); },
 			getSigners: function () { return signers.slice(); },
 			refreshValues: function () { if ( previewMode ) { loadValues(); } },
 			setSigners: function ( list ) { signers = list && list.length ? list.slice() : [ 'Signer' ]; renderSigners(); renderInsp(); paint(); },
