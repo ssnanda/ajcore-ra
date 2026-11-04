@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       AJ Core RA
  * Description:       Registered Agent (NC LLC Agents) extension for AJ Core. Requires the AJ Core plugin.
- * Version:           0.1.39
+ * Version:           0.1.40
  * Requires PHP:      7.4
  * Author:            IT Spector LLC
  * Author URI:        https://itspector.com
@@ -15,8 +15,8 @@ if ( ! defined( 'WPINC' ) ) {
 	die;
 }
 
-define( 'AJCORE_RA_VERSION', '0.1.39' );
-define( 'AJCORE_RA_MIN_EXTENSION_API', 17 );
+define( 'AJCORE_RA_VERSION', '0.1.40' );
+define( 'AJCORE_RA_MIN_EXTENSION_API', 19 );
 define( 'AJCORE_RA_BASENAME', plugin_basename( __FILE__ ) );
 
 // Loads regardless of AJCore so RA stays updatable on its own.
@@ -34,6 +34,8 @@ require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-business-profile.p
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-websites-api.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-esign.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-rentec.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-mail.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-gmail-intake.php';
 AJCore_RA_Compliance_Schema::init();
 register_activation_hook( __FILE__, array( 'AJCore_RA_Compliance_Schema', 'activate' ) );
 
@@ -65,6 +67,8 @@ function ajcore_ra_boot() {
 	AJCore_RA_Websites_API::init();
 	AJCore_RA_Esign::init();
 	AJCore_RA_Rentec::init();
+	AJCore_RA_Mail::init();
+	AJCore_RA_Gmail_Intake::init();
 	add_filter( 'ajcore_endpoint_catalog', 'ajcore_ra_endpoint_catalog' );
 }
 add_action( 'plugins_loaded', 'ajcore_ra_boot', 20 );

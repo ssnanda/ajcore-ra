@@ -25,6 +25,7 @@ class AJCore_RA_Esign {
 	const OPTION     = 'ajcore_ra_esign';
 	const TAB        = 'ra-esign';
 	const WEBHOOK_OPTION = 'ajcore_breezedoc_webhook';
+	const SHARED_ROW     = 'ajcore_breezedoc_settings'; // shared-DB row: master publishes, other sites read
 
 	/** @var array<string,callable> */
 	private $kit;
@@ -46,6 +47,7 @@ class AJCore_RA_Esign {
 		add_filter( 'ajcore_admin_portal_tabs', array( __CLASS__, 'admin_tab' ), 9 );
 		add_action( 'ajcore_admin_portal_tab_render', array( __CLASS__, 'render_admin_tab' ) );
 		add_action( 'admin_post_ajcore_ra_save_esign', array( __CLASS__, 'handle_save' ) );
+		add_action( 'admin_init', array( __CLASS__, 'maybe_publish_shared' ) );
 	}
 
 	public static function boot_routes() {
@@ -62,10 +64,75 @@ class AJCore_RA_Esign {
 		return function_exists( 'ajcore_encrypt_setting_value' ) ? ajcore_encrypt_setting_value( (string) $value ) : (string) $value;
 	}
 
-	private function setting( $key ) {
+	private static function is_shared() {
+		return function_exists( 'ajcore_is_shared_db_enabled' ) && ajcore_is_shared_db_enabled();
+	}
+
+	private static function is_master() {
+		return ! function_exists( 'ajcore_is_stripe_sync_owner' ) || ajcore_is_stripe_sync_owner();
+	}
+
+	/** True on a secondary site of a shared-DB network: credentials are managed by the master. */
+	private function read_only() {
+		return self::is_shared() && ! self::is_master();
+	}
+
+	private static function shared_db_and_table() {
+		if ( ! function_exists( 'ajcore_get_shared_db' ) ) {
+			return array( null, '' );
+		}
+		$db = ajcore_get_shared_db();
+		if ( ! $db ) {
+			return array( null, '' );
+		}
+		$table = $db->prefix . 'aj_shared_settings';
+		return $db->get_var( $db->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table ? array( $db, $table ) : array( null, '' );
+	}
+
+	/** @return array<string,string> decrypted team_api_key / api_token published by the master. */
+	private static function read_shared() {
+		list( $db, $table ) = self::shared_db_and_table();
+		if ( ! $db ) {
+			return array();
+		}
+		$value   = $db->get_var( $db->prepare( "SELECT setting_value FROM `{$table}` WHERE setting_name = %s LIMIT 1", self::SHARED_ROW ) );
+		$decoded = json_decode( (string) $value, true );
+		return is_array( $decoded ) ? $decoded : array();
+	}
+
+	/** Master only: publishes the plain credentials (same convention as the shared Rentec row). */
+	private function write_shared() {
+		if ( ! self::is_shared() || ! self::is_master() ) {
+			return false;
+		}
+		list( $db, $table ) = self::shared_db_and_table();
+		if ( ! $db ) {
+			return false;
+		}
+		$encoded = wp_json_encode( array( 'team_api_key' => $this->local_setting( 'team_api_key' ), 'api_token' => $this->local_setting( 'api_token' ) ) );
+		if ( false === $encoded ) {
+			return false;
+		}
+		$exists = $db->get_var( $db->prepare( "SELECT setting_name FROM `{$table}` WHERE setting_name = %s LIMIT 1", self::SHARED_ROW ) );
+		if ( $exists ) {
+			return false !== $db->update( $table, array( 'setting_value' => $encoded, 'updated_at' => current_time( 'mysql' ) ), array( 'setting_name' => self::SHARED_ROW ), array( '%s', '%s' ), array( '%s' ) );
+		}
+		return false !== $db->insert( $table, array( 'setting_name' => self::SHARED_ROW, 'setting_value' => $encoded, 'updated_at' => current_time( 'mysql' ) ), array( '%s', '%s', '%s' ) );
+	}
+
+	private function local_setting( $key ) {
 		$opt   = get_option( self::OPTION, array() );
 		$value = is_array( $opt ) && isset( $opt[ $key ] ) ? (string) $opt[ $key ] : '';
 		return trim( function_exists( 'ajcore_decrypt_setting_value' ) ? (string) ajcore_decrypt_setting_value( $value ) : $value );
+	}
+
+	/** Credential value; on a secondary shared-DB site the master's published value wins. */
+	private function setting( $key ) {
+		if ( $this->read_only() ) {
+			$shared = self::read_shared();
+			return isset( $shared[ $key ] ) ? trim( (string) $shared[ $key ] ) : '';
+		}
+		return $this->local_setting( $key );
 	}
 
 	/** One-time copy of the Personal token AJCore used to keep in ajforms_settings. */
@@ -84,6 +151,18 @@ class AJCore_RA_Esign {
 		}
 		$opt['migrated'] = 1;
 		update_option( self::OPTION, $opt, false );
+		self::instance()->write_shared();
+	}
+
+	/** Master with the shared DB on: publish credentials saved before sharing existed, so other sites see them. */
+	public static function maybe_publish_shared() {
+		if ( ! self::is_shared() || ! self::is_master() ) {
+			return;
+		}
+		$esign = self::instance();
+		if ( ( '' !== $esign->local_setting( 'team_api_key' ) || '' !== $esign->local_setting( 'api_token' ) ) && empty( self::read_shared() ) ) {
+			$esign->write_shared();
+		}
 	}
 
 	public static function handle_save() {
@@ -91,6 +170,9 @@ class AJCore_RA_Esign {
 			wp_die( esc_html__( 'Insufficient permissions.', 'ajcore-ra' ) );
 		}
 		check_admin_referer( 'ajcore_ra_save_esign' );
+		if ( self::instance()->read_only() ) {
+			wp_die( esc_html__( 'E-Signature credentials are managed by the AJCore master site.', 'ajcore-ra' ) );
+		}
 		$opt = get_option( self::OPTION, array() );
 		$opt = is_array( $opt ) ? $opt : array();
 		// Secret inputs are never re-rendered: blank keeps the saved value.
@@ -105,6 +187,7 @@ class AJCore_RA_Esign {
 		}
 		$opt['migrated'] = 1;
 		update_option( self::OPTION, $opt, false );
+		self::instance()->write_shared();
 		wp_safe_redirect( self::tab_url( array( 'saved' => 1 ) ) );
 		exit;
 	}
@@ -1252,6 +1335,7 @@ class AJCore_RA_Esign {
 			}
 		}
 		$log    = $this->get_esign_documents_list();
+		$ro     = $this->read_only();
 		$rest   = rest_url( AJCore_Extensions::rest_namespace() );
 		$hook   = $this->breezedoc_webhook_status();
 		$labels = array( 'draft' => __( 'Draft', 'ajcore-ra' ), 'sent' => __( 'Awaiting signature', 'ajcore-ra' ), 'completed' => __( 'Completed', 'ajcore-ra' ), 'cancelled' => __( 'Cancelled', 'ajcore-ra' ), 'expired' => __( 'Expired', 'ajcore-ra' ) );
@@ -1307,24 +1391,27 @@ class AJCore_RA_Esign {
 
 			<details class="ajra-card" <?php echo $connected ? '' : 'open'; ?>>
 				<summary style="cursor:pointer;font-weight:600"><?php esc_html_e( 'Connection', 'ajcore-ra' ); ?> — <?php echo esc_html( $is_v1 ? __( 'Team API key', 'ajcore-ra' ) : ( $connected ? __( 'Personal token (legacy)', 'ajcore-ra' ) : __( 'not connected', 'ajcore-ra' ) ) ); ?></summary>
+				<?php if ( $ro ) : ?>
+					<div class="notice notice-info inline" style="margin:10px 0 0"><p><?php esc_html_e( 'Credentials are managed by the AJCore master site; this site uses the shared connection.', 'ajcore-ra' ); ?></p></div>
+				<?php endif; ?>
 				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin-top:10px">
 					<input type="hidden" name="action" value="ajcore_ra_save_esign">
 					<?php wp_nonce_field( 'ajcore_ra_save_esign' ); ?>
 					<div class="ajra-grid">
 						<div>
 							<label for="breezedoc_team_api_key"><?php esc_html_e( 'Team API key', 'ajcore-ra' ); ?></label>
-							<input type="text" name="breezedoc_team_api_key" id="breezedoc_team_api_key" autocomplete="off" placeholder="<?php echo $is_v1 ? esc_attr__( '•••• saved — blank keeps', 'ajcore-ra' ) : 'bd_live_…'; ?>">
+							<input type="text" name="breezedoc_team_api_key" id="breezedoc_team_api_key" autocomplete="off" <?php disabled( $ro ); ?> placeholder="<?php echo $is_v1 ? esc_attr__( '•••• saved — blank keeps', 'ajcore-ra' ) : 'bd_live_…'; ?>">
 						</div>
 						<div>
 							<label for="breezedoc_api_token"><?php esc_html_e( 'Personal access token (legacy)', 'ajcore-ra' ); ?></label>
-							<input type="text" name="breezedoc_api_token" id="breezedoc_api_token" autocomplete="off" placeholder="<?php echo $this->setting( 'api_token' ) ? esc_attr__( '•••• saved — blank keeps', 'ajcore-ra' ) : ''; ?>">
-							<?php if ( $this->setting( 'api_token' ) ) : ?>
+							<input type="text" name="breezedoc_api_token" id="breezedoc_api_token" autocomplete="off" <?php disabled( $ro ); ?> placeholder="<?php echo $this->setting( 'api_token' ) ? esc_attr__( '•••• saved — blank keeps', 'ajcore-ra' ) : ''; ?>">
+							<?php if ( $this->setting( 'api_token' ) && ! $ro ) : ?>
 								<label style="font-weight:400;margin-top:4px"><input type="checkbox" name="clear_api_token" value="1"> <?php esc_html_e( 'Remove saved token', 'ajcore-ra' ); ?></label>
 							<?php endif; ?>
 						</div>
 					</div>
 					<p style="margin:10px 0 0">
-						<button type="submit" class="button button-primary"><?php esc_html_e( 'Save', 'ajcore-ra' ); ?></button>
+						<?php if ( ! $ro ) : ?><button type="submit" class="button button-primary"><?php esc_html_e( 'Save', 'ajcore-ra' ); ?></button><?php endif; ?>
 						<button type="button" class="button" id="ajra-es-test"><?php esc_html_e( 'Test connection', 'ajcore-ra' ); ?></button>
 						<span id="ajra-es-test-out" class="ajra-muted"></span>
 					</p>

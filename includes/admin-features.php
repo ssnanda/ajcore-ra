@@ -35,8 +35,8 @@ function ajcore_ra_features() {
 			'Business Profile tab (editable, with history)'      => true,
 		),
 		'Mail & documents'   => array(
-			'Mail items and mail routes'                  => false,
-			'Gmail intake rules (AOO, Change of RA)'      => false,
+			'Mail items and mail routes'                  => true,
+			'Gmail intake rules (AOO, Change of RA)'      => true,
 			'Customer flyers'                             => false,
 			'Service requests'                            => false,
 		),
