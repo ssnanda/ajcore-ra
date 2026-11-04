@@ -3350,11 +3350,20 @@ class AJCore_RA_Esign {
 				<div class="ajra-toolbar">
 					<div class="ajra-seg" id="ajra-es-filters">
 						<a class="on" data-f="all"><?php echo esc_html( sprintf( '%s %d', __( 'All', 'ajcore-ra' ), $counts['all'] ) ); ?></a>
-						<a data-f="sent"><?php echo esc_html( sprintf( '%s %d', __( 'Awaiting', 'ajcore-ra' ), $counts['sent'] ) ); ?></a>
+						<a data-f="sent"><?php echo esc_html( sprintf( '%s %d', __( 'Waiting', 'ajcore-ra' ), $counts['sent'] ) ); ?></a>
 						<a data-f="draft"><?php echo esc_html( sprintf( '%s %d', __( 'Not sent', 'ajcore-ra' ), $counts['draft'] ) ); ?></a>
 						<a data-f="completed"><?php echo esc_html( sprintf( '%s %d', __( 'Completed', 'ajcore-ra' ), $counts['completed'] ) ); ?></a>
 						<a data-f="closed"><?php echo esc_html( sprintf( '%s %d', __( 'Closed', 'ajcore-ra' ), $counts['closed'] ) ); ?></a>
 						<a data-f="deleted"><?php echo esc_html( sprintf( '%s %d', __( 'Deleted', 'ajcore-ra' ), $counts['deleted'] ) ); ?></a>
+					</div>
+					<?php
+					$acct_nac   = count( array_filter( (array) $log['documents'], static function ( $d ) { return 0 === strpos( (string) $d['breezedocDocumentId'], 'doc_' ); } ) );
+					$acct_yours = count( (array) $log['documents'] ) - $acct_nac;
+					?>
+					<div class="ajra-seg" id="ajra-es-accts" title="<?php esc_attr_e( 'BreezeDoc keeps documents sent from this app under NAC documents, and your own under Your documents', 'ajcore-ra' ); ?>">
+						<a class="on" data-a="all"><?php echo esc_html( __( 'All accounts', 'ajcore-ra' ) ); ?></a>
+						<a data-a="yours"><?php echo esc_html( sprintf( '%s %d', __( 'Your documents', 'ajcore-ra' ), $acct_yours ) ); ?></a>
+						<a data-a="nac"><?php echo esc_html( sprintf( '%s %d', __( 'NAC documents', 'ajcore-ra' ), $acct_nac ) ); ?></a>
 					</div>
 					<button type="button" class="button button-small" id="ajra-es-del" disabled><?php esc_html_e( 'Delete selected', 'ajcore-ra' ); ?></button>
 					<button type="button" class="button button-small" id="ajra-es-restore-rows" style="display:none" disabled><?php esc_html_e( 'Restore selected', 'ajcore-ra' ); ?></button>
@@ -3373,10 +3382,10 @@ class AJCore_RA_Esign {
 								return trim( ( $r['name'] ?? '' ) . ' <' . ( $r['email'] ?? '' ) . '>' );
 							}, (array) $doc['recipients'] ) );
 							?>
-							<tr data-row="<?php echo esc_attr( $doc['id'] ); ?>" data-group="<?php echo esc_attr( $group( $doc['status'] ) ); ?>" data-q="<?php echo esc_attr( strtolower( $doc['customerName'] . ' ' . $doc['templateTitle'] . ' ' . $names ) ); ?>">
+							<tr data-row="<?php echo esc_attr( $doc['id'] ); ?>" data-acct="<?php echo $is_new ? 'nac' : 'yours'; ?>" data-group="<?php echo esc_attr( $group( $doc['status'] ) ); ?>" data-q="<?php echo esc_attr( strtolower( $doc['customerName'] . ' ' . $doc['templateTitle'] . ' ' . $names ) ); ?>">
 								<td><input type="checkbox" class="ajra-es-sel" value="<?php echo esc_attr( $doc['id'] ); ?>"></td>
 								<td><?php echo esc_html( $doc['customerName'] ?: '' ); ?><?php if ( '' === $doc['customerName'] ) : $first = ( (array) $doc['recipients'] )[0] ?? array(); ?><span class="ajra-muted"><?php echo esc_html( ( $first['name'] ?? '' ) ?: ( $first['email'] ?? '—' ) ); ?></span><?php endif; ?></td>
-								<td><?php echo esc_html( $doc['templateTitle'] ?: '—' ); ?></td>
+								<td><?php echo esc_html( $doc['templateTitle'] ?: '—' ); ?><?php if ( $is_new ) : ?> <span class="ajra-tag" title="<?php esc_attr_e( 'Listed under NAC documents in BreezeDoc', 'ajcore-ra' ); ?>">NAC</span><?php endif; ?></td>
 								<td data-progress title="<?php echo esc_attr( $names ); ?>"><?php echo esc_html( $tt ? $sg . '/' . $tt : '—' ); ?></td>
 								<td><span class="ajra-pill <?php echo esc_attr( $is_del ? 'cancelled' : $doc['status'] ); ?>" data-status><?php echo esc_html( $is_del ? sprintf( /* translators: %s: previous status */ __( 'Deleted (was %s)', 'ajcore-ra' ), $labels[ $was ] ?? $was ) : ( $labels[ $doc['status'] ] ?? $doc['status'] ) ); ?></span></td>
 								<td><?php echo esc_html( $doc['sentAt'] ? mysql2date( get_option( 'date_format' ), $doc['sentAt'] ) : '—' ); ?></td>
@@ -3466,10 +3475,15 @@ class AJCore_RA_Esign {
 
 			// Sent list: filter pills + search.
 			var rows = Array.prototype.slice.call( document.querySelectorAll( '#ajra-es-log tr[data-row]' ) ), filter = 'all';
+			var acct = 'all';
+			document.querySelectorAll( '#ajra-es-accts a' ).forEach( function ( a ) { a.addEventListener( 'click', function () {
+				acct = a.getAttribute( 'data-a' );
+				document.querySelectorAll( '#ajra-es-accts a' ).forEach( function ( x ) { x.classList.toggle( 'on', x === a ); } ); applyFilter();
+			} ); } );
 			function applyFilter() {
 				var q = $( 'ajra-es-log-q' ).value.toLowerCase().trim(), shown = 0;
 				rows.forEach( function ( r ) {
-					var g = r.getAttribute( 'data-group' ), ok = ( ( 'all' === filter && 'deleted' !== g ) || g === filter ) && ( ! q || r.getAttribute( 'data-q' ).indexOf( q ) >= 0 );
+					var g = r.getAttribute( 'data-group' ), ok = ( ( 'all' === filter && 'deleted' !== g ) || g === filter ) && ( 'all' === acct || r.getAttribute( 'data-acct' ) === acct ) && ( ! q || r.getAttribute( 'data-q' ).indexOf( q ) >= 0 );
 					r.style.display = ok ? '' : 'none'; if ( ok ) { shown++; }
 					var ev = r.nextElementSibling; if ( ev && ev.classList.contains( 'ajra-es-ev' ) ) { ev.style.display = ok ? '' : 'none'; }
 				} );
