@@ -1557,7 +1557,6 @@ class AJCore_RA_Rentec {
 						<?php if ( 'leads' === $resource ) : ?><button type="button" id="ajcore-new-rentec-lead" class="button button-primary"><?php esc_html_e( 'New Lead', 'ajcore-ra' ); ?></button><?php endif; ?>
 						<?php if ( 'vendors' === $resource ) : ?><button type="button" id="ajcore-new-rentec-vendor" class="button button-primary"><?php esc_html_e( 'New Vendor', 'ajcore-ra' ); ?></button><?php endif; ?>
 					<?php endif; ?>
-					<a class="button" href="<?php echo esc_url( add_query_arg( array( 'page' => 'ajforms-settings', 'section' => 'rentec' ), admin_url( 'admin.php' ) ) ); ?>"><?php esc_html_e( 'Rentec Settings', 'ajcore-ra' ); ?></a>
 				</div>
 			</div>
 
