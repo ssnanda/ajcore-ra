@@ -45,7 +45,7 @@ function ajcore_ra_features() {
 			'AJPhone'                          => false,
 			'Zoho Calendar and Zoho Mail'      => false,
 			'E-Signatures (BreezeDoc): templates, PDF upload, webhooks' => true,
-			'Expense invoices, accounting catalog' => false,
+			'Expense invoices (accounting catalog stays in AJCore)' => true,
 		),
 	);
 }
