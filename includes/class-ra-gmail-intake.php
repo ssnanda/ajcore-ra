@@ -351,6 +351,7 @@ class AJCore_RA_Gmail_Intake {
 		register_rest_route( $ns, '/gmail-intake/(?P<id>\d+)/attachment', array( 'methods' => $r, 'callback' => array( $this, 'get_ops_gmail_intake_attachment' ), 'permission_callback' => $admin ) );
 		register_rest_route( $ns, '/gmail-intake/(?P<id>\d+)/file', array( 'methods' => 'POST', 'callback' => array( $this, 'file_ops_gmail_intake_item' ), 'permission_callback' => $admin ) );
 		register_rest_route( $ns, '/gmail-intake/(?P<id>\d+)/mark-filed', array( 'methods' => 'POST', 'callback' => array( $this, 'mark_ops_gmail_intake_item_filed' ), 'permission_callback' => $admin ) );
+		register_rest_route( $ns, '/gmail-intake/flyers/merge', array( 'methods' => 'POST', 'callback' => array( $this, 'flyers_merge_route' ), 'permission_callback' => $admin ) );
 		register_rest_route( $ns, '/gmail-intake/reset', array( 'methods' => 'POST', 'callback' => array( $this, 'reset_ops_gmail_intake_log' ), 'permission_callback' => $admin ) );
 		register_rest_route( $ns, '/gmail-intake/bulk-delete', array( 'methods' => 'POST', 'callback' => array( $this, 'bulk_delete_ops_gmail_intake_items' ), 'permission_callback' => $admin ) );
 
@@ -788,7 +789,10 @@ class AJCore_RA_Gmail_Intake {
 		$company_name = trim( (string) $company_name );
 
 		$rules = array(
-			'articles' => 'AOO',
+			'application for certificate of authority' => 'COA Application',
+			'articles of incorporation'                => 'AOI',
+			'certificate of authority'                 => 'COA',
+			'articles'                                 => 'AOO',
 		);
 
 		if ( '' !== $company_name ) {
@@ -885,6 +889,26 @@ class AJCore_RA_Gmail_Intake {
 		$lower = strtolower( $haystack );
 		if ( '' === $lower ) {
 			return null;
+		}
+
+		// Other formation filings (corporations, out-of-state companies registering in NC): one generic
+		// category, a short name per document type. Checked before Articles of Organization because a
+		// multi-page application can mention other filings in its text. Order matters: the application
+		// (whose text also says "certificate of authority") must be tested before the certificate itself.
+		$formation_rules = array(
+			'application for certificate of authority' => 'COA Application of ',
+			'articles of incorporation'                => 'AOI of ',
+			'certificate of authority'                 => 'COA of ',
+		);
+		if ( '' !== $company_name ) {
+			foreach ( $formation_rules as $keyword => $prefix ) {
+				if ( false !== strpos( $lower, $keyword ) ) {
+					return array(
+						'filename' => $prefix . $company_name,
+						'category' => 'Formation Documents',
+					);
+				}
+			}
 		}
 
 		if ( '' !== $company_name && false !== strpos( $lower, 'articles of organization' ) ) {
@@ -1489,6 +1513,17 @@ class AJCore_RA_Gmail_Intake {
 			}
 			if ( ! preg_match( '/\.pdf$/i', $filename ) ) {
 				$filename .= '.pdf';
+			}
+
+			// Flyers are one shared file for every customer: share the existing copy instead of importing another.
+			if ( 'sosnc flyers' === strtolower( $category ) ) {
+				$flyer_key     = $this->flyer_key( $filename );
+				$flyer_file_id = '' !== $flyer_key ? $this->flyer_canonical_id( $flyer_key ) : 0;
+				if ( $flyer_file_id && $this->flyer_share_file( $flyer_file_id, (string) $customer->email, $this->flyer_customer_user_id( $customer->stripe_customer_id ) ) ) {
+					$filed_filenames[]             = $filename;
+					$filed_categories[ $filename ] = $category;
+					continue;
+				}
 			}
 
 			$fetched = $this->gmail_intake_api_request( 'GET', '/messages/' . rawurlencode( $row->gmail_message_id ) . '/attachments/' . rawurlencode( $attachment_id ) );
@@ -2242,7 +2277,139 @@ class AJCore_RA_Gmail_Intake {
 			}
 		})();
 		</script>
+		<div class="ajcore-gi-flyers" style="margin:16px 0;padding:12px 14px;border:1px solid #e2e8f0;border-radius:10px;max-width:720px;background:#fff;">
+			<strong><?php esc_html_e( 'Shared flyers', 'ajcore-ra' ); ?></strong>
+			<span style="color:#64748b;font-size:12px;"> — <?php esc_html_e( 'one file per flyer, shared with every customer', 'ajcore-ra' ); ?></span>
+			<p style="margin:8px 0;">
+				<button type="button" class="button" id="ajcore-gi-flyers-preview"><?php esc_html_e( 'Preview merge', 'ajcore-ra' ); ?></button>
+				<button type="button" class="button button-primary" id="ajcore-gi-flyers-apply" disabled><?php esc_html_e( 'Apply merge', 'ajcore-ra' ); ?></button>
+			</p>
+			<div id="ajcore-gi-flyers-out" style="font-size:13px;"></div>
+		</div>
+		<script>
+		(function () {
+			var url = <?php echo wp_json_encode( rest_url( 'ajcore/v1/gmail-intake/flyers/merge' ) ); ?>, nonce = <?php echo wp_json_encode( wp_create_nonce( 'wp_rest' ) ); ?>;
+			var pv = document.getElementById( 'ajcore-gi-flyers-preview' ), ap = document.getElementById( 'ajcore-gi-flyers-apply' ), out = document.getElementById( 'ajcore-gi-flyers-out' );
+			function run( apply ) {
+				out.textContent = '…';
+				fetch( url + ( apply ? '?apply=1' : '' ), { method: 'POST', headers: { 'X-WP-Nonce': nonce } } ).then( function ( r ) { return r.json(); } ).then( function ( d ) {
+					if ( ! d.flyers ) { out.textContent = d.message || 'Failed.'; return; }
+					if ( ! d.flyers.length ) { out.textContent = <?php echo wp_json_encode( __( 'No flyer files found.', 'ajcore-ra' ) ); ?>; ap.disabled = true; return; }
+					var dupes = 0;
+					out.innerHTML = d.flyers.map( function ( f ) { dupes += f.duplicates; return '<div>' + ( apply ? '✓ ' : '' ) + f.keep_title + ': ' + f.duplicates + ' duplicate(s) ' + ( apply ? 'archived' : 'to archive' ) + ', ' + f.new_shares + ' customer(s) added to the shared copy</div>'; } ).join( '' );
+					ap.disabled = apply || ! dupes;
+				} ).catch( function () { out.textContent = 'Request failed.'; } );
+			}
+			pv.addEventListener( 'click', function () { run( false ); } );
+			ap.addEventListener( 'click', function () { if ( window.confirm( <?php echo wp_json_encode( __( 'Archive the duplicate flyer files and share the kept copy with those customers?', 'ajcore-ra' ) ); ?> ) ) { run( true ); } } );
+		})();
+		</script>
 		<?php
+	}
+
+	// ── Shared flyers: one file per flyer, shared with every customer ─────────────
+
+	/** 'rural-rise' etc. for the known SOSNC flyers, '' for anything else. */
+	private function flyer_key( $text ) {
+		$t = strtolower( preg_replace( '/[^a-z0-9]+/i', ' ', (string) $text ) );
+		foreach ( array( 'rural rise' => 'rural-rise', 'misleading mailings' => 'misleading-mailings', 'notice to employers' => 'notice-to-employers' ) as $needle => $key ) {
+			if ( false !== strpos( $t, $needle ) ) {
+				return $key;
+			}
+		}
+		return '';
+	}
+
+	/** Active (not archived) SOSNC Flyers files grouped by flyer key, oldest first. */
+	private function flyer_groups() {
+		global $wpdb;
+		$files  = $wpdb->prefix . 'aj_portal_files';
+		$rows   = $wpdb->get_results( "SELECT id, attachment_id, title, created_at FROM `{$files}` WHERE LOWER(category) = 'sosnc flyers' AND ( status <> 'archived' OR status IS NULL ) ORDER BY id ASC" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$groups = array();
+		foreach ( (array) $rows as $row ) {
+			$key = $this->flyer_key( $row->title );
+			if ( '' !== $key ) {
+				$groups[ $key ][] = $row;
+			}
+		}
+		return $groups;
+	}
+
+	/** The one shared copy for a flyer (the oldest active file), or 0 if none exists yet. */
+	private function flyer_canonical_id( $key ) {
+		$groups = $this->flyer_groups();
+		return isset( $groups[ $key ][0] ) ? (int) $groups[ $key ][0]->id : 0;
+	}
+
+	/** Adds a share row for the customer on a file; no-op if they already have it. */
+	private function flyer_share_file( $file_id, $email, $user_id ) {
+		global $wpdb;
+		$users = $wpdb->prefix . 'aj_portal_file_users';
+		$email = strtolower( sanitize_email( (string) $email ) );
+		if ( '' === $email ) {
+			return false;
+		}
+		$exists = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM `{$users}` WHERE file_id = %d AND ( LOWER(user_email) = %s OR ( %d > 0 AND user_id = %d ) ) LIMIT 1", (int) $file_id, $email, (int) $user_id, (int) $user_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( $exists ) {
+			return true;
+		}
+		return false !== $wpdb->insert( $users, array( 'file_id' => (int) $file_id, 'user_id' => (int) $user_id, 'user_email' => $email, 'created_at' => current_time( 'mysql' ) ), array( '%d', '%d', '%s', '%s' ) );
+	}
+
+	private function flyer_customer_user_id( $stripe_customer_id ) {
+		global $wpdb;
+		$map = $wpdb->prefix . 'aj_auth_user_mappings';
+		return (int) $wpdb->get_var( $wpdb->prepare( "SELECT user_id FROM `{$map}` WHERE stripe_customer_id = %s LIMIT 1", (string) $stripe_customer_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+	}
+
+	/**
+	 * Merge duplicate flyer files: per flyer, keep the oldest as the single shared copy, share it with
+	 * everyone who had a duplicate, and archive the duplicates (never deleted; the Archived tab keeps them).
+	 * $apply false = plan only.
+	 */
+	private function flyers_merge( $apply ) {
+		global $wpdb;
+		$files = $wpdb->prefix . 'aj_portal_files';
+		$users = $wpdb->prefix . 'aj_portal_file_users';
+		$out   = array();
+		foreach ( $this->flyer_groups() as $key => $group ) {
+			$keep  = $group[0];
+			$dupes = array_slice( $group, 1 );
+			$have  = array();
+			foreach ( (array) $wpdb->get_results( $wpdb->prepare( "SELECT user_id, LOWER(user_email) AS email FROM `{$users}` WHERE file_id = %d", (int) $keep->id ) ) as $u ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$have[ $u->email ] = true;
+			}
+			$to_share = array();
+			foreach ( $dupes as $d ) {
+				foreach ( (array) $wpdb->get_results( $wpdb->prepare( "SELECT user_id, LOWER(user_email) AS email FROM `{$users}` WHERE file_id = %d", (int) $d->id ) ) as $u ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+					if ( '' !== $u->email && empty( $have[ $u->email ] ) ) {
+						$have[ $u->email ]     = true;
+						$to_share[ $u->email ] = (int) $u->user_id;
+					}
+				}
+			}
+			if ( $apply ) {
+				foreach ( $to_share as $email => $uid ) {
+					$this->flyer_share_file( $keep->id, $email, $uid );
+				}
+				foreach ( $dupes as $d ) {
+					$wpdb->update( $files, array( 'status' => 'archived', 'updated_at' => current_time( 'mysql' ) ), array( 'id' => (int) $d->id ), array( '%s', '%s' ), array( '%d' ) );
+				}
+			}
+			$out[] = array(
+				'flyer'      => $key,
+				'keep_id'    => (int) $keep->id,
+				'keep_title' => (string) $keep->title,
+				'duplicates' => count( $dupes ),
+				'new_shares' => count( $to_share ),
+			);
+		}
+		return $out;
+	}
+
+	public function flyers_merge_route( WP_REST_Request $request ) {
+		$apply = rest_sanitize_boolean( $request->get_param( 'apply' ) );
+		return rest_ensure_response( array( 'applied' => $apply, 'flyers' => $this->flyers_merge( $apply ) ) );
 	}
 
 	// ── Activity tab ──────────────────────────────────────────────────────────

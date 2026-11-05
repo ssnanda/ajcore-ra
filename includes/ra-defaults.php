@@ -23,6 +23,7 @@ add_filter( 'ajcore_customer_brand', 'ajcore_ra_customer_brand', 10, 2 );
 // Stored university_* settings belong to RA's University Place brand; AJCore's save leaves them alone.
 add_filter( 'ajcore_brand_setting_prefixes', 'ajcore_ra_brand_setting_prefixes' );
 add_filter( 'ajcore_portal_office_address', 'ajcore_ra_portal_office_address', 10, 2 );
+add_filter( 'ajcore_portal_file_settings', 'ajcore_ra_portal_file_settings' );
 add_filter( 'ajcore_partner_site_domain', 'ajcore_ra_partner_site_domain', 10, 2 );
 add_filter( 'ajcore_reservation_location', 'ajcore_ra_reservation_location' );
 add_filter( 'ajcore_business_contact', 'ajcore_ra_business_contact' );
@@ -232,6 +233,19 @@ function ajcore_ra_authorization_body_lines() {
  * "Our Office Address" card on the client portal Overview. Same rule AJCore used to hard-code:
  * shown on the University Place site, and for any customer with tracking services.
  */
+/** Files categories RA's filing intake files into. Added to whatever the site has saved, and shown to customers as an important group. */
+function ajcore_ra_portal_file_settings( $settings ) {
+	foreach ( array( 'Formation Documents' ) as $cat ) {
+		if ( ! in_array( $cat, (array) $settings['categories'], true ) ) {
+			$settings['categories'][] = $cat;
+		}
+		if ( ! in_array( $cat, (array) $settings['important_categories'], true ) ) {
+			$settings['important_categories'][] = $cat;
+		}
+	}
+	return $settings;
+}
+
 /** OPUS and Alliance VO customers are University Place customers: pinned to its site. */
 function ajcore_ra_partner_site_domain( $domain, $partner_key ) {
 	return in_array( (string) $partner_key, array( 'opus', 'alliance_vo' ), true ) ? 'universityofficesuites.com' : $domain;
