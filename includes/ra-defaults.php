@@ -249,6 +249,14 @@ function ajcore_ra_portal_file_settings( $settings ) {
 	}
 	$cats[] = 'Others';
 	$settings['categories'] = $cats;
+	// Internal tags are RA's too; on by default for migration like before.
+	foreach ( array( 'registered-agent' => 'RegisteredAgent', 'virtual-office' => 'VirtualOffice' ) as $slug => $label ) {
+		if ( ! isset( $settings['tags'][ $slug ] ) ) {
+			$settings['tags'][ $slug ] = $label;
+			$settings['migration_tags'][] = $slug;
+		}
+	}
+	$settings['migration_tags'] = array_values( array_unique( (array) $settings['migration_tags'] ) );
 	foreach ( $groups as $key => $names ) {
 		foreach ( $names as $cat ) {
 			if ( ! in_array( $cat, (array) $settings[ $key ], true ) ) {
