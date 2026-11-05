@@ -15,37 +15,45 @@ function ajcore_ra_add_features_menu() {
 	add_submenu_page( 'ajforms', __( 'AJCore RA', 'ajcore-ra' ), __( 'AJCore RA', 'ajcore-ra' ), 'manage_options', 'ajcore-ra', 'ajcore_ra_render_features_page' );
 }
 
-/** @return array<string,array<string,bool>> Group => feature label => moved into RA? */
+/**
+ * @return array<string,array<string,array{0:string,1?:string}>> Group => feature label => array( status, note ).
+ * Status: 'moved' (now in RA), 'pending' (still to move), 'core' (deliberately stays in AJCore).
+ */
 function ajcore_ra_features() {
 	return array(
 		'Defaults & content' => array(
-			'NC LLC Agents email defaults (subjects, follow-up, footer)' => true,
-			'Helpful Reading links'                                      => true,
-			'Registered Agent authorization email'                       => true,
-			'University Place email brand and defaults'                  => true,
-			'University Place portal address block'                      => true,
-			'University Place partner customer rules (opus, alliance_vo)' => false,
+			'NC LLC Agents email defaults (subjects, follow-up, footer)' => array( 'moved' ),
+			'Helpful Reading links'                                      => array( 'moved' ),
+			'Registered Agent authorization email'                       => array( 'moved' ),
+			'University Place email brand, defaults, portal address'     => array( 'moved' ),
+			'University Place partner customer rules (opus, alliance_vo)' => array( 'moved' ),
+			'File categories, groups and internal tags'                  => array( 'moved', 'Generic defaults stay in AJCore' ),
 		),
 		'Compliance'         => array(
-			'Compliance API (entities, filings, portal)'      => true,
-			'Compliance portal tab and admin screens'         => false,
-			'Compliance reminder job and emails'                 => true,
-			'Task templates and filing tasks'                    => true,
-			'Website tab and customer websites'                  => true,
-			'Business Profile tab (editable, with history)'      => true,
+			'Compliance API (entities, filings, portal)'    => array( 'moved' ),
+			'Compliance portal tab and admin screens'       => array( 'pending' ),
+			'Compliance reminder job and emails'            => array( 'moved' ),
+			'Task templates and filing tasks'               => array( 'moved' ),
+			'Website tab and customer websites'             => array( 'moved' ),
+			'Business Profile tab (editable, with history)' => array( 'moved' ),
 		),
 		'Mail & documents'   => array(
-			'Mail items and mail routes'                  => true,
-			'Gmail intake rules (AOO, Change of RA)'      => true,
-			'Customer flyers'                             => false,
-			'Service requests'                            => false,
+			'Mail items and mail routes'                    => array( 'moved' ),
+			'Gmail Intake (rules, Formation Documents, COA)' => array( 'moved' ),
+			'Customer flyers (shared copy, auto-share)'     => array( 'moved' ),
+			'E-Signatures (BreezeDoc): templates, PDF upload, webhooks' => array( 'moved' ),
 		),
-		'Integrations'      => array(
-			'Rentec Direct (API, Client Portal tab, settings)' => true,
-			'AJPhone'                          => false,
-			'Zoho Calendar and Zoho Mail'      => false,
-			'E-Signatures (BreezeDoc): templates, PDF upload, webhooks' => true,
-			'Expense invoices (accounting catalog stays in AJCore)' => true,
+		'Integrations'       => array(
+			'Rentec Direct (API, settings, screens, write forms)' => array( 'moved' ),
+			'Expense invoices'                              => array( 'moved', 'Low use; may fold into Requests' ),
+			'AJPhone'                                       => array( 'pending' ),
+			'Zoho Calendar and Reservations'                => array( 'pending', 'Untested; left alone for now' ),
+			'Zoho Mail'                                     => array( 'pending' ),
+		),
+		'Stays in AJCore'    => array(
+			'Service requests'                              => array( 'core', 'Becomes the generic Requests workflow engine' ),
+			'Accounting catalog (charge/payment categories)' => array( 'core', 'Used by Products & Services' ),
+			'Leads, customers, payments, portal, files'     => array( 'core' ),
 		),
 	);
 }
@@ -58,21 +66,37 @@ function ajcore_ra_render_features_page() {
 	$total  = 0;
 	$done   = 0;
 	foreach ( $groups as $features ) {
-		$total += count( $features );
-		$done  += count( array_filter( $features ) );
+		foreach ( $features as $feature ) {
+			if ( 'core' === $feature[0] ) {
+				continue;
+			}
+			$total++;
+			if ( 'moved' === $feature[0] ) {
+				$done++;
+			}
+		}
 	}
 
+	$pills = array(
+		'moved'   => '<span style="background:#00a32a;color:#fff;padding:2px 10px;border-radius:10px;font-weight:600">Moved</span>',
+		'pending' => '<span style="background:#dcdcde;color:#50575e;padding:2px 10px;border-radius:10px">Pending</span>',
+		'core'    => '<span style="background:#dbeafe;color:#1e40af;padding:2px 10px;border-radius:10px;white-space:nowrap">In AJCore</span>',
+	);
+	$rows = array(
+		'moved'   => 'background:#edfaef;font-weight:600',
+		'pending' => 'color:#50575e',
+		'core'    => 'color:#50575e;background:#f6f7f7',
+	);
+
 	echo '<div class="wrap"><h1>' . esc_html__( 'AJCore RA', 'ajcore-ra' ) . ' <small>' . esc_html( AJCORE_RA_VERSION ) . '</small></h1>';
-	echo '<p style="font-size:14px"><strong>' . esc_html( sprintf( '%d of %d moved', $done, $total ) ) . '</strong></p>';
-	echo '<table class="widefat" style="max-width:640px;font-size:14px"><tbody>';
+	echo '<p style="font-size:14px"><strong>' . esc_html( sprintf( '%d of %d moved', $done, $total ) ) . '</strong> · ' . esc_html__( 'Roadmap: docs/architecture/roadmap.md', 'ajcore-ra' ) . '</p>';
+	echo '<table class="widefat" style="max-width:760px;font-size:14px"><tbody>';
 	foreach ( $groups as $group => $features ) {
 		echo '<tr><th colspan="2" style="background:#1d2327;color:#fff;padding:8px 12px">' . esc_html( $group ) . '</th></tr>';
-		foreach ( $features as $label => $is_done ) {
-			$pill = $is_done
-				? '<span style="background:#00a32a;color:#fff;padding:2px 10px;border-radius:10px;font-weight:600">Moved</span>'
-				: '<span style="background:#dcdcde;color:#50575e;padding:2px 10px;border-radius:10px">Pending</span>';
-			$row  = $is_done ? 'background:#edfaef;font-weight:600' : 'color:#50575e';
-			echo '<tr style="' . esc_attr( $row ) . '"><td style="padding:8px 12px">' . esc_html( $label ) . '</td><td style="width:90px;text-align:right;padding:8px 12px">' . $pill . '</td></tr>'; // phpcs:ignore WordPress.Security.EscapeOutput -- static markup.
+		foreach ( $features as $label => $feature ) {
+			$status = $feature[0];
+			$note   = isset( $feature[1] ) ? ' <span style="font-weight:400;color:#787c82">· ' . esc_html( $feature[1] ) . '</span>' : '';
+			echo '<tr style="' . esc_attr( $rows[ $status ] ) . '"><td style="padding:8px 12px">' . esc_html( $label ) . $note . '</td><td style="width:90px;text-align:right;padding:8px 12px">' . $pills[ $status ] . '</td></tr>'; // phpcs:ignore WordPress.Security.EscapeOutput -- static markup.
 		}
 	}
 	echo '</tbody></table>';
