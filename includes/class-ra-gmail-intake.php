@@ -2317,11 +2317,11 @@ class AJCore_RA_Gmail_Intake {
 						} );
 						r.appendChild( t ); r.appendChild( inp ); r.appendChild( rb );
 						if ( f.file_id ) {
-							var sb = el( 'button', <?php echo wp_json_encode( __( 'Share with all customers', 'ajcore-ra' ) ); ?> ); sb.className = 'button button-small'; sb.type = 'button';
+							var sb = el( 'button', <?php echo wp_json_encode( __( 'Share with RA / ncllcagents.com customers', 'ajcore-ra' ) ); ?> ); sb.className = 'button button-small'; sb.type = 'button';
 							sb.addEventListener( 'click', function () {
 								api( '/share-all?key=' + encodeURIComponent( f.key ), { method: 'POST' } ).then( function ( p ) {
 									if ( ! p.new_shares && p.new_shares !== 0 ) { out.textContent = p.message || 'Failed.'; return; }
-									if ( ! p.new_shares ) { out.textContent = <?php echo wp_json_encode( __( 'Every customer already has this flyer.', 'ajcore-ra' ) ); ?>; return; }
+									if ( ! p.new_shares ) { out.textContent = <?php echo wp_json_encode( __( 'Every Registered Agent / ncllcagents.com customer already has this flyer.', 'ajcore-ra' ) ); ?>; return; }
 									if ( window.confirm( <?php echo wp_json_encode( __( 'Share this flyer with', 'ajcore-ra' ) ); ?> + ' ' + p.new_shares + ' ' + <?php echo wp_json_encode( __( 'more customer(s)?', 'ajcore-ra' ) ); ?> ) ) { api( '/share-all?apply=1&key=' + encodeURIComponent( f.key ), { method: 'POST' } ).then( function ( q ) { out.textContent = '✓ ' + q.new_shares + ' ' + <?php echo wp_json_encode( __( 'customer(s) added.', 'ajcore-ra' ) ); ?>; load(); } ); }
 								} );
 							} );
@@ -2524,7 +2524,34 @@ class AJCore_RA_Gmail_Intake {
 		return rest_ensure_response( array( 'file_id' => $new_id, 'shared' => $this->flyer_share_count( $new_id ) ) );
 	}
 
-	/** Share a flyer with every portal customer that has an email (preview with apply=0). */
+	/**
+	 * Customers who should see the NC LLC Agents flyers: an active Registered Agent subscription, or a
+	 * portal login assigned to ncllcagents.com. Returns a set of customer ids.
+	 */
+	private function flyer_audience_ids() {
+		$ids = array();
+		if ( class_exists( 'AJForms_Admin' ) ) {
+			$admin = AJForms_Admin::$instance ? AJForms_Admin::$instance : new AJForms_Admin();
+			if ( method_exists( $admin, 'get_portal_core_subscription_product_counts' ) ) {
+				$counts = $admin->get_portal_core_subscription_product_counts();
+				foreach ( (array) ( $counts['registered_agent_subscription_customers'] ?? array() ) as $id ) {
+					$ids[ (string) $id ] = true;
+				}
+			}
+		}
+		$pdb    = $this->get_pdb();
+		$states = $pdb->prefix . 'aj_portal_customer_states';
+		$sites  = $pdb->prefix . 'aj_shared_sites';
+		if ( $this->table_exists( $pdb, $states ) && $this->table_exists( $pdb, $sites ) ) {
+			$domain = apply_filters( 'ajcore_ra_flyer_site_domain', 'ncllcagents.com' );
+			foreach ( (array) $pdb->get_col( $pdb->prepare( "SELECT cs.stripe_customer_id FROM `{$states}` cs INNER JOIN `{$sites}` s ON s.site_uuid = cs.site_uuid WHERE s.domain LIKE %s", '%' . $pdb->esc_like( $domain ) . '%' ) ) as $id ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$ids[ (string) $id ] = true;
+			}
+		}
+		return $ids;
+	}
+
+	/** Share a flyer with the NC LLC Agents audience (Registered Agent customers or ncllcagents.com logins) — preview with apply=0. */
 	public function flyers_share_all_route( WP_REST_Request $request ) {
 		$key    = sanitize_key( (string) $request->get_param( 'key' ) );
 		$apply  = rest_sanitize_boolean( $request->get_param( 'apply' ) );
@@ -2538,6 +2565,13 @@ class AJCore_RA_Gmail_Intake {
 			(array) $pdb->get_results( "SELECT stripe_customer_id, email FROM {$this->get_portal_stripe_customers_table()} WHERE email <> ''" ), // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 			(array) $pdb->get_results( "SELECT local_customer_id AS stripe_customer_id, email FROM `{$local}` WHERE email <> ''" ) // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		);
+		$audience = $this->flyer_audience_ids();
+		if ( ! $audience ) {
+			return new WP_Error( 'no_audience', __( 'No Registered Agent or ncllcagents.com customers found.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$customers = array_values( array_filter( $customers, function ( $c ) use ( $audience ) {
+			return isset( $audience[ (string) $c->stripe_customer_id ] );
+		} ) );
 		global $wpdb;
 		$users = $wpdb->prefix . 'aj_portal_file_users';
 		$have  = array();
