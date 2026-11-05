@@ -242,7 +242,7 @@ function ajcore_ra_portal_file_settings( $settings ) {
 	);
 	$cats = array_values( array_diff( (array) $settings['categories'], array( 'Others', 'Articles of Organization' ) ) );
 	$settings['important_categories'] = array_values( array_diff( (array) $settings['important_categories'], array( 'Articles of Organization' ) ) );
-	foreach ( array( 'Formation Documents', 'IRS EIN Letters', 'SOSNC Flyers', 'Change of RA' ) as $cat ) {
+	foreach ( array( 'Formation Documents', 'IRS EIN Letters', 'SOSNC Flyers', 'Change of RA', 'ID Proof', 'Address Proof', 'USPS Form 1583' ) as $cat ) {
 		if ( ! in_array( $cat, $cats, true ) ) {
 			$cats[] = $cat;
 		}
