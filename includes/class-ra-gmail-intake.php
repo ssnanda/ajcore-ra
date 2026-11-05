@@ -311,6 +311,9 @@ class AJCore_RA_Gmail_Intake {
 		}
 		$gi->render_settings();
 		echo '</details>';
+		echo '<details class="ajforms-settings-card" style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:600;padding:8px 0">' . esc_html__( 'Shared flyers', 'ajcore-ra' ) . '</summary>';
+		$gi->render_flyers_card();
+		echo '</details>';
 		$gi->render_tab();
 	}
 
@@ -2274,7 +2277,13 @@ class AJCore_RA_Gmail_Intake {
 			}
 		})();
 		</script>
-		<div class="ajcore-gi-flyers" style="margin:16px 0;padding:12px 14px;border:1px solid #e2e8f0;border-radius:10px;max-width:760px;background:#fff;">
+		<?php
+	}
+
+	/** The Shared flyers card (own collapsible section on the Gmail Intake tab). */
+	public function render_flyers_card() {
+		?>
+		<div class="ajcore-gi-flyers" style="padding:4px 0;max-width:760px;">
 			<strong><?php esc_html_e( 'Shared flyers', 'ajcore-ra' ); ?></strong>
 			<span style="color:#64748b;font-size:12px;"> — <?php esc_html_e( 'one file per flyer, shared with customers. Not imported from mail.', 'ajcore-ra' ); ?></span>
 			<div id="ajcore-gi-flyers-rows" style="margin-top:8px;font-size:13px;"></div>
