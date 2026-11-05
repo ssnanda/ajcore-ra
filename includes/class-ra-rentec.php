@@ -45,6 +45,9 @@ class AJCore_RA_Rentec {
 		add_action( 'wp_ajax_ajcore_test_rentec_connection', array( __CLASS__, 'ajax_test' ) );
 		add_filter( 'ajcore_expense_invoice_options', array( __CLASS__, 'expense_invoice_options' ) );
 		add_filter( 'ajcore_endpoint_catalog', array( __CLASS__, 'catalog_writes' ) );
+		add_filter( 'cron_schedules', array( __CLASS__, 'cron_schedules' ) );
+		add_action( 'ajcore_ra_rentec_sync', array( __CLASS__, 'run_scheduled_sync' ) );
+		add_action( 'init', array( __CLASS__, 'ensure_sync_scheduled' ) );
 	}
 
 	public static function boot_routes() {
@@ -246,7 +249,64 @@ class AJCore_RA_Rentec {
 		echo '<details class="ajforms-settings-card" style="margin-bottom:14px"' . ( isset( $_GET['saved'] ) ? ' open' : '' ) . '><summary style="cursor:pointer;font-weight:600">' . esc_html__( 'Connection & API keys', 'ajcore-ra' ) . '</summary>';
 		$rentec->render_settings();
 		echo '</details>';
+		$rentec->render_diagnostics();
 		$rentec->render_workspace();
+	}
+
+	/** Collapsed "Diagnostics" card: pulls a few raw Rentec rows with every field and offers copy buttons. */
+	private function render_diagnostics() {
+		$accounts = $this->get_rentec_accounts_for_ops();
+		$labels   = array( 'work_orders' => 'Work Orders', 'tenants' => 'Tenants', 'leads' => 'Leads', 'applications' => 'Applications', 'vendors' => 'Vendors', 'properties' => 'Properties', 'owners' => 'Owners', 'leases' => 'Leases', 'transactions' => 'Transactions', 'files' => 'Files', 'messages' => 'Messages', 'accounts' => 'Accounts', 'products' => 'Products', 'banks' => 'Banks' );
+		?>
+		<details class="ajforms-settings-card" style="margin-bottom:14px" id="ajra-diag">
+			<summary style="cursor:pointer;font-weight:600"><?php esc_html_e( 'Diagnostics', 'ajcore-ra' ); ?></summary>
+			<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0">
+				<select id="ajra-diag-resource"><?php foreach ( $labels as $key => $label ) : ?><option value="<?php echo esc_attr( $key ); ?>"><?php echo esc_html( $label ); ?></option><?php endforeach; ?></select>
+				<select id="ajra-diag-account"><?php foreach ( $accounts as $id => $account ) : ?><option value="<?php echo esc_attr( $id ); ?>"><?php echo esc_html( $account['label'] ); ?></option><?php endforeach; ?></select>
+				<select id="ajra-diag-limit"><?php foreach ( array( 1, 2, 3, 5 ) as $n ) : ?><option value="<?php echo (int) $n; ?>"<?php selected( 3, $n ); ?>><?php echo (int) $n; ?> <?php esc_html_e( 'rows', 'ajcore-ra' ); ?></option><?php endforeach; ?></select>
+				<button type="button" class="button button-primary" id="ajra-diag-run"><?php esc_html_e( 'Pull rows', 'ajcore-ra' ); ?></button>
+				<button type="button" class="button" id="ajra-diag-copy-rows" hidden><?php esc_html_e( 'Copy full rows (JSON)', 'ajcore-ra' ); ?></button>
+				<button type="button" class="button" id="ajra-diag-copy-fields" hidden><?php esc_html_e( 'Copy field list', 'ajcore-ra' ); ?></button>
+				<button type="button" class="button" id="ajra-diag-copy-record" hidden><?php esc_html_e( 'Copy full record (JSON)', 'ajcore-ra' ); ?></button>
+				<span id="ajra-diag-status" style="color:#50575e"></span>
+			</div>
+			<pre id="ajra-diag-out" style="display:none;max-height:420px;overflow:auto;background:#1d2327;color:#f0f0f1;padding:12px;font-size:12px"></pre>
+		</details>
+		<script>
+		(function () {
+			var $ = function (id) { return document.getElementById(id); };
+			var last = null;
+			function copy(text, label) {
+				var done = function () { $('ajra-diag-status').textContent = 'Copied ' + label; };
+				if (navigator.clipboard) { navigator.clipboard.writeText(text).then(done); return; }
+				var t = document.createElement('textarea'); t.value = text; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); done();
+			}
+			function fieldsText(fields) { return fields.map(function (f) { return f.name + '\t' + f.type + '\t' + f.example; }).join('\n'); }
+			$('ajra-diag-run').addEventListener('click', function () {
+				var url = <?php echo wp_json_encode( rest_url( 'ajcore/v1/ops/rentec/diagnostics' ) ); ?>;
+				url += (url.indexOf('?') > -1 ? '&' : '?') + 'resource=' + encodeURIComponent($('ajra-diag-resource').value) + '&account=' + encodeURIComponent($('ajra-diag-account').value) + '&limit=' + encodeURIComponent($('ajra-diag-limit').value);
+				$('ajra-diag-status').textContent = 'Pulling…';
+				fetch(url, { headers: { 'X-WP-Nonce': <?php echo wp_json_encode( wp_create_nonce( 'wp_rest' ) ); ?> }, credentials: 'same-origin' })
+					.then(function (r) { return r.json().then(function (b) { return { ok: r.ok, b: b }; }); })
+					.then(function (res) {
+						if (!res.ok) { $('ajra-diag-status').textContent = res.b.message || 'Failed'; return; }
+						last = res.b;
+						var out = $('ajra-diag-out');
+						out.style.display = 'block';
+						out.textContent = JSON.stringify(res.b.rows, null, 2) + (res.b.detail ? '\n\n// single record #' + res.b.detail_id + (res.b.only_in_detail.length ? ' (only here: ' + res.b.only_in_detail.join(', ') + ')' : '') + '\n' + JSON.stringify(res.b.detail, null, 2) : '');
+						$('ajra-diag-copy-rows').hidden = false;
+						$('ajra-diag-copy-fields').hidden = false;
+						$('ajra-diag-copy-record').hidden = !res.b.detail;
+						$('ajra-diag-status').textContent = res.b.total + ' records · ' + res.b.fields.length + ' list fields' + (res.b.detail ? ' · ' + res.b.detail_fields.length + ' record fields' : '') + ' · ' + res.b.calls + ' call(s)';
+					})
+					.catch(function () { $('ajra-diag-status').textContent = 'Request failed'; });
+			});
+			$('ajra-diag-copy-rows').addEventListener('click', function () { if (last) { copy(JSON.stringify(last.rows, null, 2), 'rows'); } });
+			$('ajra-diag-copy-record').addEventListener('click', function () { if (last && last.detail) { copy(JSON.stringify(last.detail, null, 2), 'record'); } });
+			$('ajra-diag-copy-fields').addEventListener('click', function () { if (last) { copy(fieldsText(last.fields) + (last.detail ? '\n\n--- single record ---\n' + fieldsText(last.detail_fields) : ''), 'field list'); } });
+		})();
+		</script>
+		<?php
 	}
 
 	// ── REST routes (same URLs as before) ───────────────────────────────────────
@@ -474,35 +534,287 @@ class AJCore_RA_Rentec {
 			return new WP_Error( 'ajcore_rentec_response_failed', $message, array( 'status' => 502 ) );
 		}
 		if ( 'GET' !== strtoupper( (string) $method ) ) {
-			$this->bump_rentec_cache();
+			$this->refresh_rentec_after_write( $url, $api_key );
 		}
 		return $body;
 	}
 
-	// ── Read cache ──────────────────────────────────────────────────────────────
-	// Rentec's v3 list endpoints cannot be paged and every call costs ~1-3 s (60 calls/min per key), so
-	// reads are cached in transients and any successful write invalidates them all by bumping a version.
+	// ── Local copy of Rentec data ───────────────────────────────────────────────
+	// Rentec's v3 list endpoints cannot be paged and every call costs ~1-3 s (60 calls/min per key), so each list
+	// is stored in a local table (aj_rentec_cache) and screens read from it. It is refreshed by: a background job
+	// every 10 minutes, the "Sync now" button, the per-screen Refresh button, and right after any create, note or
+	// upload (only the affected lists). Rentec's API cannot edit existing records, so nothing else needs pushing.
 
 	private $rentec_bypass_cache = false;
 
-	private function bump_rentec_cache() {
-		update_option( 'ajcore_ra_rentec_cache_v', (int) get_option( 'ajcore_ra_rentec_cache_v', 1 ) + 1, false );
+	/** A stored copy older than this is treated as missing and re-fetched live (the background job normally keeps it far fresher). */
+	private function rentec_cache_max_age() {
+		return (int) apply_filters( 'ajcore_ra_rentec_cache_max_age', 30 * MINUTE_IN_SECONDS );
 	}
 
-	/** GET through the cache. $ttl seconds; errors are never cached. */
-	private function cached_rentec_for_ops( $url, $api_key, $ttl = 120 ) {
-		$key = 'ajra_rt_' . md5( (int) get_option( 'ajcore_ra_rentec_cache_v', 1 ) . '|' . $url . '|' . $api_key );
-		if ( ! $this->rentec_bypass_cache ) {
-			$hit = get_transient( $key );
+	private function rentec_cache_table() {
+		global $wpdb;
+		return $wpdb->prefix . 'aj_rentec_cache';
+	}
+
+	private function ensure_rentec_cache_table() {
+		static $done = false;
+		if ( $done ) {
+			return;
+		}
+		$done = true;
+		if ( (int) get_option( 'ajcore_ra_rentec_cache_table', 0 ) >= 1 ) {
+			return;
+		}
+		global $wpdb;
+		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+		$table = $this->rentec_cache_table();
+		dbDelta( "CREATE TABLE {$table} (
+			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+			key_hash char(32) NOT NULL,
+			cache_key char(32) NOT NULL,
+			resource varchar(40) NOT NULL DEFAULT '',
+			url text NOT NULL,
+			body longtext NOT NULL,
+			records int(11) NOT NULL DEFAULT 0,
+			synced_at datetime NOT NULL,
+			PRIMARY KEY  (id),
+			UNIQUE KEY entry (key_hash,cache_key),
+			KEY resource (resource)
+		) {$wpdb->get_charset_collate()};" );
+		update_option( 'ajcore_ra_rentec_cache_table', 1, false );
+	}
+
+	/** Same URL with its query sorted, so equal requests share one stored copy. */
+	private function normalize_rentec_url( $url ) {
+		$parts = wp_parse_url( $url );
+		$query = array();
+		if ( ! empty( $parts['query'] ) ) {
+			parse_str( $parts['query'], $query );
+			ksort( $query );
+		}
+		return ( $parts['scheme'] ?? 'https' ) . '://' . ( $parts['host'] ?? '' ) . ( $parts['path'] ?? '' ) . ( $query ? '?' . http_build_query( $query ) : '' );
+	}
+
+	/** First path segment after /api/v3/ ("transactions/expense" -> "transactions"). */
+	private function rentec_resource_of( $url ) {
+		$path = (string) wp_parse_url( $url, PHP_URL_PATH );
+		$path = preg_replace( '#^.*/api/v3/#', '', $path );
+		$seg  = explode( '/', trim( $path, '/' ) );
+		return sanitize_key( (string) $seg[0] );
+	}
+
+	private function store_rentec_cache( $url, $api_key, array $body ) {
+		global $wpdb;
+		$this->ensure_rentec_cache_table();
+		$url = $this->normalize_rentec_url( $url );
+		$wpdb->query( $wpdb->prepare( // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			"INSERT INTO `{$this->rentec_cache_table()}` (key_hash,cache_key,resource,url,body,records,synced_at) VALUES (%s,%s,%s,%s,%s,%d,%s)
+			 ON DUPLICATE KEY UPDATE body=VALUES(body),records=VALUES(records),synced_at=VALUES(synced_at),url=VALUES(url),resource=VALUES(resource)",
+			md5( $api_key ),
+			md5( $url ),
+			$this->rentec_resource_of( $url ),
+			$url,
+			wp_json_encode( $body ),
+			isset( $body['data'] ) && is_array( $body['data'] ) ? count( $body['data'] ) : 0,
+			gmdate( 'Y-m-d H:i:s' )
+		) );
+	}
+
+	private function read_rentec_cache( $url, $api_key ) {
+		global $wpdb;
+		$this->ensure_rentec_cache_table();
+		return $wpdb->get_row( $wpdb->prepare( // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			"SELECT body, synced_at FROM `{$this->rentec_cache_table()}` WHERE key_hash=%s AND cache_key=%s",
+			md5( $api_key ),
+			md5( $this->normalize_rentec_url( $url ) )
+		) );
+	}
+
+	/** GET through the local copy. Falls back to a live call (and stores it) when missing, too old, or bypassed; serves the old copy if Rentec is unreachable. */
+	private function cached_rentec_for_ops( $url, $api_key, $ttl = 0 ) {
+		$row = $this->read_rentec_cache( $url, $api_key );
+		if ( $row && ! $this->rentec_bypass_cache && ( time() - strtotime( $row->synced_at . ' UTC' ) ) <= $this->rentec_cache_max_age() ) {
+			$hit = json_decode( $row->body, true );
 			if ( is_array( $hit ) ) {
 				return $hit;
 			}
 		}
 		$body = $this->request_rentec_for_ops( $url, $api_key );
 		if ( ! is_wp_error( $body ) ) {
-			set_transient( $key, $body, $ttl );
+			$this->store_rentec_cache( $url, $api_key, $body );
+			return $body;
+		}
+		if ( $row ) {
+			$stale = json_decode( $row->body, true );
+			if ( is_array( $stale ) ) {
+				return $stale;
+			}
 		}
 		return $body;
+	}
+
+	/** After a successful create/note/upload, re-fetch the stored lists it can change so the screens show it straight away. */
+	private function refresh_rentec_after_write( $url, $api_key ) {
+		$map = array(
+			'work_orders'  => array( 'work_orders' ),
+			'leads'        => array( 'leads' ),
+			'vendors'      => array( 'vendors' ),
+			'properties'   => array( 'properties' ),
+			'tenants'      => array( 'tenants' ),
+			'leases'       => array( 'leases', 'tenants' ),
+			'transactions' => array( 'transactions' ),
+			'messages'     => array( 'messages' ),
+			'files'        => array( 'files' ),
+		);
+		$resource = $this->rentec_resource_of( $url );
+		if ( isset( $map[ $resource ] ) ) {
+			$this->refresh_rentec_cache_resources( $map[ $resource ], $api_key );
+		}
+	}
+
+	private function refresh_rentec_cache_resources( array $resources, $api_key ) {
+		global $wpdb;
+		$this->ensure_rentec_cache_table();
+		$place = implode( ',', array_fill( 0, count( $resources ), '%s' ) );
+		$urls  = $wpdb->get_col( $wpdb->prepare( // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			"SELECT url FROM `{$this->rentec_cache_table()}` WHERE key_hash=%s AND resource IN ({$place})",
+			array_merge( array( md5( $api_key ) ), $resources )
+		) );
+		foreach ( (array) $urls as $stored_url ) {
+			$body = $this->request_rentec_for_ops( $stored_url, $api_key );
+			if ( ! is_wp_error( $body ) ) {
+				$this->store_rentec_cache( $stored_url, $api_key, $body );
+			}
+		}
+	}
+
+	/** The Rentec lists to keep local, in sync order. resource => list of exact URLs the screens and counts request. */
+	private function rentec_sync_plan() {
+		$plan = array();
+		foreach ( array( 'work_orders', 'tenants', 'leads', 'applications', 'vendors', 'properties', 'owners', 'leases', 'transactions', 'files', 'messages', 'accounts', 'products' ) as $resource ) {
+			$plan[ $resource ] = array( $this->rentec_list_url( $resource ) );
+		}
+		$base                   = 'https://secure.rentecdirect.com/api/v3/';
+		$plan['applications'][] = add_query_arg( 'status', 'Unread', $base . 'applications' );
+		$plan['messages'][]     = add_query_arg( array( 'unread_only' => 'true', 'page_size' => 100 ), $base . 'messages' );
+		return $plan;
+	}
+
+	/** The URL a screen requests for a resource's list (also what the counts and the sync use, so they share one stored copy). */
+	private function rentec_list_url( $resource ) {
+		$url = 'https://secure.rentecdirect.com/api/v3/' . $resource;
+		if ( 'transactions' === $resource ) {
+			$url = add_query_arg( 'page', 1, $url );
+		} elseif ( 'properties' === $resource ) {
+			$url = add_query_arg( 'include_subunits', 'true', $url );
+		} elseif ( 'messages' === $resource ) {
+			$url = add_query_arg( 'page_size', 100, $url );
+		} elseif ( 'work_orders' === $resource ) {
+			$url = add_query_arg( 'age', '3650d', $url );
+		}
+		return $url;
+	}
+
+	/** Syncs one resource for one account key live; returns records stored or a WP_Error. */
+	private function sync_rentec_resource( $resource, $api_key ) {
+		$plan = $this->rentec_sync_plan();
+		if ( ! isset( $plan[ $resource ] ) ) {
+			return new WP_Error( 'ajcore_rentec_kind', __( 'Unknown Rentec resource.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$records = 0;
+		foreach ( $plan[ $resource ] as $url ) {
+			$body = $this->request_rentec_for_ops( $url, $api_key );
+			if ( is_wp_error( $body ) ) {
+				return $body;
+			}
+			$this->store_rentec_cache( $url, $api_key, $body );
+			$records = max( $records, isset( $body['data'] ) && is_array( $body['data'] ) ? count( $body['data'] ) : 0 );
+		}
+		update_option( 'ajcore_ra_rentec_last_sync', time(), false );
+		return $records;
+	}
+
+	/** Background job: sync every resource for every configured account. */
+	public static function run_scheduled_sync() {
+		$rentec   = self::instance();
+		$settings = $rentec->get_settings();
+		if ( '1' !== (string) ( $settings['rentec_enabled'] ?? '0' ) ) {
+			return;
+		}
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 300 ); // phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
+		}
+		foreach ( $rentec->get_rentec_accounts_for_ops() as $account ) {
+			if ( empty( $account['key'] ) ) {
+				continue;
+			}
+			foreach ( array_keys( $rentec->rentec_sync_plan() ) as $resource ) {
+				$rentec->sync_rentec_resource( $resource, $account['key'] );
+			}
+		}
+	}
+
+	public static function cron_schedules( $schedules ) {
+		$schedules['ajra_ten_minutes'] = array( 'interval' => 10 * MINUTE_IN_SECONDS, 'display' => __( 'Every 10 minutes', 'ajcore-ra' ) );
+		return $schedules;
+	}
+
+	public static function ensure_sync_scheduled() {
+		if ( ! wp_next_scheduled( 'ajcore_ra_rentec_sync' ) ) {
+			wp_schedule_event( time() + 120, 'ajra_ten_minutes', 'ajcore_ra_rentec_sync' );
+		}
+	}
+
+	/** What is stored and how old, plus the steps the Sync now button walks through. */
+	public function get_ops_rentec_sync_status( WP_REST_Request $request ) {
+		$selected = $this->get_rentec_account_for_ops_request( $request );
+		if ( is_wp_error( $selected ) ) {
+			return $selected;
+		}
+		global $wpdb;
+		$this->ensure_rentec_cache_table();
+		$steps   = array();
+		$entries = array();
+		foreach ( $selected['accounts'] as $id => $account ) {
+			if ( empty( $account['key'] ) ) {
+				continue;
+			}
+			foreach ( array_keys( $this->rentec_sync_plan() ) as $resource ) {
+				$steps[] = array( 'account' => (string) $id, 'resource' => $resource );
+			}
+			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT resource, MAX(synced_at) AS synced_at, MAX(records) AS records FROM `{$this->rentec_cache_table()}` WHERE key_hash=%s GROUP BY resource", md5( $account['key'] ) ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			foreach ( (array) $rows as $row ) {
+				$entries[] = array( 'account' => (string) $id, 'resource' => $row['resource'], 'synced_at' => strtotime( $row['synced_at'] . ' UTC' ), 'records' => (int) $row['records'] );
+			}
+		}
+		return rest_ensure_response( array(
+			'steps'            => $steps,
+			'entries'          => $entries,
+			'last_synced'      => $entries ? max( wp_list_pluck( $entries, 'synced_at' ) ) : 0,
+			'oldest'           => $entries ? min( wp_list_pluck( $entries, 'synced_at' ) ) : 0,
+			'interval_minutes' => 10,
+			'next_scheduled'   => (int) wp_next_scheduled( 'ajcore_ra_rentec_sync' ),
+			'now'              => time(),
+		) );
+	}
+
+	/** Sync one resource for one account (the Sync now button calls this once per step). */
+	public function run_ops_rentec_sync( WP_REST_Request $request ) {
+		$selected = $this->get_rentec_account_for_ops_request( $request );
+		if ( is_wp_error( $selected ) ) {
+			return $selected;
+		}
+		$account  = (string) $request->get_param( 'account' );
+		$resource = sanitize_key( (string) $request->get_param( 'resource' ) );
+		if ( empty( $selected['accounts'][ $account ]['key'] ) ) {
+			return new WP_Error( 'ajcore_rentec_not_configured', __( 'That Rentec account does not have an API key.', 'ajcore-ra' ), array( 'status' => 409 ) );
+		}
+		$records = $this->sync_rentec_resource( $resource, $selected['accounts'][ $account ]['key'] );
+		if ( is_wp_error( $records ) ) {
+			return $records;
+		}
+		return rest_ensure_response( array( 'account' => $account, 'resource' => $resource, 'records' => $records ) );
 	}
 
 	/** Flatten Rentec multi-unit properties and inherit blank sub-unit addresses from the parent. */
@@ -605,6 +917,9 @@ class AJCore_RA_Rentec {
 		register_rest_route( $ns, '/ops/rentec/(?P<kind>properties|tenants)/(?P<id>\d+)/notes', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( $this, 'add_ops_rentec_entity_note' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/rentec/files', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( $this, 'upload_ops_rentec_file' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/rentec/counts', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( $this, 'get_ops_rentec_counts' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/rentec/sync-status', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( $this, 'get_ops_rentec_sync_status' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/rentec/sync', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( $this, 'run_ops_rentec_sync' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/rentec/schema', array( 'methods' => WP_REST_Server::READABLE, 'callback' => function () { return rest_ensure_response( AJCore_RA_Rentec_Screens::definition() ); }, 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/rentec/diagnostics', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( $this, 'get_ops_rentec_diagnostics' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/rentec/lookup', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( $this, 'get_ops_rentec_lookup' ), 'permission_callback' => $ops ) );
 	}
@@ -617,6 +932,9 @@ class AJCore_RA_Rentec {
 		$catalog[] = $e( 'POST', '/ops/rentec/{properties|tenants}/{id}/notes', 'Adds a note to a Rentec property or tenant.' );
 		$catalog[] = $e( 'POST', '/ops/rentec/files', 'Uploads a file to Rentec (multipart: file, optional property_id, renter_id, owner_id, vendor_id, workorder_id, transaction_id, share_owner).' );
 		$catalog[] = $e( 'GET', '/ops/rentec/counts', 'Badge counts for the Rentec sidebar (open work orders, tenants owing, leads, unread applications and messages, totals), cached.' );
+		$catalog[] = $e( 'GET', '/ops/rentec/sync-status', 'What is stored locally per Rentec resource and how old it is, plus the steps the Sync now button walks through.' );
+		$catalog[] = $e( 'POST', '/ops/rentec/sync', 'Re-fetches one Rentec resource (account, resource) into the local copy. The background job does the same every 10 minutes.' );
+		$catalog[] = $e( 'GET', '/ops/rentec/schema', 'The shared Rentec screen definition (resources, columns, badges, create forms) used by the WP-admin workspace and AJOps.' );
 		$catalog[] = $e( 'GET', '/ops/rentec/diagnostics', 'Raw Rentec rows with every field (resource, account, limit<=5): unmodified list rows, the first record fetched individually, and a field list. Bypasses the cache; 1-2 Rentec calls.' );
 		$catalog[] = $e( 'GET', '/ops/rentec/lookup', 'Finds a tenant, owner, vendor or prospect by exact name, email or phone (type, q) for the message recipient picker.' );
 		return $catalog;
@@ -738,7 +1056,7 @@ class AJCore_RA_Rentec {
 			$message = isset( $response_body['message'] ) ? sanitize_text_field( (string) $response_body['message'] ) : sprintf( __( 'Rentec returned HTTP status %d.', 'ajcore-ra' ), $status );
 			return new WP_Error( 'ajcore_rentec_upload_failed', $message, array( 'status' => 502 ) );
 		}
-		$this->bump_rentec_cache();
+		$this->refresh_rentec_cache_resources( array( 'files', 'work_orders' ), $selected['account']['key'] );
 		return rest_ensure_response( is_array( $response_body ) ? $response_body : array( 'success' => true ) );
 	}
 
@@ -1007,18 +1325,9 @@ class AJCore_RA_Rentec {
 		$account  = $selected['id'];
 		$accounts = $selected['accounts'];
 
-		$url = 'https://secure.rentecdirect.com/api/v3/' . $resource;
-		if ( 'transactions' === $resource ) {
-			$url = add_query_arg( 'page', 1, $url );
-		}
-		if ( 'properties' === $resource ) {
-			$url = add_query_arg( 'include_subunits', 'true', $url );
-		}
-		if ( 'messages' === $resource ) {
-			$url = add_query_arg( 'page_size', 100, $url );
-			if ( rest_sanitize_boolean( $request->get_param( 'unread_only' ) ) ) {
-				$url = add_query_arg( 'unread_only', 'true', $url );
-			}
+		$url = $this->rentec_list_url( $resource );
+		if ( 'messages' === $resource && rest_sanitize_boolean( $request->get_param( 'unread_only' ) ) ) {
+			$url = add_query_arg( 'unread_only', 'true', $url );
 		}
 
 		$statuses = array();
@@ -1615,6 +1924,7 @@ class AJCore_RA_Rentec {
 			$message = isset( $response_body['message'] ) ? sanitize_text_field( (string) $response_body['message'] ) : sprintf( __( 'Rentec returned HTTP status %d.', 'ajcore-ra' ), $status );
 			return new WP_Error( 'ajcore_rentec_upload_failed', $message, array( 'status' => 502 ) );
 		}
+		$this->refresh_rentec_cache_resources( array( 'files', 'work_orders' ), $selected['account']['key'] );
 		return rest_ensure_response( is_array( $response_body ) ? $response_body : array( 'success' => true ) );
 	}
 
@@ -1908,721 +2218,57 @@ class AJCore_RA_Rentec {
 	/**
 	 * Rentec workspace inside the Client Portal admin.
 	 */
+	/**
+	 * The Rentec workspace. Built in the browser from the shared screen definition (GET /ops/rentec/schema)
+	 * by assets/rentec-workspace.js, so WP admin shows the same screens as AJOps.
+	 */
 	public function render_workspace() {
-		$settings  = $this->get_settings();
-		$resources = array(
-			'work_orders'  => array(
-				'label'   => __( 'Work Orders', 'ajcore-ra' ),
-				'columns' => array(
-					'wo_number'     => __( 'Number', 'ajcore-ra' ),
-					'status'        => __( 'Status', 'ajcore-ra' ),
-					'priority'      => __( 'Priority', 'ajcore-ra' ),
-					'short_desc'    => __( 'Description', 'ajcore-ra' ),
-					'property_id'   => __( 'Property', 'ajcore-ra' ),
-					'date_received' => __( 'Received', 'ajcore-ra' ),
-				),
-			),
-			'leads'        => array(
-				'label'   => __( 'Leads', 'ajcore-ra' ),
-				'columns' => array(
-					'prospect_id' => __( 'ID', 'ajcore-ra' ),
-					'f_name'     => __( 'First Name', 'ajcore-ra' ),
-					'l_name'     => __( 'Last Name', 'ajcore-ra' ),
-					'email'      => __( 'Email', 'ajcore-ra' ),
-					'phone'      => __( 'Phone', 'ajcore-ra' ),
-					'move_in'    => __( 'Move In', 'ajcore-ra' ),
-					'search_city' => __( 'Search City', 'ajcore-ra' ),
-				),
-			),
-			'vendors'      => array(
-				'label'   => __( 'Vendors', 'ajcore-ra' ),
-				'columns' => array(
-					'vendor_id' => __( 'ID', 'ajcore-ra' ),
-					'name'      => __( 'Name', 'ajcore-ra' ),
-					'industry'  => __( 'Industry', 'ajcore-ra' ),
-					'contact'   => __( 'Contact', 'ajcore-ra' ),
-					'email'     => __( 'Email', 'ajcore-ra' ),
-					'phone'     => __( 'Phone', 'ajcore-ra' ),
-				),
-			),
-			'transactions' => array(
-				'label'   => __( 'Transactions', 'ajcore-ra' ),
-				'columns' => array(
-					'transaction_id'   => __( 'ID', 'ajcore-ra' ),
-					'transaction_time' => __( 'Date', 'ajcore-ra' ),
-					'category_name'    => __( 'Category', 'ajcore-ra' ),
-					'description'      => __( 'Description', 'ajcore-ra' ),
-					'amount'           => __( 'Amount', 'ajcore-ra' ),
-					'property_id'      => __( 'Property', 'ajcore-ra' ),
-				),
-			),
-			'files'        => array(
-				'label'   => __( 'Files', 'ajcore-ra' ),
-				'columns' => array(
-					'file_id'      => __( 'ID', 'ajcore-ra' ),
-					'filename'     => __( 'Filename', 'ajcore-ra' ),
-					'upload_date'  => __( 'Uploaded', 'ajcore-ra' ),
-					'bytes'        => __( 'Size', 'ajcore-ra' ),
-					'property_id'  => __( 'Property', 'ajcore-ra' ),
-					'workorder_id' => __( 'Work Order', 'ajcore-ra' ),
-				),
-			),
-			'messages'     => array(
-				'label'   => __( 'Messages', 'ajcore-ra' ),
-				'columns' => array(
-					'email_id'   => __( 'ID', 'ajcore-ra' ),
-					'email_time' => __( 'Date', 'ajcore-ra' ),
-					'direction'  => __( 'Direction', 'ajcore-ra' ),
-					'subject'    => __( 'Subject', 'ajcore-ra' ),
-					'status'     => __( 'Status', 'ajcore-ra' ),
-					'renter_id'  => __( 'Tenant', 'ajcore-ra' ),
-				),
-			),
-		);
-
-		$resource = isset( $_GET['rentec_resource'] ) ? sanitize_key( wp_unslash( $_GET['rentec_resource'] ) ) : 'work_orders';
-		if ( ! isset( $resources[ $resource ] ) ) {
-			$resource = 'work_orders';
-		}
-		$accounts = array(
-			'1' => array(
-				'label' => $settings['rentec_account_label_1'] ?? 'Rentec Account 1',
-				'key'   => $settings['rentec_api_key'] ?? '',
-			),
-			'2' => array(
-				'label' => $settings['rentec_account_label_2'] ?? 'Rentec Account 2',
-				'key'   => $settings['rentec_api_key_2'] ?? '',
-			),
-		);
-		$filters_set        = isset( $_GET['rentec_filters_set'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['rentec_filters_set'] ) );
-		$requested_accounts = isset( $_GET['rentec_accounts'] )
-			? (array) wp_unslash( $_GET['rentec_accounts'] )
-			: ( $filters_set ? array() : array_map( 'strval', array_keys( $accounts ) ) );
-		$selected_accounts  = array_values(
-			array_filter(
-				array_map( 'sanitize_text_field', $requested_accounts ),
-				function ( $index ) use ( $accounts ) {
-					return isset( $accounts[ $index ] ) && ! empty( $accounts[ $index ]['key'] );
-				}
-			)
-		);
-		if ( empty( $selected_accounts ) && ! $filters_set ) {
-			$selected_accounts = array_map(
-				'strval',
-				array_keys(
-				array_filter(
-					$accounts,
-					function ( $configured_account ) {
-						return ! empty( $configured_account['key'] );
-					}
-				)
-				)
-			);
-		}
-		$work_order_statuses = array(
-			'OpenU'     => __( 'Unassigned', 'ajcore-ra' ),
-			'OpenA'     => __( 'Assigned', 'ajcore-ra' ),
-			'Parts'     => __( 'Parts on Order', 'ajcore-ra' ),
-			'Work'      => __( 'Work in Progress', 'ajcore-ra' ),
-			'Finalized' => __( 'Finalized', 'ajcore-ra' ),
-			'Closed'    => __( 'Closed', 'ajcore-ra' ),
-		);
-		$selected_statuses = isset( $_GET['rentec_statuses'] )
-			? array_map( 'sanitize_text_field', (array) wp_unslash( $_GET['rentec_statuses'] ) )
-			: ( $filters_set ? array() : array( 'OpenU', 'OpenA', 'Parts', 'Work', 'Finalized' ) );
-		$note_result = '';
-		if ( isset( $_POST['ajcore_rentec_note_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['ajcore_rentec_note_nonce'] ) ), 'ajcore_add_rentec_work_order_note' ) ) {
-			$note_account = isset( $_POST['rentec_note_account'] ) && '2' === sanitize_text_field( wp_unslash( $_POST['rentec_note_account'] ) ) ? '2' : '1';
-			$note_id      = isset( $_POST['rentec_workorder_id'] ) ? absint( $_POST['rentec_workorder_id'] ) : 0;
-			$note_text    = isset( $_POST['rentec_note'] ) ? sanitize_textarea_field( wp_unslash( $_POST['rentec_note'] ) ) : '';
-			if ( $note_id && '' !== trim( $note_text ) && ! empty( $accounts[ $note_account ]['key'] ) ) {
-				$note_response = wp_remote_post(
-					'https://secure.rentecdirect.com/api/v3/work_orders/' . $note_id . '/notes',
-					array(
-						'headers' => array( 'Accept' => 'application/json', 'Content-Type' => 'application/json', 'X-API-Key' => $accounts[ $note_account ]['key'] ),
-						'body'    => wp_json_encode( array( 'note' => $note_text, 'private' => ! empty( $_POST['rentec_note_private'] ) ) ),
-						'timeout' => 15,
-					)
-				);
-				$note_status = is_wp_error( $note_response ) ? 0 : (int) wp_remote_retrieve_response_code( $note_response );
-				$note_result = in_array( $note_status, array( 200, 201 ), true )
-					? __( 'Work-order note added.', 'ajcore-ra' )
-					: ( is_wp_error( $note_response ) ? $note_response->get_error_message() : sprintf( __( 'Rentec returned HTTP status %d while adding the note.', 'ajcore-ra' ), $note_status ) );
-			}
-		}
-		$base_url = add_query_arg(
-			array(
-				'page' => 'ajforms-client-portal',
-				'tab'  => 'rentec',
-			),
-			admin_url( 'admin.php' )
-		);
-		?>
-		<div class="ajforms-settings-card">
-			<div class="ajcore-section-head">
-				<div>
-					<h2><?php esc_html_e( 'Rentec Direct', 'ajcore-ra' ); ?></h2>
-				</div>
-				<div class="ajforms-settings-inline-actions">
-					<?php if ( '1' === (string) ( $settings['rentec_enabled'] ?? '0' ) ) : ?>
-						<?php if ( 'work_orders' === $resource ) : ?><button type="button" id="ajcore-new-rentec-work-order" class="button button-primary"><?php esc_html_e( 'New Work Order', 'ajcore-ra' ); ?></button><?php endif; ?>
-						<?php if ( 'leads' === $resource ) : ?><button type="button" id="ajcore-new-rentec-lead" class="button button-primary"><?php esc_html_e( 'New Lead', 'ajcore-ra' ); ?></button><?php endif; ?>
-						<?php if ( 'vendors' === $resource ) : ?><button type="button" id="ajcore-new-rentec-vendor" class="button button-primary"><?php esc_html_e( 'New Vendor', 'ajcore-ra' ); ?></button><?php endif; ?>
-					<?php endif; ?>
-				</div>
-			</div>
-
-			<?php if ( '1' === (string) ( $settings['rentec_enabled'] ?? '0' ) ) : ?>
-				<dialog id="ajcore-rentec-work-order-dialog" style="width:min(680px,calc(100vw - 32px));border:0;border-radius:14px;padding:0;box-shadow:0 24px 70px rgba(15,23,42,.3);">
-					<form id="ajcore-rentec-work-order-create-form" style="padding:24px;">
-						<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;">
-							<div><h2 style="margin:0;"><?php esc_html_e( 'New Work Order', 'ajcore-ra' ); ?></h2><p class="description"><?php esc_html_e( 'Create this work order directly in Rentec Direct.', 'ajcore-ra' ); ?></p></div>
-							<button type="button" class="button" id="ajcore-close-rentec-work-order"><?php esc_html_e( 'Close', 'ajcore-ra' ); ?></button>
-						</div>
-						<div id="ajcore-rentec-work-order-create-error" class="notice notice-error inline" style="display:none;margin:14px 0;"></div>
-						<table class="form-table" role="presentation">
-							<tr><th><label for="ajcore-create-rentec-account"><?php esc_html_e( 'Rentec Account', 'ajcore-ra' ); ?></label></th><td>
-								<select id="ajcore-create-rentec-account" class="regular-text">
-									<?php foreach ( $accounts as $account_id => $account_config ) : ?>
-										<?php if ( ! empty( $account_config['key'] ) ) : ?><option value="<?php echo esc_attr( $account_id ); ?>"><?php echo esc_html( $account_config['label'] ); ?></option><?php endif; ?>
-									<?php endforeach; ?>
-								</select>
-							</td></tr>
-							<tr><th><label for="ajcore-create-rentec-property"><?php esc_html_e( 'Property', 'ajcore-ra' ); ?></label></th><td><select id="ajcore-create-rentec-property" class="regular-text" required><option value=""><?php esc_html_e( 'Select a property', 'ajcore-ra' ); ?></option></select></td></tr>
-							<tr><th><label for="ajcore-create-rentec-renter"><?php esc_html_e( 'Renter', 'ajcore-ra' ); ?></label></th><td><select id="ajcore-create-rentec-renter" class="regular-text"><option value=""><?php esc_html_e( 'No renter', 'ajcore-ra' ); ?></option></select></td></tr>
-							<tr><th><label for="ajcore-create-rentec-contact"><?php esc_html_e( 'Contact Renter', 'ajcore-ra' ); ?></label></th><td><select id="ajcore-create-rentec-contact" class="regular-text"><option value=""><?php esc_html_e( 'Same/none', 'ajcore-ra' ); ?></option></select></td></tr>
-							<tr><th><label for="ajcore-create-rentec-vendor"><?php esc_html_e( 'Vendor', 'ajcore-ra' ); ?></label></th><td><select id="ajcore-create-rentec-vendor" class="regular-text"><option value=""><?php esc_html_e( 'Unassigned', 'ajcore-ra' ); ?></option></select></td></tr>
-							<tr><th><label for="ajcore-create-rentec-priority"><?php esc_html_e( 'Priority', 'ajcore-ra' ); ?></label></th><td><select id="ajcore-create-rentec-priority"><?php foreach ( range( 1, 5 ) as $priority_value ) : ?><option value="<?php echo esc_attr( $priority_value ); ?>"><?php echo esc_html( $priority_value ); ?></option><?php endforeach; ?></select></td></tr>
-							<tr><th><label for="ajcore-create-rentec-short-desc"><?php esc_html_e( 'Short Description', 'ajcore-ra' ); ?></label></th><td><input id="ajcore-create-rentec-short-desc" type="text" class="large-text" maxlength="100" required></td></tr>
-							<tr><th><label for="ajcore-create-rentec-description"><?php esc_html_e( 'Full Description', 'ajcore-ra' ); ?></label></th><td><textarea id="ajcore-create-rentec-description" class="large-text" rows="5"></textarea></td></tr>
-						</table>
-						<p class="submit" style="display:flex;justify-content:flex-end;gap:8px;">
-							<button type="button" class="button" id="ajcore-cancel-rentec-work-order"><?php esc_html_e( 'Cancel', 'ajcore-ra' ); ?></button>
-							<button type="submit" class="button button-primary" id="ajcore-submit-rentec-work-order"><?php esc_html_e( 'Create Work Order', 'ajcore-ra' ); ?></button>
-						</p>
-					</form>
-				</dialog>
-				<script>
-				(function() {
-					const openButton = document.getElementById('ajcore-new-rentec-work-order');
-					const dialog = document.getElementById('ajcore-rentec-work-order-dialog');
-					const form = document.getElementById('ajcore-rentec-work-order-create-form');
-					if (!openButton || !dialog || !form) return;
-					const account = document.getElementById('ajcore-create-rentec-account');
-					const property = document.getElementById('ajcore-create-rentec-property');
-					const renter = document.getElementById('ajcore-create-rentec-renter');
-					const contact = document.getElementById('ajcore-create-rentec-contact');
-					const vendor = document.getElementById('ajcore-create-rentec-vendor');
-					const error = document.getElementById('ajcore-rentec-work-order-create-error');
-					const submit = document.getElementById('ajcore-submit-rentec-work-order');
-					const restRoot = <?php echo wp_json_encode( untrailingslashit( rest_url( 'ajcore/v1/ops/rentec' ) ) ); ?>;
-					const nonce = <?php echo wp_json_encode( wp_create_nonce( 'wp_rest' ) ); ?>;
-
-					function option(select, value, label) {
-						const item = document.createElement('option');
-						item.value = value;
-						item.textContent = label;
-						select.appendChild(item);
-					}
-					function resetSelect(select, label) {
-						select.textContent = '';
-						option(select, '', label);
-					}
-					function tenantLabel(item) {
-						return [item.f_name, item.l_name].filter(Boolean).join(' ') || item.company || ('Renter ' + item.renter_id);
-					}
-					function showError(message) {
-						error.textContent = message || '';
-						error.style.display = message ? 'block' : 'none';
-					}
-					function loadOptions() {
-						showError('');
-						[property, renter, contact, vendor].forEach(function(select) { select.disabled = true; });
-						resetSelect(property, '<?php echo esc_js( __( 'Loading properties…', 'ajcore-ra' ) ); ?>');
-						resetSelect(renter, '<?php echo esc_js( __( 'No renter', 'ajcore-ra' ) ); ?>');
-						resetSelect(contact, '<?php echo esc_js( __( 'Same/none', 'ajcore-ra' ) ); ?>');
-						resetSelect(vendor, '<?php echo esc_js( __( 'Unassigned', 'ajcore-ra' ) ); ?>');
-						fetch(restRoot + '/work-order-options?account=' + encodeURIComponent(account.value), { cache: 'no-store', headers: { 'X-WP-Nonce': nonce } })
-							.then(function(response) { return response.json().then(function(body) { if (!response.ok) throw new Error(body.message || '<?php echo esc_js( __( 'Failed to load Rentec options.', 'ajcore-ra' ) ); ?>'); return body; }); })
-							.then(function(body) {
-								resetSelect(property, '<?php echo esc_js( __( 'Select a property', 'ajcore-ra' ) ); ?>');
-								(body.properties || []).forEach(function(item) {
-									option(property, String(item.property_id), [item.nickname, item.address, item.city, item.state].filter(Boolean).join(' · ') || ('Property ' + item.property_id));
-								});
-								(body.tenants || []).forEach(function(item) {
-									option(renter, String(item.renter_id), tenantLabel(item));
-									option(contact, String(item.renter_id), tenantLabel(item));
-								});
-								(body.vendors || []).forEach(function(item) {
-									option(vendor, String(item.vendor_id), item.name || item.company || ('Vendor ' + item.vendor_id));
-								});
-							})
-							.catch(function(loadError) { showError(loadError.message); })
-							.finally(function() { [property, renter, contact, vendor].forEach(function(select) { select.disabled = false; }); });
-					}
-					openButton.addEventListener('click', function() { dialog.showModal(); loadOptions(); });
-					account.addEventListener('change', loadOptions);
-					renter.addEventListener('change', function() { if (!contact.value) contact.value = renter.value; });
-					['ajcore-close-rentec-work-order', 'ajcore-cancel-rentec-work-order'].forEach(function(id) {
-						document.getElementById(id).addEventListener('click', function() { dialog.close(); });
-					});
-					form.addEventListener('submit', function(event) {
-						event.preventDefault();
-						showError('');
-						submit.disabled = true;
-						submit.textContent = '<?php echo esc_js( __( 'Creating…', 'ajcore-ra' ) ); ?>';
-						fetch(restRoot + '/work-orders', {
-							method: 'POST',
-							headers: { 'Content-Type': 'application/json', 'X-WP-Nonce': nonce },
-							body: JSON.stringify({
-								account: account.value,
-								property_id: Number(property.value),
-								renter_id: renter.value ? Number(renter.value) : 0,
-								contact_renter_id: contact.value ? Number(contact.value) : 0,
-								vendor_id: vendor.value ? Number(vendor.value) : 0,
-								priority: Number(document.getElementById('ajcore-create-rentec-priority').value),
-								short_desc: document.getElementById('ajcore-create-rentec-short-desc').value.trim(),
-								description: document.getElementById('ajcore-create-rentec-description').value.trim()
-							})
-						})
-							.then(function(response) { return response.json().then(function(body) { if (!response.ok) throw new Error(body.message || '<?php echo esc_js( __( 'Failed to create the work order.', 'ajcore-ra' ) ); ?>'); return body; }); })
-							.then(function() { location.reload(); })
-							.catch(function(saveError) { showError(saveError.message); submit.disabled = false; submit.textContent = '<?php echo esc_js( __( 'Create Work Order', 'ajcore-ra' ) ); ?>'; });
-					});
-				}());
-				</script>
-				<?php if ( in_array( $resource, array( 'leads', 'vendors' ), true ) ) : ?>
-					<?php
-					$create_kind  = 'leads' === $resource ? 'lead' : 'vendor';
-					$create_title = 'lead' === $create_kind ? __( 'New Lead', 'ajcore-ra' ) : __( 'New Vendor', 'ajcore-ra' );
-					$create_fields = 'lead' === $create_kind
-						? array(
-							'f_name' => array( __( 'First Name', 'ajcore-ra' ), 'text', true ),
-							'l_name' => array( __( 'Last Name', 'ajcore-ra' ), 'text', true ),
-							'email' => array( __( 'Email', 'ajcore-ra' ), 'email', false ),
-							'phone' => array( __( 'Phone', 'ajcore-ra' ), 'tel', true ),
-							'monthly_rent_min' => array( __( 'Minimum Rent', 'ajcore-ra' ), 'number', false ),
-							'monthly_rent_max' => array( __( 'Maximum Rent', 'ajcore-ra' ), 'number', true ),
-							'search_city' => array( __( 'Search City', 'ajcore-ra' ), 'text', true ),
-							'search_state' => array( __( 'Search State', 'ajcore-ra' ), 'text', true ),
-							'move_in' => array( __( 'Move-in Date', 'ajcore-ra' ), 'date', false ),
-							'occupants' => array( __( 'Occupants', 'ajcore-ra' ), 'number', false ),
-						)
-						: array(
-							'name' => array( __( 'Vendor Name', 'ajcore-ra' ), 'text', true ),
-							'industry' => array( __( 'Industry', 'ajcore-ra' ), 'text', false ),
-							'contact' => array( __( 'Contact', 'ajcore-ra' ), 'text', false ),
-							'email' => array( __( 'Email', 'ajcore-ra' ), 'email', false ),
-							'phone' => array( __( 'Phone', 'ajcore-ra' ), 'tel', false ),
-							'mphone' => array( __( 'Mobile', 'ajcore-ra' ), 'tel', false ),
-							'address' => array( __( 'Address', 'ajcore-ra' ), 'text', false ),
-							'address2' => array( __( 'Address 2', 'ajcore-ra' ), 'text', false ),
-							'city' => array( __( 'City', 'ajcore-ra' ), 'text', false ),
-							'state' => array( __( 'State', 'ajcore-ra' ), 'text', false ),
-							'zip' => array( __( 'ZIP', 'ajcore-ra' ), 'text', false ),
-							'rate' => array( __( 'Hourly Rate', 'ajcore-ra' ), 'text', false ),
-						);
-					?>
-					<dialog id="ajcore-rentec-record-dialog" style="width:min(680px,calc(100vw - 32px));border:0;border-radius:14px;padding:0;box-shadow:0 24px 70px rgba(15,23,42,.3);">
-						<form id="ajcore-rentec-record-create-form" style="padding:24px;">
-							<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;">
-								<div><h2 style="margin:0;"><?php echo esc_html( $create_title ); ?></h2><p class="description"><?php printf( esc_html__( 'Create this %s directly in Rentec Direct.', 'ajcore-ra' ), esc_html( $create_kind ) ); ?></p></div>
-								<button type="button" class="button ajcore-close-rentec-record"><?php esc_html_e( 'Close', 'ajcore-ra' ); ?></button>
-							</div>
-							<div id="ajcore-rentec-record-create-error" class="notice notice-error inline" style="display:none;margin:14px 0;"></div>
-							<table class="form-table" role="presentation">
-								<tr><th><label for="ajcore-create-rentec-record-account"><?php esc_html_e( 'Rentec Account', 'ajcore-ra' ); ?></label></th><td>
-									<select id="ajcore-create-rentec-record-account" class="regular-text">
-										<?php foreach ( $accounts as $account_id => $account_config ) : ?>
-											<?php if ( ! empty( $account_config['key'] ) ) : ?><option value="<?php echo esc_attr( $account_id ); ?>"><?php echo esc_html( $account_config['label'] ); ?></option><?php endif; ?>
-										<?php endforeach; ?>
-									</select>
-								</td></tr>
-								<?php foreach ( $create_fields as $field_name => $field_config ) : ?>
-									<tr><th><label for="ajcore-create-rentec-<?php echo esc_attr( $field_name ); ?>"><?php echo esc_html( $field_config[0] ); ?><?php echo $field_config[2] ? ' *' : ''; ?></label></th><td><input id="ajcore-create-rentec-<?php echo esc_attr( $field_name ); ?>" name="<?php echo esc_attr( $field_name ); ?>" type="<?php echo esc_attr( $field_config[1] ); ?>" class="regular-text" <?php echo $field_config[2] ? 'required' : ''; ?>></td></tr>
-								<?php endforeach; ?>
-								<tr><th><label for="ajcore-create-rentec-notes"><?php esc_html_e( 'Notes', 'ajcore-ra' ); ?></label></th><td><textarea id="ajcore-create-rentec-notes" name="notes" class="large-text" rows="4"></textarea></td></tr>
-							</table>
-							<p class="submit" style="display:flex;justify-content:flex-end;gap:8px;">
-								<button type="button" class="button ajcore-close-rentec-record"><?php esc_html_e( 'Cancel', 'ajcore-ra' ); ?></button>
-								<button type="submit" class="button button-primary" id="ajcore-submit-rentec-record"><?php printf( esc_html__( 'Create %s', 'ajcore-ra' ), esc_html( ucfirst( $create_kind ) ) ); ?></button>
-							</p>
-						</form>
-					</dialog>
-					<script>
-					(function() {
-						const kind = <?php echo wp_json_encode( $create_kind ); ?>;
-						const openButton = document.getElementById('ajcore-new-rentec-' + kind);
-						const dialog = document.getElementById('ajcore-rentec-record-dialog');
-						const form = document.getElementById('ajcore-rentec-record-create-form');
-						const error = document.getElementById('ajcore-rentec-record-create-error');
-						const submit = document.getElementById('ajcore-submit-rentec-record');
-						if (!openButton || !dialog || !form) return;
-						const restRoot = <?php echo wp_json_encode( untrailingslashit( rest_url( 'ajcore/v1/ops/rentec' ) ) ); ?>;
-						const nonce = <?php echo wp_json_encode( wp_create_nonce( 'wp_rest' ) ); ?>;
-						openButton.addEventListener('click', function() { dialog.showModal(); });
-						dialog.querySelectorAll('.ajcore-close-rentec-record').forEach(function(button) {
-							button.addEventListener('click', function() { dialog.close(); });
-						});
-						form.addEventListener('submit', function(event) {
-							event.preventDefault();
-							error.style.display = 'none';
-							submit.disabled = true;
-							const payload = { account: document.getElementById('ajcore-create-rentec-record-account').value };
-							new FormData(form).forEach(function(value, key) { payload[key] = String(value).trim(); });
-							fetch(restRoot + '/' + (kind === 'lead' ? 'leads' : 'vendors'), {
-								method: 'POST',
-								headers: { 'Content-Type': 'application/json', 'X-WP-Nonce': nonce },
-								body: JSON.stringify(payload)
-							})
-								.then(function(response) { return response.json().then(function(body) { if (!response.ok) throw new Error(body.message || '<?php echo esc_js( __( 'Rentec could not create this record.', 'ajcore-ra' ) ); ?>'); return body; }); })
-								.then(function() { location.reload(); })
-								.catch(function(saveError) { error.textContent = saveError.message; error.style.display = 'block'; submit.disabled = false; });
-						});
-					}());
-					</script>
-				<?php endif; ?>
-			<?php endif; ?>
-
-			<?php if ( '1' !== (string) ( $settings['rentec_enabled'] ?? '0' ) ) : ?>
-				<div class="notice notice-warning inline"><p><?php esc_html_e( 'The Rentec integration is disabled. Enable it in CP Settings before loading data.', 'ajcore-ra' ); ?></p></div>
-			<?php else : ?>
-				<form method="get" id="ajcore-rentec-filters" class="ajforms-settings-inline-actions">
-					<input type="hidden" name="page" value="ajforms-client-portal">
-					<input type="hidden" name="tab" value="rentec">
-					<input type="hidden" name="rentec_resource" value="<?php echo esc_attr( $resource ); ?>">
-					<input type="hidden" name="rentec_filters_set" value="1">
-					<strong><?php esc_html_e( 'Accounts', 'ajcore-ra' ); ?></strong>
-					<?php foreach ( $accounts as $index => $configured_account ) : ?>
-						<label><input type="checkbox" name="rentec_accounts[]" value="<?php echo esc_attr( $index ); ?>" <?php checked( in_array( (string) $index, $selected_accounts, true ) ); ?> <?php disabled( empty( $configured_account['key'] ) ); ?>> <?php echo esc_html( $configured_account['label'] . ( empty( $configured_account['key'] ) ? ' — not configured' : '' ) ); ?></label>
-					<?php endforeach; ?>
-					<?php if ( 'work_orders' === $resource ) : ?>
-						<strong><?php esc_html_e( 'Status', 'ajcore-ra' ); ?></strong>
-						<?php foreach ( $work_order_statuses as $status_key => $status_label ) : ?>
-							<label><input type="checkbox" name="rentec_statuses[]" value="<?php echo esc_attr( $status_key ); ?>" <?php checked( in_array( $status_key, $selected_statuses, true ) ); ?>> <?php echo esc_html( $status_label ); ?></label>
-						<?php endforeach; ?>
-					<?php endif; ?>
-					<span id="ajcore-rentec-filter-status" class="description" aria-live="polite"></span>
-				</form>
-
-				<nav class="ajcore-tabs-shell" aria-label="<?php esc_attr_e( 'Rentec sections', 'ajcore-ra' ); ?>">
-					<select class="ajcore-tab-select" onchange="if(this.value){window.location.href=this.value;}">
-						<?php foreach ( $resources as $resource_key => $resource_config ) : ?>
-							<option value="<?php echo esc_url( add_query_arg( array( 'rentec_accounts' => $selected_accounts, 'rentec_statuses' => $selected_statuses, 'rentec_filters_set' => '1', 'rentec_resource' => $resource_key ), $base_url ) ); ?>" <?php selected( $resource, $resource_key ); ?>><?php echo esc_html( $resource_config['label'] ); ?></option>
-						<?php endforeach; ?>
-					</select>
-					<?php foreach ( $resources as $resource_key => $resource_config ) : ?>
-						<a class="ajcore-tab-link <?php echo $resource === $resource_key ? 'is-active' : ''; ?>" href="<?php echo esc_url( add_query_arg( array( 'rentec_accounts' => $selected_accounts, 'rentec_statuses' => $selected_statuses, 'rentec_filters_set' => '1', 'rentec_resource' => $resource_key ), $base_url ) ); ?>"><?php echo esc_html( $resource_config['label'] ); ?></a>
-					<?php endforeach; ?>
-				</nav>
-				<script>
-				(function() {
-					const form = document.getElementById('ajcore-rentec-filters');
-					const status = document.getElementById('ajcore-rentec-filter-status');
-					if (!form) return;
-					form.querySelectorAll('input[type="checkbox"]').forEach(function(input) {
-						input.addEventListener('change', function() {
-							if (status) status.textContent = '<?php echo esc_js( __( 'Updating…', 'ajcore-ra' ) ); ?>';
-							form.requestSubmit();
-						});
-					});
-				}());
-				</script>
-			<?php endif; ?>
-		</div>
-		<?php
+		$settings = $this->get_settings();
 		if ( '1' !== (string) ( $settings['rentec_enabled'] ?? '0' ) ) {
+			echo '<div class="notice notice-warning inline"><p>' . esc_html__( 'Rentec Direct integration is disabled. Enable it and save the API keys above.', 'ajcore-ra' ) . '</p></div>';
 			return;
 		}
-		if ( empty( $selected_accounts ) ) {
-			echo '<div class="notice notice-error inline"><p>' . esc_html__( 'No configured Rentec accounts were selected.', 'ajcore-ra' ) . '</p></div>';
-			return;
-		}
-		$rows  = array();
-		$total = 0;
-		foreach ( $selected_accounts as $account ) {
-			$endpoint_url = 'https://secure.rentecdirect.com/api/v3/' . $resource;
-			if ( 'work_orders' === $resource ) {
-				$endpoint_url = add_query_arg( 'age', '3650d', $endpoint_url );
-			} elseif ( 'transactions' === $resource ) {
-				$endpoint_url = add_query_arg( 'page', 1, $endpoint_url );
-			}
-			$response = wp_remote_get( $endpoint_url, array( 'headers' => array( 'Accept' => 'application/json', 'X-API-Key' => (string) $accounts[ $account ]['key'] ), 'timeout' => 15, 'redirection' => 0 ) );
-			$body     = is_wp_error( $response ) ? null : json_decode( wp_remote_retrieve_body( $response ), true );
-			if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) || ! is_array( $body ) ) {
-				echo '<div class="notice notice-error inline"><p>' . esc_html( is_wp_error( $response ) ? $response->get_error_message() : sprintf( __( 'Rentec returned HTTP status %d for %s.', 'ajcore-ra' ), (int) wp_remote_retrieve_response_code( $response ), $accounts[ $account ]['label'] ) ) . '</p></div>';
-				continue;
-			}
-			$account_rows = isset( $body['data'] ) && is_array( $body['data'] ) ? $body['data'] : array();
-			if ( 'work_orders' === $resource ) {
-				$account_rows = array_values(
-					array_filter(
-						$account_rows,
-						function ( $row ) use ( $selected_statuses ) {
-							$status = (string) ( $row['status'] ?? '' );
-							if ( 'Unassigned' === $status ) {
-								$status = 'OpenU';
-							} elseif ( 'Assigned' === $status ) {
-								$status = 'OpenA';
-							}
-							return in_array( $status, $selected_statuses, true );
-						}
-					)
-				);
-			}
-			$total       += count( $account_rows );
-			$account_rows = array_slice( $account_rows, 0, 100 );
-			foreach ( $account_rows as &$account_row ) {
-				$account_row['_rentec_account']       = $account;
-				$account_row['_rentec_account_label'] = $accounts[ $account ]['label'];
-			}
-			unset( $account_row );
-			$rows   = array_merge( $rows, $account_rows );
-		}
-		$columns     = $resources[ $resource ]['columns'];
+		$file = dirname( __DIR__ ) . '/assets/rentec-workspace.js';
 		?>
-		<div class="ajforms-settings-card">
-			<div class="ajcore-section-head">
-				<div>
-					<h2><?php echo esc_html( $resources[ $resource ]['label'] ); ?></h2>
-					<p><?php echo esc_html( sprintf( _n( '%1$d account · %2$d records returned.', '%1$d accounts · %2$d records returned.', count( $selected_accounts ), 'ajcore-ra' ), count( $selected_accounts ), $total ) ); ?></p>
-				</div>
-			</div>
-			<?php if ( '' !== $note_result ) : ?><div class="notice notice-info inline"><p><?php echo esc_html( $note_result ); ?></p></div><?php endif; ?>
-			<?php if ( empty( $rows ) ) : ?>
-				<p><?php esc_html_e( 'No records were returned.', 'ajcore-ra' ); ?></p>
-			<?php else : ?>
-				<div style="overflow-x:auto;">
-					<table class="widefat striped">
-						<thead><tr><?php foreach ( $columns as $column_label ) : ?><th><?php echo esc_html( $column_label ); ?></th><?php endforeach; ?></tr></thead>
-						<tbody>
-							<?php foreach ( $rows as $row ) : ?>
-								<tr
-									<?php if ( 'work_orders' === $resource ) : ?>
-										class="ajcore-rentec-work-order-row"
-										data-workorder-id="<?php echo esc_attr( $row['workorder_id'] ?? 0 ); ?>"
-										data-rentec-account="<?php echo esc_attr( $row['_rentec_account'] ?? '1' ); ?>"
-										title="<?php esc_attr_e( 'Double-click to view full details', 'ajcore-ra' ); ?>"
-										style="cursor:pointer;"
-									<?php endif; ?>
-								>
-									<?php foreach ( $columns as $field => $column_label ) : ?>
-										<?php
-										$value = isset( $row[ $field ] ) ? $row[ $field ] : '';
-										if ( 'bytes' === $field && is_numeric( $value ) ) {
-											$value = size_format( (int) $value );
-										} elseif ( 'amount' === $field && is_numeric( $value ) ) {
-											$value = number_format_i18n( (float) $value, 2 );
-										} elseif ( is_array( $value ) || is_object( $value ) ) {
-											$value = wp_json_encode( $value );
-										}
-										$value = wp_html_excerpt( (string) $value, 120, '…' );
-										?>
-										<td><?php echo esc_html( $value ); ?></td>
-									<?php endforeach; ?>
-								</tr>
-								<?php if ( 'work_orders' === $resource ) : ?>
-									<tr><td colspan="<?php echo esc_attr( count( $columns ) ); ?>">
-										<details class="ajcore-rentec-work-order-details">
-											<summary><strong><?php esc_html_e( 'View details and notes', 'ajcore-ra' ); ?></strong></summary>
-											<p class="ajcore-rentec-detail-loading description" hidden><?php esc_html_e( 'Loading full work-order details…', 'ajcore-ra' ); ?></p>
-											<div class="ajcore-rentec-detail-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:14px 0;">
-												<?php foreach ( $row as $detail_key => $detail_value ) : ?>
-													<?php if ( 0 === strpos( (string) $detail_key, '_' ) || 'notes' === $detail_key ) { continue; } ?>
-													<div><strong><?php echo esc_html( ucwords( str_replace( '_', ' ', (string) $detail_key ) ) ); ?>:</strong> <?php echo esc_html( is_scalar( $detail_value ) ? (string) $detail_value : wp_json_encode( $detail_value ) ); ?></div>
-												<?php endforeach; ?>
-											</div>
-											<h4>
-												<?php esc_html_e( 'Attachments', 'ajcore-ra' ); ?>
-												<label class="button button-small" style="margin-left:8px;">
-													<?php esc_html_e( 'Attach Image', 'ajcore-ra' ); ?>
-													<input type="file" class="ajcore-rentec-image-upload" accept="image/jpeg,image/png,image/gif,image/webp" hidden>
-												</label>
-											</h4>
-											<div class="ajcore-rentec-attachments"><p class="description"><?php esc_html_e( 'Open the details to load attachments.', 'ajcore-ra' ); ?></p></div>
-											<h4><?php esc_html_e( 'Notes & History', 'ajcore-ra' ); ?></h4>
-											<p class="description"><?php esc_html_e( 'Rentec API V3 currently supports adding notes, but does not expose an endpoint for changing an existing work-order status.', 'ajcore-ra' ); ?></p>
-											<?php foreach ( (array) ( $row['notes'] ?? array() ) as $work_order_note ) : ?>
-												<p><?php echo esc_html( (string) ( $work_order_note['note'] ?? '' ) ); ?> <small><?php echo esc_html( (string) ( $work_order_note['created'] ?? '' ) ); ?><?php echo ! empty( $work_order_note['private'] ) ? ' · ' . esc_html__( 'Private', 'ajcore-ra' ) : ' · ' . esc_html__( 'Shared', 'ajcore-ra' ); ?></small></p>
-											<?php endforeach; ?>
-											<form method="post">
-												<?php wp_nonce_field( 'ajcore_add_rentec_work_order_note', 'ajcore_rentec_note_nonce' ); ?>
-												<input type="hidden" name="rentec_note_account" value="<?php echo esc_attr( $row['_rentec_account'] ); ?>">
-												<input type="hidden" name="rentec_workorder_id" value="<?php echo esc_attr( $row['workorder_id'] ?? 0 ); ?>">
-												<textarea name="rentec_note" rows="3" class="large-text" placeholder="<?php esc_attr_e( 'Add a work-order note…', 'ajcore-ra' ); ?>" required></textarea>
-												<p><label><input type="checkbox" name="rentec_note_private" value="1" checked> <?php esc_html_e( 'Private note', 'ajcore-ra' ); ?></label> <button class="button button-primary"><?php esc_html_e( 'Add Note', 'ajcore-ra' ); ?></button></p>
-											</form>
-										</details>
-									</td></tr>
-								<?php endif; ?>
-							<?php endforeach; ?>
-						</tbody>
-					</table>
-				</div>
-				<?php if ( 'work_orders' === $resource ) : ?>
-					<script>
-					(function() {
-						const restBase = <?php echo wp_json_encode( untrailingslashit( rest_url( 'ajcore/v1/ops/rentec/work-orders' ) ) ); ?>;
-						const restNonce = <?php echo wp_json_encode( wp_create_nonce( 'wp_rest' ) ); ?>;
-
-						function valueText(value) {
-							if (value === null || typeof value === 'undefined') return '—';
-							if (typeof value === 'object') {
-								try { return JSON.stringify(value); } catch (error) { return String(value); }
-							}
-							return String(value);
-						}
-
-						function renderDetail(details, body) {
-							const grid = details.querySelector('.ajcore-rentec-detail-grid');
-							const attachments = details.querySelector('.ajcore-rentec-attachments');
-							if (grid) {
-								grid.textContent = '';
-								Object.entries(body.work_order || {}).forEach(function(entry) {
-									const key = entry[0];
-									if (key.charAt(0) === '_' || key === 'notes') return;
-									const item = document.createElement('div');
-									const label = document.createElement('strong');
-									label.textContent = key.replaceAll('_', ' ').replace(/\b\w/g, function(letter) { return letter.toUpperCase(); }) + ': ';
-									item.appendChild(label);
-									item.appendChild(document.createTextNode(valueText(entry[1])));
-									grid.appendChild(item);
-								});
-							}
-							if (attachments) {
-								attachments.textContent = '';
-								if (body.files_error) {
-									const error = document.createElement('p');
-									error.className = 'notice notice-warning inline';
-									error.textContent = '<?php echo esc_js( __( 'Attachments could not be loaded: ', 'ajcore-ra' ) ); ?>' + body.files_error;
-									attachments.appendChild(error);
-									return;
-								}
-								const files = Array.isArray(body.files) ? body.files : [];
-								if (!files.length) {
-									const empty = document.createElement('p');
-									empty.className = 'description';
-									empty.textContent = '<?php echo esc_js( __( 'No attachments are associated with this work order.', 'ajcore-ra' ) ); ?>';
-									attachments.appendChild(empty);
-									return;
-								}
-								files.forEach(function(file, index) {
-									const card = document.createElement('div');
-									card.style.cssText = 'border:1px solid #dcdcde;border-radius:6px;padding:10px;margin:8px 0;';
-									const name = document.createElement('strong');
-									name.textContent = valueText(file.filename || file.name || ('<?php echo esc_js( __( 'Attachment', 'ajcore-ra' ) ); ?> ' + (index + 1)));
-									card.appendChild(name);
-									const meta = document.createElement('div');
-									meta.className = 'description';
-									meta.textContent = [file.upload_date || '', file.bytes ? Number(file.bytes).toLocaleString() + ' bytes' : ''].filter(Boolean).join(' · ');
-									card.appendChild(meta);
-									const fileUrl = file.download_url || file.file_url || file.url || file.link || '';
-									if (fileUrl) {
-										const link = document.createElement('a');
-										link.href = String(fileUrl);
-										link.target = '_blank';
-										link.rel = 'noopener noreferrer';
-										link.className = 'button button-small';
-										link.style.marginTop = '8px';
-										link.textContent = '<?php echo esc_js( __( 'Open attachment', 'ajcore-ra' ) ); ?>';
-										card.appendChild(link);
-									}
-									attachments.appendChild(card);
-								});
-							}
-						}
-
-						function loadDetail(row, details) {
-							if (!row || !details || details.dataset.loaded === '1' || details.dataset.loading === '1') return;
-							const id = row.dataset.workorderId;
-							const account = row.dataset.rentecAccount || '1';
-							if (!id || id === '0') return;
-							const loading = details.querySelector('.ajcore-rentec-detail-loading');
-							details.dataset.loading = '1';
-							if (loading) loading.hidden = false;
-							fetch(restBase + '/' + encodeURIComponent(id) + '?account=' + encodeURIComponent(account), {
-								cache: 'no-store',
-								headers: { 'X-WP-Nonce': restNonce }
-							})
-								.then(function(response) {
-									return response.json().then(function(body) {
-										if (!response.ok) throw new Error(body.message || '<?php echo esc_js( __( 'Failed to load the work order.', 'ajcore-ra' ) ); ?>');
-										return body;
-									});
-								})
-								.then(function(body) {
-									renderDetail(details, body);
-									details.dataset.loaded = '1';
-								})
-								.catch(function(error) {
-									if (loading) {
-										loading.hidden = false;
-										loading.textContent = error.message;
-										loading.style.color = '#b32d2e';
-									}
-								})
-								.finally(function() {
-									details.dataset.loading = '0';
-									if (loading && details.dataset.loaded === '1') loading.hidden = true;
-								});
-						}
-
-						document.querySelectorAll('.ajcore-rentec-work-order-row').forEach(function(row) {
-							const detailRow = row.nextElementSibling;
-							const details = detailRow ? detailRow.querySelector('.ajcore-rentec-work-order-details') : null;
-							if (!details) return;
-							row.addEventListener('dblclick', function() {
-								details.open = true;
-								loadDetail(row, details);
-								details.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-							});
-							details.addEventListener('toggle', function() {
-								if (details.open) loadDetail(row, details);
-							});
-							const upload = details.querySelector('.ajcore-rentec-image-upload');
-							if (upload) {
-								upload.addEventListener('change', function() {
-									const file = upload.files && upload.files[0];
-									upload.value = '';
-									if (!file) return;
-									const formData = new FormData();
-									formData.append('account', row.dataset.rentecAccount || '1');
-									formData.append('file', file);
-									const loading = details.querySelector('.ajcore-rentec-detail-loading');
-									if (loading) {
-										loading.hidden = false;
-										loading.style.color = '';
-										loading.textContent = '<?php echo esc_js( __( 'Uploading image…', 'ajcore-ra' ) ); ?>';
-									}
-									fetch(restBase + '/' + encodeURIComponent(row.dataset.workorderId) + '/attachments', {
-										method: 'POST',
-										headers: { 'X-WP-Nonce': restNonce },
-										body: formData
-									})
-										.then(function(response) {
-											return response.json().then(function(body) {
-												if (!response.ok) throw new Error(body.message || '<?php echo esc_js( __( 'Failed to upload the image.', 'ajcore-ra' ) ); ?>');
-											});
-										})
-										.then(function() {
-											details.dataset.loaded = '0';
-											loadDetail(row, details);
-										})
-										.catch(function(error) {
-											if (loading) {
-												loading.hidden = false;
-												loading.style.color = '#b32d2e';
-												loading.textContent = error.message;
-											}
-										});
-								});
-							}
-						});
-					}());
-					</script>
-				<?php endif; ?>
-			<?php endif; ?>
-		</div>
+		<style>
+			#ajra-rentec-app{margin-top:6px}
+			.ajra-sync{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 10px;padding:6px 12px;background:#fff;border:1px solid #dcdcde;border-radius:6px;color:#50575e}
+			.ajra-nav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
+			.ajra-tab{border:1px solid #c3c4c7;background:#fff;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px}
+			.ajra-tab.is-active{background:#2271b1;border-color:#2271b1;color:#fff}
+			.ajra-badge{display:inline-block;margin-left:6px;background:#dcdcde;color:#1d2327;border-radius:10px;padding:0 7px;font-size:11px;font-weight:600}
+			.ajra-tab.is-active .ajra-badge{background:rgba(255,255,255,.28);color:#fff}
+			.ajra-filters{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;margin:0 0 12px;padding:8px 12px;background:#f6f7f7;border:1px solid #dcdcde;border-radius:6px}
+			.ajra-label{font-weight:600}
+			.ajra-head{display:flex;gap:10px;align-items:center;margin:8px 0}
+			.ajra-head h2{margin:0}
+			.ajra-head .button-primary{margin-left:auto}
+			.ajra-table th{cursor:pointer;white-space:nowrap}
+			.ajra-table td{max-width:320px;vertical-align:top}
+			.ajra-click{cursor:pointer}
+			.ajra-expanded td{white-space:pre-wrap;background:#f6f7f7}
+			.ajra-pager{display:flex;gap:8px;align-items:center;justify-content:space-between;margin-top:10px}
+			.ajra-dialog{width:min(760px,calc(100vw - 32px));border:0;border-radius:12px;padding:0;box-shadow:0 24px 70px rgba(15,23,42,.3)}
+			.ajra-dialog::backdrop{background:rgba(0,0,0,.4)}
+			.ajra-dialog-in{padding:20px 24px;max-height:85vh;overflow:auto}
+			.ajra-dialog-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
+			.ajra-dialog-head h2{margin:0}
+			.ajra-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
+			.ajra-grid label{display:flex;flex-direction:column;gap:3px;font-size:12px;font-weight:600;text-transform:uppercase;color:#50575e}
+			.ajra-grid label.check{flex-direction:row;align-items:center;text-transform:none;font-weight:400;font-size:13px;padding-top:18px}
+			.ajra-grid .wide{grid-column:1 / -1}
+			.ajra-grid input,.ajra-grid select,.ajra-grid textarea{width:100%;text-transform:none;font-weight:400}
+			.ajra-actions{text-align:right;margin-top:14px}
+			.ajra-dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:10px 0}
+			.ajra-dl dt{font-size:11px;font-weight:600;text-transform:uppercase;color:#787c82}
+			.ajra-dl dd{margin:2px 0 0;word-break:break-word}
+			.ajra-note{border-left:3px solid #dcdcde;padding:2px 10px;margin:6px 0}
+			.ajra-file{display:flex;justify-content:space-between;align-items:center;border:1px solid #dcdcde;border-radius:6px;padding:6px 10px;margin:4px 0}
+			@media (max-width:700px){.ajra-grid{grid-template-columns:1fr}}
+		</style>
+		<div id="ajra-rentec-app"><p><?php esc_html_e( 'Loading…', 'ajcore-ra' ); ?></p></div>
+		<script>window.AJRA_RENTEC = <?php echo wp_json_encode( array( 'base' => rest_url( AJCore_Extensions::rest_namespace() . '/ops/rentec' ), 'nonce' => wp_create_nonce( 'wp_rest' ) ) ); ?>;</script>
+		<script src="<?php echo esc_url( plugin_dir_url( dirname( __DIR__ ) . '/ajcore-ra.php' ) . 'assets/rentec-workspace.js?ver=' . (int) @filemtime( $file ) ); ?>"></script>
 		<?php
 	}
 }

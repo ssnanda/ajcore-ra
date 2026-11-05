@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       AJ Core RA
  * Description:       Registered Agent (NC LLC Agents) extension for AJ Core. Requires the AJ Core plugin.
- * Version:           0.1.72
+ * Version:           0.1.73
  * Requires PHP:      7.4
  * Author:            IT Spector LLC
  * Author URI:        https://itspector.com
@@ -15,7 +15,7 @@ if ( ! defined( 'WPINC' ) ) {
 	die;
 }
 
-define( 'AJCORE_RA_VERSION', '0.1.72' );
+define( 'AJCORE_RA_VERSION', '0.1.73' );
 define( 'AJCORE_RA_MIN_EXTENSION_API', 23 );
 define( 'AJCORE_RA_BASENAME', plugin_basename( __FILE__ ) );
 
@@ -33,6 +33,7 @@ require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-website.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-business-profile.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-websites-api.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-esign.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-rentec-screens.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-rentec.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-mail.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-expense-invoices.php';
