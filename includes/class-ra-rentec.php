@@ -605,6 +605,7 @@ class AJCore_RA_Rentec {
 		register_rest_route( $ns, '/ops/rentec/(?P<kind>properties|tenants)/(?P<id>\d+)/notes', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( $this, 'add_ops_rentec_entity_note' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/rentec/files', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( $this, 'upload_ops_rentec_file' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/rentec/counts', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( $this, 'get_ops_rentec_counts' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/rentec/diagnostics', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( $this, 'get_ops_rentec_diagnostics' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/rentec/lookup', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( $this, 'get_ops_rentec_lookup' ), 'permission_callback' => $ops ) );
 	}
 
@@ -616,6 +617,7 @@ class AJCore_RA_Rentec {
 		$catalog[] = $e( 'POST', '/ops/rentec/{properties|tenants}/{id}/notes', 'Adds a note to a Rentec property or tenant.' );
 		$catalog[] = $e( 'POST', '/ops/rentec/files', 'Uploads a file to Rentec (multipart: file, optional property_id, renter_id, owner_id, vendor_id, workorder_id, transaction_id, share_owner).' );
 		$catalog[] = $e( 'GET', '/ops/rentec/counts', 'Badge counts for the Rentec sidebar (open work orders, tenants owing, leads, unread applications and messages, totals), cached.' );
+		$catalog[] = $e( 'GET', '/ops/rentec/diagnostics', 'Raw Rentec rows with every field (resource, account, limit<=5): unmodified list rows, the first record fetched individually, and a field list. Bypasses the cache; 1-2 Rentec calls.' );
 		$catalog[] = $e( 'GET', '/ops/rentec/lookup', 'Finds a tenant, owner, vendor or prospect by exact name, email or phone (type, q) for the message recipient picker.' );
 		return $catalog;
 	}
@@ -791,6 +793,106 @@ class AJCore_RA_Rentec {
 			$counts['owners'] += null === $rows ? 0 : count( $rows );
 		}
 		return rest_ensure_response( array( 'counts' => $counts, 'partial' => $errors > 0 ) );
+	}
+
+	/** Raw rows exactly as Rentec returns them, so every available field is visible. No enrichment, no cache. */
+	public function get_ops_rentec_diagnostics( WP_REST_Request $request ) {
+		$selected = $this->get_rentec_account_for_ops_request( $request );
+		if ( is_wp_error( $selected ) ) {
+			return $selected;
+		}
+		// resource => id field of a row (for the single-record call GET /{resource}/{id}), '' = none.
+		$resources = array(
+			'work_orders'  => 'workorder_id',
+			'tenants'      => 'renter_id',
+			'leads'        => 'prospect_id',
+			'vendors'      => 'vendor_id',
+			'transactions' => '',
+			'files'        => 'file_id',
+			'messages'     => '',
+			'leases'       => 'lease_id',
+			'properties'   => 'property_id',
+			'owners'       => 'owner_id',
+			'applications' => 'application_id',
+			'accounts'     => 'account_id',
+			'products'     => 'product_id',
+			'banks'        => 'bank_id',
+		);
+		$resource = sanitize_key( (string) $request->get_param( 'resource' ) );
+		if ( ! isset( $resources[ $resource ] ) ) {
+			return new WP_Error( 'ajcore_rentec_kind', __( 'Unknown Rentec resource.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$limit = max( 1, min( 5, absint( $request->get_param( 'limit' ) ) ?: 3 ) );
+		$key   = $selected['account']['key'];
+		$url   = 'https://secure.rentecdirect.com/api/v3/' . $resource;
+		if ( 'work_orders' === $resource ) {
+			$url = add_query_arg( 'age', '3650d', $url );
+		} elseif ( 'messages' === $resource ) {
+			$url = add_query_arg( 'page_size', $limit, $url );
+		}
+		$list = $this->request_rentec_for_ops( $url, $key );
+		if ( is_wp_error( $list ) ) {
+			return $list;
+		}
+		$all  = (array) ( $list['data'] ?? array() );
+		$rows = array_slice( $all, 0, $limit );
+
+		$detail    = null;
+		$detail_id = null;
+		$detail_error = '';
+		$id_field  = $resources[ $resource ];
+		if ( '' !== $id_field && ! empty( $rows[0][ $id_field ] ) ) {
+			$detail_id = absint( $rows[0][ $id_field ] );
+		} elseif ( '' !== $id_field && ! empty( $rows[0]['id'] ) && preg_match( '/(\d+)$/', (string) $rows[0]['id'], $m ) ) {
+			$detail_id = absint( $m[1] );
+		}
+		if ( $detail_id ) {
+			$one = $this->request_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/' . $resource . '/' . $detail_id, $key );
+			if ( is_wp_error( $one ) ) {
+				$detail_error = $one->get_error_message();
+			} else {
+				$detail = $one['data'] ?? $one;
+			}
+		}
+
+		$describe = static function ( $records ) {
+			$fields = array();
+			foreach ( (array) $records as $record ) {
+				if ( ! is_array( $record ) ) {
+					continue;
+				}
+				foreach ( $record as $name => $value ) {
+					$type = null === $value ? 'null' : ( is_array( $value ) ? ( array_keys( $value ) === range( 0, count( $value ) - 1 ) && $value ? 'list' : ( $value ? 'object' : 'empty list' ) ) : gettype( $value ) );
+					if ( ! isset( $fields[ $name ] ) ) {
+						$fields[ $name ] = array( 'name' => (string) $name, 'type' => $type, 'example' => is_scalar( $value ) ? (string) $value : wp_json_encode( $value ) );
+					} elseif ( 'null' === $fields[ $name ]['type'] && 'null' !== $type ) {
+						$fields[ $name ]['type']    = $type;
+						$fields[ $name ]['example'] = is_scalar( $value ) ? (string) $value : wp_json_encode( $value );
+					}
+				}
+			}
+			return array_values( $fields );
+		};
+
+		$fields        = $describe( $rows );
+		$detail_fields = is_array( $detail ) ? $describe( array( $detail ) ) : array();
+		$list_names    = wp_list_pluck( $fields, 'name' );
+		$only_detail   = array_values( array_diff( wp_list_pluck( $detail_fields, 'name' ), $list_names ) );
+
+		return rest_ensure_response( array(
+			'account'      => $selected['id'],
+			'resource'     => $resource,
+			'url'          => $url,
+			'total'        => isset( $list['summary']['records'] ) ? absint( $list['summary']['records'] ) : count( $all ),
+			'rows'         => $rows,
+			'fields'       => $fields,
+			'detail_id'    => $detail_id,
+			'detail'       => $detail,
+			'detail_fields' => $detail_fields,
+			'only_in_detail' => $only_detail,
+			'detail_error' => $detail_error,
+			'calls'        => 1 + ( $detail_id ? 1 : 0 ),
+		) );
 	}
 
 	/** Name search across tenants / owners / vendors / prospects for the message recipient picker. */
