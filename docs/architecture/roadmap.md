@@ -16,7 +16,7 @@ Last updated: 2026-11-05. Numbers are stable; do not renumber.
 2. [x] Flyers: one shared file each, no mail import, manual update UI, auto-share to RA / ncllcagents.com customers
 3. [x] File categories and tags moved to RA (AJCore ships generic defaults; RA-only names hidden on non-RA sites)
 4. [x] Articles of Organization folded into Formation Documents
-5. [x] Expense invoices moved to RA (low use; may fold into Requests, see 12)
+5. [x] Expense invoices removed entirely (never used); invoices return as a workflow on Requests (see 12)
 6. [ ] AJPhone to RA
 7. [ ] Zoho calendar / Reservations (left alone until tested)
 8. [ ] Luma: remove LUMA_* from the live OpenShift ConfigMap/Secret
@@ -34,6 +34,10 @@ Not moving: **Service Requests** (see 12) and the **accounting catalog** (core P
     - Extensions supply workflow templates. HOA example: repair request, vendor assigned, work done, pending vendor receipt, payment, closed. RA's add-service / change-of-RA flows become templates later.
     - Today's Service Requests are Stripe-tied (customer + price/product); build the generic engine beside them, migrate RA over afterwards.
 13. [ ] HOA inspections as a request type with its own steps.
+
+Invoice workflows (decided 2026-11-05): AJCore ships a generic invoice template (Received, Approved, Paid; vendor, amount, due date, attachments, payment method). AJCore-RA and AJCore-HOA register their own variants through a filter, adding steps/fields or replacing the template. AJCore holds no business-specific steps.
+
+Invoices (done 2026-11-05): the standalone expense-invoices screen, routes and RA class were removed. The `aj_portal_expense_invoices` table is no longer created for new sites; existing sites keep it until dropped by hand. Invoices come back as a workflow template on Requests (above).
 
 Open questions for 12/13: exact HOA steps, who sees what (do owners see requests?), whether vendors get a portal.
 

@@ -37,14 +37,15 @@ class AJCore_RA_Rentec_Screens {
 
 	/**
 	 * key: tab key. fetch: Rentec resource the list reads ('' = same as key). columns: field => heading.
+	 * row_notes: shows the newest notes in the '_notes' column and an Add note control on each row.
 	 * badge: counts key + tooltip (sidebar number, hidden at zero). create: form key for the header button.
 	 * filter: client-side filter set ('work_order_statuses' | 'tenants'). detail: opens a detail view on click.
 	 */
 	private static function resources() {
 		return array(
 			array( 'key' => 'work_orders', 'label' => __( 'Work Orders', 'ajcore-ra' ), 'fetch' => 'work_orders',
-				'columns' => array( 'wo_number' => 'Number', '_assigned_to' => 'Assigned To', '_description' => 'Description', '_details' => 'Details', '_address' => 'Address' ),
-				'badge' => array( 'key' => 'work_orders', 'title' => 'Open work orders' ), 'create' => 'work_order', 'filter' => 'work_order_statuses', 'detail' => 'work_order' ),
+				'columns' => array( 'wo_number' => '#', 'status' => 'Status', 'priority' => 'Pri', '_address' => 'Property', '_renter_name' => 'Renter', '_description' => 'Issue', '_assigned_to' => 'Assigned To', 'date_received' => 'Received', '_age_days' => 'Days', 'cost' => 'Cost', '_notes' => 'Notes' ),
+				'badge' => array( 'key' => 'work_orders', 'title' => 'Open work orders' ), 'create' => 'work_order', 'filter' => 'work_order_statuses', 'detail' => 'work_order', 'row_notes' => 'work_order' ),
 			array( 'key' => 'properties', 'label' => __( 'Properties', 'ajcore-ra' ), 'fetch' => 'properties',
 				'columns' => array( 'property_id' => 'ID', 'nickname' => 'Nickname', '_address' => 'Address', 'ptype' => 'Type', 'monthly_rent' => 'Rent', 'security_dep' => 'Deposit', 'owner_id' => 'Owner ID' ),
 				'badge' => array( 'key' => 'properties', 'title' => 'Properties' ), 'create' => 'properties' ),

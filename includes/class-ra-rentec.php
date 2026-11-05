@@ -11,12 +11,15 @@
  * read from it. Values previously kept in AJCore's `ajforms_settings` (or that shared row) are copied
  * into this option once on first load.
  *
- * AJCore's expense-invoice options endpoint gets its Rentec units/vendors from the
- * 'ajcore_expense_invoice_options' filter, supplied here.
  */
 
 if ( ! defined( 'WPINC' ) ) {
 	die;
+}
+
+/** Rentec's list says "Unassigned"/"Assigned"; the filters and sorting use OpenU/OpenA. */
+function canonical_rentec_wo_status( $status ) {
+	return 'Unassigned' === $status ? 'OpenU' : ( 'Assigned' === $status ? 'OpenA' : $status );
 }
 
 class AJCore_RA_Rentec {
@@ -43,7 +46,6 @@ class AJCore_RA_Rentec {
 		add_action( 'ajcore_admin_portal_tab_render', array( __CLASS__, 'render_admin_tab' ) );
 		add_action( 'admin_post_ajcore_ra_save_rentec', array( __CLASS__, 'handle_save' ) );
 		add_action( 'wp_ajax_ajcore_test_rentec_connection', array( __CLASS__, 'ajax_test' ) );
-		add_filter( 'ajcore_expense_invoice_options', array( __CLASS__, 'expense_invoice_options' ) );
 		add_filter( 'ajcore_endpoint_catalog', array( __CLASS__, 'catalog_writes' ) );
 		add_filter( 'cron_schedules', array( __CLASS__, 'cron_schedules' ) );
 		add_action( 'ajcore_ra_rentec_sync', array( __CLASS__, 'run_scheduled_sync' ) );
@@ -246,11 +248,11 @@ class AJCore_RA_Rentec {
 			return;
 		}
 		$rentec = self::instance();
-		echo '<details class="ajforms-settings-card" style="margin-bottom:14px"' . ( isset( $_GET['saved'] ) ? ' open' : '' ) . '><summary style="cursor:pointer;font-weight:600">' . esc_html__( 'Connection & API keys', 'ajcore-ra' ) . '</summary>';
+		$rentec->render_workspace();
+		echo '<details class="ajforms-settings-card" style="margin:18px 0 14px"' . ( isset( $_GET['saved'] ) ? ' open' : '' ) . '><summary style="cursor:pointer;font-weight:600">' . esc_html__( 'Connection & API keys', 'ajcore-ra' ) . '</summary>';
 		$rentec->render_settings();
 		echo '</details>';
 		$rentec->render_diagnostics();
-		$rentec->render_workspace();
 	}
 
 	/** Collapsed "Diagnostics" card: pulls a few raw Rentec rows with every field and offers copy buttons. */
@@ -441,44 +443,6 @@ class AJCore_RA_Rentec {
 		return $catalog;
 	}
 
-	/** Supplies Rentec units + vendors to AJCore's expense-invoice options endpoint. */
-	public static function expense_invoice_options( $options ) {
-		return self::instance()->build_expense_invoice_options( is_array( $options ) ? $options : array() );
-	}
-
-	private function build_expense_invoice_options( array $options ) {
-		$units   = (array) ( $options['units'] ?? array() );
-		$vendors = (array) ( $options['vendors'] ?? array() );
-		foreach ( $this->get_rentec_accounts_for_ops() as $account_id => $account ) {
-			if ( empty( $account['key'] ) ) {
-				continue;
-			}
-			foreach ( array( 'properties', 'vendors' ) as $resource ) {
-				$url = 'https://secure.rentecdirect.com/api/v3/' . $resource;
-				if ( 'properties' === $resource ) {
-					$url = add_query_arg( 'include_subunits', 'true', $url );
-				}
-				$body = $this->request_rentec_for_ops( $url, $account['key'] );
-				if ( is_wp_error( $body ) ) {
-					continue;
-				}
-				$rows = 'properties' === $resource ? $this->flatten_rentec_properties_for_ops( $body['data'] ?? array() ) : (array) ( $body['data'] ?? array() );
-				foreach ( $rows as $row ) {
-					$row['_rentec_account']       = (string) $account_id;
-					$row['_rentec_account_label'] = $account['label'];
-					if ( 'properties' === $resource ) {
-						$units[] = $row;
-					} else {
-						$vendors[] = $row;
-					}
-				}
-			}
-		}
-		return array( 'units' => $units, 'vendors' => $vendors );
-	}
-
-	// ── Rentec API handlers (moved unchanged from AJCore) ──────────────────────
-
 	private function get_rentec_accounts_for_ops() {
 		$settings = function_exists( 'ajforms_get_settings' ) ? $this->get_settings() : get_option( 'ajforms_settings', array() );
 		return array(
@@ -654,6 +618,34 @@ class AJCore_RA_Rentec {
 		return $body;
 	}
 
+	/** Newest-first notes from the locally stored work-order detail (never a live call); empty until the sync has fetched it. */
+	private function cached_work_order_notes( $id, $api_key, $limit = 3 ) {
+		if ( ! $id ) {
+			return array();
+		}
+		$row = $this->read_rentec_cache( 'https://secure.rentecdirect.com/api/v3/work_orders/' . $id, $api_key );
+		if ( ! $row ) {
+			return array();
+		}
+		$body  = json_decode( $row->body, true );
+		$notes = is_array( $body ) ? ( $body['data']['notes'] ?? $body['notes'] ?? array() ) : array();
+		$out   = array();
+		foreach ( (array) $notes as $note ) {
+			if ( ! is_array( $note ) ) {
+				continue;
+			}
+			$text = trim( (string) ( $note['note'] ?? $note['text'] ?? $note['body'] ?? '' ) );
+			if ( '' === $text ) {
+				continue;
+			}
+			$out[] = array( 'text' => $text, 'date' => (string) ( $note['created'] ?? $note['date'] ?? $note['created_at'] ?? '' ), 'private' => ! empty( $note['private'] ) );
+		}
+		usort( $out, function ( $a, $b ) {
+			return strcmp( $b['date'], $a['date'] );
+		} );
+		return array_slice( $out, 0, $limit );
+	}
+
 	/** After a successful create/note/upload, re-fetch the stored lists it can change so the screens show it straight away. */
 	private function refresh_rentec_after_write( $url, $api_key ) {
 		$map = array(
@@ -667,6 +659,15 @@ class AJCore_RA_Rentec {
 			'messages'     => array( 'messages' ),
 			'files'        => array( 'files' ),
 		);
+		// A note on one work order only changes that work order's stored detail.
+		if ( preg_match( '#/work_orders/(\d+)/notes$#', (string) wp_parse_url( $url, PHP_URL_PATH ), $m ) ) {
+			$detail = 'https://secure.rentecdirect.com/api/v3/work_orders/' . (int) $m[1];
+			$body   = $this->request_rentec_for_ops( $detail, $api_key );
+			if ( ! is_wp_error( $body ) ) {
+				$this->store_rentec_cache( $detail, $api_key, $body );
+			}
+			return;
+		}
 		$resource = $this->rentec_resource_of( $url );
 		if ( isset( $map[ $resource ] ) ) {
 			$this->refresh_rentec_cache_resources( $map[ $resource ], $api_key );
@@ -682,6 +683,9 @@ class AJCore_RA_Rentec {
 			array_merge( array( md5( $api_key ) ), $resources )
 		) );
 		foreach ( (array) $urls as $stored_url ) {
+			if ( preg_match( '#/api/v3/[a-z_]+/\d+$#', $stored_url ) ) {
+				continue; // single-record copies are refreshed by the sync or a note, not by every create
+			}
 			$body = $this->request_rentec_for_ops( $stored_url, $api_key );
 			if ( ! is_wp_error( $body ) ) {
 				$this->store_rentec_cache( $stored_url, $api_key, $body );
@@ -730,6 +734,21 @@ class AJCore_RA_Rentec {
 			}
 			$this->store_rentec_cache( $url, $api_key, $body );
 			$records = max( $records, isset( $body['data'] ) && is_array( $body['data'] ) ? count( $body['data'] ) : 0 );
+			// Notes only exist on the single work order, so keep a local copy of each not-yet-closed one (capped).
+			if ( 'work_orders' === $resource ) {
+				$fetched = 0;
+				foreach ( (array) ( $body['data'] ?? array() ) as $wo ) {
+					if ( $fetched >= 60 || ! is_array( $wo ) || empty( $wo['workorder_id'] ) || 'Closed' === ( $wo['status'] ?? '' ) ) {
+						continue;
+					}
+					$detail_url = 'https://secure.rentecdirect.com/api/v3/work_orders/' . absint( $wo['workorder_id'] );
+					$detail     = $this->request_rentec_for_ops( $detail_url, $api_key );
+					if ( ! is_wp_error( $detail ) ) {
+						$this->store_rentec_cache( $detail_url, $api_key, $detail );
+					}
+					$fetched++;
+				}
+			}
 		}
 		update_option( 'ajcore_ra_rentec_last_sync', time(), false );
 		return $records;
@@ -1366,8 +1385,18 @@ class AJCore_RA_Rentec {
 			// two bulk calls so AJOps can show the address and assignee without an N+1 request.
 			$property_body = $this->cached_rentec_for_ops( add_query_arg( 'include_subunits', 'true', 'https://secure.rentecdirect.com/api/v3/properties' ), $accounts[ $account ]['key'], 600 );
 			$vendor_body   = $this->cached_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/vendors', $accounts[ $account ]['key'], 600 );
+			$tenant_body   = $this->cached_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/tenants', $accounts[ $account ]['key'], 600 );
 			$properties    = array();
 			$vendors       = array();
+			$renters       = array();
+			if ( ! is_wp_error( $tenant_body ) ) {
+				foreach ( (array) ( $tenant_body['data'] ?? array() ) as $tenant ) {
+					if ( is_array( $tenant ) && ! empty( $tenant['renter_id'] ) ) {
+						$name = trim( (string) ( $tenant['f_name'] ?? '' ) . ' ' . (string) ( $tenant['l_name'] ?? '' ) );
+						$renters[ absint( $tenant['renter_id'] ) ] = '' !== $name ? $name : (string) ( $tenant['company'] ?? '' );
+					}
+				}
+			}
 			if ( ! is_wp_error( $property_body ) ) {
 				foreach ( $this->flatten_rentec_properties_for_ops( $property_body['data'] ?? array() ) as $property ) {
 					if ( is_array( $property ) && ! empty( $property['property_id'] ) ) $properties[ absint( $property['property_id'] ) ] = $property;
@@ -1387,8 +1416,21 @@ class AJCore_RA_Rentec {
 				$row['_assigned_to'] = sanitize_text_field( (string) $assigned );
 				$row['_description'] = sanitize_text_field( (string) ( $row['short_desc'] ?? '' ) );
 				$row['_details']     = sanitize_textarea_field( (string) ( $row['description'] ?? '' ) );
+				$row['_renter_name'] = sanitize_text_field( (string) ( $renters[ absint( $row['renter_id'] ?? 0 ) ] ?? '' ) );
+				$received            = substr( (string) ( $row['date_received'] ?? '' ), 0, 10 );
+				$done                = in_array( canonical_rentec_wo_status( (string) ( $row['status'] ?? '' ) ), array( 'Finalized', 'Closed' ), true );
+				$end                 = $done && ! empty( $row['date_resolved'] ) ? strtotime( substr( (string) $row['date_resolved'], 0, 10 ) ) : time();
+				$row['_age_days']    = $received && strtotime( $received ) ? max( 0, (int) floor( ( $end - strtotime( $received ) ) / DAY_IN_SECONDS ) ) : '';
+				$row['_notes']       = $this->cached_work_order_notes( absint( $row['workorder_id'] ?? 0 ), $accounts[ $account ]['key'] );
 			}
 			unset( $row );
+			// Open work orders first (unassigned, assigned, parts, in progress), then finalized, then closed; newest first within each.
+			$order = array( 'OpenU' => 0, 'OpenA' => 1, 'Parts' => 2, 'Work' => 3, 'Finalized' => 4, 'Closed' => 5 );
+			usort( $rows, function ( $a, $b ) use ( $order ) {
+				$ra = $order[ canonical_rentec_wo_status( (string) ( $a['status'] ?? '' ) ) ] ?? 9;
+				$rb = $order[ canonical_rentec_wo_status( (string) ( $b['status'] ?? '' ) ) ] ?? 9;
+				return $ra === $rb ? strcmp( (string) ( $b['date_received'] ?? '' ), (string) ( $a['date_received'] ?? '' ) ) : $ra <=> $rb;
+			} );
 		}
 		if ( 'properties' === $resource ) {
 			$rows = $this->flatten_rentec_properties_for_ops( $rows );
@@ -1622,7 +1664,7 @@ class AJCore_RA_Rentec {
 			return $selected;
 		}
 		$id   = absint( $request->get_param( 'id' ) );
-		$body = $this->request_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/work_orders/' . $id, $selected['account']['key'] );
+		$body = $this->cached_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/work_orders/' . $id, $selected['account']['key'] );
 		if ( is_wp_error( $body ) ) {
 			return $body;
 		}
@@ -2225,7 +2267,7 @@ class AJCore_RA_Rentec {
 	public function render_workspace() {
 		$settings = $this->get_settings();
 		if ( '1' !== (string) ( $settings['rentec_enabled'] ?? '0' ) ) {
-			echo '<div class="notice notice-warning inline"><p>' . esc_html__( 'Rentec Direct integration is disabled. Enable it and save the API keys above.', 'ajcore-ra' ) . '</p></div>';
+			echo '<div class="notice notice-warning inline"><p>' . esc_html__( 'Rentec Direct integration is disabled. Enable it and save the API keys below.', 'ajcore-ra' ) . '</p></div>';
 			return;
 		}
 		$file = dirname( __DIR__ ) . '/assets/rentec-workspace.js';
@@ -2246,6 +2288,11 @@ class AJCore_RA_Rentec {
 			.ajra-table th{cursor:pointer;white-space:nowrap}
 			.ajra-table td{max-width:320px;vertical-align:top}
 			.ajra-click{cursor:pointer}
+			.ajra-st{display:inline-block;padding:2px 9px;border-radius:10px;font-size:12px;font-weight:600;white-space:nowrap;background:#dcdcde;color:#1d2327}
+			.ajra-st-OpenU{background:#fcf0f1;color:#b32d2e}.ajra-st-OpenA{background:#fcf9e8;color:#8a6d00}.ajra-st-Parts{background:#fff4e5;color:#a35200}
+			.ajra-st-Work{background:#e5f1fa;color:#135e96}.ajra-st-Finalized{background:#edfaef;color:#007017}.ajra-st-Closed{background:#f0f0f1;color:#50575e}
+			.ajra-n{margin:0 0 4px;font-size:12px;line-height:1.35}.ajra-n small{color:#787c82}
+			.ajra-noterow td{background:#f6f7f7}
 			.ajra-expanded td{white-space:pre-wrap;background:#f6f7f7}
 			.ajra-pager{display:flex;gap:8px;align-items:center;justify-content:space-between;margin-top:10px}
 			.ajra-dialog{width:min(760px,calc(100vw - 32px));border:0;border-radius:12px;padding:0;box-shadow:0 24px 70px rgba(15,23,42,.3)}

@@ -12,7 +12,7 @@
 	var state = {
 		schema: null, counts: {}, resource: 'work_orders', accounts: [], configured: [], selected: [],
 		rows: [], total: 0, loading: false, error: '', statuses: {}, owes: true, search: '', sortField: '', sortDir: 'asc',
-		page: 1, pageSize: 25, expanded: null, sync: null, syncProgress: null, syncError: ''
+		page: 1, pageSize: 25, expanded: null, sync: null, syncProgress: null, syncError: '', noteOpen: null
 	};
 
 	function esc(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -43,11 +43,12 @@
 		if (typeof v === 'boolean') { return v ? 'Yes' : 'No'; }
 		if (field === 'bytes' && !isNaN(Number(v))) { return Number(v) > 1048576 ? (Number(v) / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(Number(v) / 1024)) + ' KB'; }
 		if (field === 'amount' && !isNaN(Number(v))) { return Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-		if (['balance', '_amount_owed', 'monthly_rent', 'security_dep', 'application_fee'].indexOf(field) > -1 && !isNaN(Number(v))) { return Number(v).toLocaleString('en-US', { style: 'currency', currency: 'USD' }); }
+		if (['balance', '_amount_owed', 'monthly_rent', 'security_dep', 'application_fee', 'cost'].indexOf(field) > -1 && !isNaN(Number(v))) { return Number(v).toLocaleString('en-US', { style: 'currency', currency: 'USD' }); }
 		if (field === 'status') {
 			var st = (state.schema.work_order_statuses || []).filter(function (s) { return s[0] === v; })[0];
 			if (st) { return st[1]; }
 		}
+		if (['date_received', 'date_resolved'].indexOf(field) > -1 && /^\d{4}-\d{2}-\d{2}$/.test(String(v))) { return new Date(String(v) + 'T12:00:00').toLocaleDateString(); }
 		if (['email_time', 'date_received', 'upload_date'].indexOf(field) > -1) { var d = new Date(String(v).replace(' ', 'T')); if (!isNaN(d)) { return d.toLocaleString(); } }
 		if (['lease_begin', 'lease_end', 'move_in', 'move_out'].indexOf(field) > -1) { var d2 = new Date(String(v).replace(' ', 'T')); if (!isNaN(d2)) { return d2.toLocaleDateString(); } }
 		var t = typeof v === 'object' ? JSON.stringify(v) : String(v);
@@ -98,17 +99,20 @@
 	}
 	function syncNow() {
 		if (!state.sync || state.syncProgress) { return; }
-		var steps = state.sync.steps, i = 0;
+		var steps = state.sync.steps, i = 0, failed = [];
 		state.syncError = ''; state.syncProgress = { done: 0, total: steps.length }; render();
 		(function next() {
 			if (i >= steps.length) {
 				state.syncProgress = null;
+				state.syncError = failed.length ? 'Could not sync: ' + failed.join('; ') : '';
 				loadSyncStatus().then(function () { load(); loadCounts(); });
 				return;
 			}
-			api('/sync', { method: 'POST', json: steps[i] }).then(function () {
+			api('/sync', { method: 'POST', json: steps[i] }).catch(function (e) {
+				failed.push(steps[i].resource + ': ' + e.message);
+			}).then(function () {
 				i++; state.syncProgress = { done: i, total: steps.length }; render(); next();
-			}).catch(function (e) { state.syncProgress = null; state.syncError = steps[i].resource + ': ' + e.message; render(); });
+			});
 		})();
 	}
 	function syncBar() {
@@ -147,6 +151,24 @@
 			rows.sort(function (a, b) { var c = cmp(a[state.sortField], b[state.sortField]); return state.sortDir === 'asc' ? c : -c; });
 		}
 		return rows;
+	}
+
+	// ── cells ──
+	var STATUS_LABEL = { OpenU: 'Unassigned', OpenA: 'Assigned', Parts: 'Parts on Order', Work: 'In Progress', Finalized: 'Finalized', Closed: 'Closed' };
+	function noteDate(d) { var t = new Date(String(d).replace(' ', 'T')); return isNaN(t) ? String(d || '') : t.toLocaleDateString(); }
+	function cell(def, f, r, i) {
+		if (def.row_notes && f === 'status') {
+			var k = canonicalStatus(r.status);
+			return '<span class="ajra-st ajra-st-' + esc(k) + '">' + esc(STATUS_LABEL[k] || r.status || '—') + '</span>';
+		}
+		if (def.row_notes && f === '_notes') {
+			var notes = Array.isArray(r._notes) ? r._notes : [];
+			return notes.map(function (n) {
+				var txt = n.text.length > 90 ? n.text.slice(0, 90) + '…' : n.text;
+				return '<div class="ajra-n">' + esc(txt) + ' <small>' + esc(noteDate(n.date)) + (n.private ? ' · private' : '') + '</small></div>';
+			}).join('') + '<button type="button" class="button-link" data-addnote="' + i + '">+ Add note</button>';
+		}
+		return esc(fmt(f, r[f]));
 	}
 
 	// ── rendering ──
@@ -201,7 +223,10 @@
 					return '<th data-sort="' + esc(f) + '">' + esc(def.columns[f]) + (state.sortField === f ? (state.sortDir === 'asc' ? ' ▲' : ' ▼') : '') + '</th>';
 				}).join('') + '</tr></thead><tbody>';
 				slice.forEach(function (r, i) {
-					html += '<tr data-row="' + i + '" class="' + (def.detail || def.expand ? 'ajra-click' : '') + '">' + fields.map(function (f) { return '<td>' + esc(fmt(f, r[f])) + '</td>'; }).join('') + '</tr>';
+					html += '<tr data-row="' + i + '" class="' + (def.detail || def.expand ? 'ajra-click' : '') + '">' + fields.map(function (f) { return '<td>' + cell(def, f, r, i) + '</td>'; }).join('') + '</tr>';
+					if (def.row_notes && state.noteOpen === i) {
+						html += '<tr class="ajra-noterow"><td colspan="' + fields.length + '"><textarea id="ajra-note-text" rows="2" class="large-text" placeholder="Add a note to work order #' + esc(r.wo_number || r.workorder_id) + '"></textarea> <label><input type="checkbox" id="ajra-note-private" checked> Private</label> <button type="button" class="button button-primary" data-savenote="' + i + '">Save note</button> <button type="button" class="button" data-cancelnote>Cancel</button> <span id="ajra-note-msg" style="color:#b32d2e"></span></td></tr>';
+					}
 					if (def.expand && state.expanded === i) { html += '<tr class="ajra-expanded"><td colspan="' + fields.length + '">' + esc(String(r[def.expand] || '').trim() || '(no message text)') + '</td></tr>'; }
 				});
 				html += '</tbody></table>';
@@ -224,6 +249,11 @@
 		if (t.id === 'ajra-refresh') { load(true); loadCounts(); return; }
 		if (t.id === 'ajra-prev') { state.page--; render(); return; }
 		if (t.id === 'ajra-next') { state.page++; render(); return; }
+		var addn = t.closest('[data-addnote]');
+		if (addn) { var ni = Number(addn.getAttribute('data-addnote')); state.noteOpen = state.noteOpen === ni ? null : ni; render(); var ta = document.getElementById('ajra-note-text'); if (ta) { ta.focus(); } return; }
+		if (t.closest('[data-cancelnote]')) { state.noteOpen = null; render(); return; }
+		var saven = t.closest('[data-savenote]');
+		if (saven) { saveNote(Number(saven.getAttribute('data-savenote'))); return; }
 		var create = t.closest('[data-create]');
 		if (create) { openForm(create.getAttribute('data-create')); return; }
 		var th = t.closest('[data-sort]');
@@ -257,8 +287,20 @@
 		if (e.target.id === 'ajra-search') { state.search = e.target.value; state.page = 1; var pos = e.target.selectionStart; render(); var s = document.getElementById('ajra-search'); if (s) { s.focus(); s.setSelectionRange(pos, pos); } }
 	});
 
+	function saveNote(i) {
+		var row = root._slice[i], ta = document.getElementById('ajra-note-text'), msg = document.getElementById('ajra-note-msg');
+		var txt = ta ? ta.value.trim() : '';
+		if (!txt || !row) { return; }
+		var priv = document.getElementById('ajra-note-private').checked;
+		msg.textContent = 'Saving…';
+		api('/work-orders/' + row.workorder_id + '/notes', { method: 'POST', json: { account: row._rentec_account, note: txt, private: priv } }).then(function () {
+			row._notes = [{ text: txt, date: new Date().toISOString(), private: priv }].concat(Array.isArray(row._notes) ? row._notes : []).slice(0, 3);
+			state.noteOpen = null; render();
+		}).catch(function (e) { msg.textContent = e.message; });
+	}
+
 	function switchTo(key) {
-		state.resource = key; state.rows = []; state.sortField = ''; state.page = 1; state.expanded = null;
+		state.resource = key; state.rows = []; state.sortField = ''; state.page = 1; state.expanded = null; state.noteOpen = null;
 		try { var u = new URL(window.location.href); u.searchParams.set('rentec_resource', key); window.history.replaceState(null, '', u.toString()); } catch (er) {}
 		load();
 	}

@@ -45,7 +45,6 @@ function ajcore_ra_features() {
 		),
 		'Integrations'       => array(
 			'Rentec Direct (API, settings, screens, write forms)' => array( 'moved' ),
-			'Expense invoices'                              => array( 'moved', 'Low use; may fold into Requests' ),
 			'AJPhone'                                       => array( 'pending' ),
 			'Zoho Calendar and Reservations'                => array( 'pending', 'Untested; left alone for now' ),
 			'Zoho Mail'                                     => array( 'pending' ),
