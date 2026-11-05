@@ -473,6 +473,35 @@ class AJCore_RA_Rentec {
 			$message = isset( $body['message'] ) ? sanitize_text_field( (string) $body['message'] ) : sprintf( __( 'Rentec returned HTTP status %d.', 'ajcore-ra' ), $status );
 			return new WP_Error( 'ajcore_rentec_response_failed', $message, array( 'status' => 502 ) );
 		}
+		if ( 'GET' !== strtoupper( (string) $method ) ) {
+			$this->bump_rentec_cache();
+		}
+		return $body;
+	}
+
+	// ── Read cache ──────────────────────────────────────────────────────────────
+	// Rentec's v3 list endpoints cannot be paged and every call costs ~1-3 s (60 calls/min per key), so
+	// reads are cached in transients and any successful write invalidates them all by bumping a version.
+
+	private $rentec_bypass_cache = false;
+
+	private function bump_rentec_cache() {
+		update_option( 'ajcore_ra_rentec_cache_v', (int) get_option( 'ajcore_ra_rentec_cache_v', 1 ) + 1, false );
+	}
+
+	/** GET through the cache. $ttl seconds; errors are never cached. */
+	private function cached_rentec_for_ops( $url, $api_key, $ttl = 120 ) {
+		$key = 'ajra_rt_' . md5( (int) get_option( 'ajcore_ra_rentec_cache_v', 1 ) . '|' . $url . '|' . $api_key );
+		if ( ! $this->rentec_bypass_cache ) {
+			$hit = get_transient( $key );
+			if ( is_array( $hit ) ) {
+				return $hit;
+			}
+		}
+		$body = $this->request_rentec_for_ops( $url, $api_key );
+		if ( ! is_wp_error( $body ) ) {
+			set_transient( $key, $body, $ttl );
+		}
 		return $body;
 	}
 
@@ -575,6 +604,7 @@ class AJCore_RA_Rentec {
 		register_rest_route( $ns, '/ops/rentec/records/(?P<kind>properties|tenants|leases|expenses|messages)', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( $this, 'create_ops_rentec_record' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/rentec/(?P<kind>properties|tenants)/(?P<id>\d+)/notes', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( $this, 'add_ops_rentec_entity_note' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/rentec/files', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( $this, 'upload_ops_rentec_file' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/rentec/counts', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( $this, 'get_ops_rentec_counts' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/rentec/lookup', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( $this, 'get_ops_rentec_lookup' ), 'permission_callback' => $ops ) );
 	}
 
@@ -585,6 +615,7 @@ class AJCore_RA_Rentec {
 		$catalog[] = $e( 'POST', '/ops/rentec/records/{kind}', 'Creates a Rentec record. kind: properties | tenants | leases | expenses | messages (create-only; Rentec has no update/delete).' );
 		$catalog[] = $e( 'POST', '/ops/rentec/{properties|tenants}/{id}/notes', 'Adds a note to a Rentec property or tenant.' );
 		$catalog[] = $e( 'POST', '/ops/rentec/files', 'Uploads a file to Rentec (multipart: file, optional property_id, renter_id, owner_id, vendor_id, workorder_id, transaction_id, share_owner).' );
+		$catalog[] = $e( 'GET', '/ops/rentec/counts', 'Badge counts for the Rentec sidebar (open work orders, tenants owing, leads, unread applications and messages, totals), cached.' );
 		$catalog[] = $e( 'GET', '/ops/rentec/lookup', 'Finds a tenant, owner, vendor or prospect by exact name, email or phone (type, q) for the message recipient picker.' );
 		return $catalog;
 	}
@@ -705,7 +736,61 @@ class AJCore_RA_Rentec {
 			$message = isset( $response_body['message'] ) ? sanitize_text_field( (string) $response_body['message'] ) : sprintf( __( 'Rentec returned HTTP status %d.', 'ajcore-ra' ), $status );
 			return new WP_Error( 'ajcore_rentec_upload_failed', $message, array( 'status' => 502 ) );
 		}
+		$this->bump_rentec_cache();
 		return rest_ensure_response( is_array( $response_body ) ? $response_body : array( 'success' => true ) );
+	}
+
+	/** Sidebar badge counts, summed over the configured accounts. Cached; refresh=1 bypasses. */
+	public function get_ops_rentec_counts( WP_REST_Request $request ) {
+		$selected = $this->get_rentec_account_for_ops_request( $request );
+		if ( is_wp_error( $selected ) ) {
+			return $selected;
+		}
+		$this->rentec_bypass_cache = rest_sanitize_boolean( $request->get_param( 'refresh' ) );
+		$base   = 'https://secure.rentecdirect.com/api/v3/';
+		$counts = array( 'work_orders' => 0, 'tenants' => 0, 'leads' => 0, 'applications' => 0, 'messages' => 0, 'properties' => 0, 'vendors' => 0, 'owners' => 0 );
+		$errors = 0;
+		foreach ( $selected['accounts'] as $account ) {
+			if ( empty( $account['key'] ) ) {
+				continue;
+			}
+			$key  = $account['key'];
+			$get  = function ( $url, $ttl = 300 ) use ( $key ) {
+				$body = $this->cached_rentec_for_ops( $url, $key, $ttl );
+				return is_wp_error( $body ) ? null : (array) ( $body['data'] ?? array() );
+			};
+			$rows = $get( add_query_arg( 'age', '3650d', $base . 'work_orders' ) );
+			if ( null === $rows ) {
+				$errors++;
+			} else {
+				foreach ( $rows as $row ) {
+					if ( in_array( (string) ( $row['status'] ?? '' ), array( 'OpenU', 'OpenA', 'Parts', 'Work', 'Unassigned', 'Assigned' ), true ) ) {
+						$counts['work_orders']++;
+					}
+				}
+			}
+			$rows = $get( $base . 'tenants', 600 );
+			if ( null !== $rows ) {
+				foreach ( $rows as $row ) {
+					if ( (float) ( $row['balance'] ?? 0 ) < 0 ) {
+						$counts['tenants']++;
+					}
+				}
+			}
+			$rows = $get( $base . 'leads', 600 );
+			$counts['leads'] += null === $rows ? 0 : count( $rows );
+			$rows = $get( add_query_arg( 'status', 'Unread', $base . 'applications' ) );
+			$counts['applications'] += null === $rows ? 0 : count( $rows );
+			$rows = $get( add_query_arg( array( 'unread_only' => 'true', 'page_size' => 100 ), $base . 'messages' ) );
+			$counts['messages'] += null === $rows ? 0 : count( $rows );
+			$rows = $get( add_query_arg( 'include_subunits', 'true', $base . 'properties' ), 600 );
+			$counts['properties'] += null === $rows ? 0 : count( $this->flatten_rentec_properties_for_ops( $rows ) );
+			$rows = $get( $base . 'vendors', 600 );
+			$counts['vendors'] += null === $rows ? 0 : count( $rows );
+			$rows = $get( $base . 'owners', 600 );
+			$counts['owners'] += null === $rows ? 0 : count( $rows );
+		}
+		return rest_ensure_response( array( 'counts' => $counts, 'partial' => $errors > 0 ) );
 	}
 
 	/** Name search across tenants / owners / vendors / prospects for the message recipient picker. */
@@ -766,7 +851,7 @@ class AJCore_RA_Rentec {
 			if ( ! $needed ) {
 				continue;
 			}
-			$body = $this->request_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/' . $src[1], $key );
+			$body = $this->cached_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/' . $src[1], $key, 600 );
 			if ( is_wp_error( $body ) ) {
 				continue;
 			}
@@ -844,7 +929,8 @@ class AJCore_RA_Rentec {
 			$url = add_query_arg( 'age', '3650d', $url );
 		}
 
-		$body = $this->request_rentec_for_ops( $url, $accounts[ $account ]['key'] );
+		$this->rentec_bypass_cache = rest_sanitize_boolean( $request->get_param( 'refresh' ) );
+		$body = $this->cached_rentec_for_ops( $url, $accounts[ $account ]['key'], 120 );
 		if ( is_wp_error( $body ) ) {
 			return $body;
 		}
@@ -867,8 +953,8 @@ class AJCore_RA_Rentec {
 
 			// Work-order list rows only contain property/vendor IDs. Resolve both resources in
 			// two bulk calls so AJOps can show the address and assignee without an N+1 request.
-			$property_body = $this->request_rentec_for_ops( add_query_arg( 'include_subunits', 'true', 'https://secure.rentecdirect.com/api/v3/properties' ), $accounts[ $account ]['key'] );
-			$vendor_body   = $this->request_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/vendors', $accounts[ $account ]['key'] );
+			$property_body = $this->cached_rentec_for_ops( add_query_arg( 'include_subunits', 'true', 'https://secure.rentecdirect.com/api/v3/properties' ), $accounts[ $account ]['key'], 600 );
+			$vendor_body   = $this->cached_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/vendors', $accounts[ $account ]['key'], 600 );
 			$properties    = array();
 			$vendors       = array();
 			if ( ! is_wp_error( $property_body ) ) {
@@ -907,8 +993,8 @@ class AJCore_RA_Rentec {
 		if ( 'leases' === $resource ) {
 			// Lease rows carry only renter_id/property_id. Resolve both in two bulk calls (same
 			// approach as work_orders above) so the tab can show who and where without an N+1.
-			$tenant_body   = $this->request_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/tenants', $accounts[ $account ]['key'] );
-			$property_body = $this->request_rentec_for_ops( add_query_arg( 'include_subunits', 'true', 'https://secure.rentecdirect.com/api/v3/properties' ), $accounts[ $account ]['key'] );
+			$tenant_body   = $this->cached_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/tenants', $accounts[ $account ]['key'], 600 );
+			$property_body = $this->cached_rentec_for_ops( add_query_arg( 'include_subunits', 'true', 'https://secure.rentecdirect.com/api/v3/properties' ), $accounts[ $account ]['key'], 600 );
 			$tenants       = array();
 			$properties    = array();
 			if ( ! is_wp_error( $tenant_body ) ) {
@@ -951,6 +1037,12 @@ class AJCore_RA_Rentec {
 		$total = 'work_orders' === $resource
 			? count( $rows )
 			: ( isset( $body['summary']['records'] ) ? absint( $body['summary']['records'] ) : count( $rows ) );
+		// Rentec cannot page its lists, so the full list is fetched once (and cached) and paged here.
+		$per_page = min( 200, absint( $request->get_param( 'per_page' ) ) );
+		$page_no  = max( 1, absint( $request->get_param( 'page' ) ) );
+		if ( 'messages' === $resource ) {
+			$total = count( $rows );
+		}
 
 		$account_summaries = array();
 		foreach ( $accounts as $index => $configured_account ) {
@@ -967,8 +1059,11 @@ class AJCore_RA_Rentec {
 				'accounts' => $account_summaries,
 				'resource' => $resource,
 				'total'    => $total,
-				'rows'     => array_slice( $rows, 0, 100 ),
-				'limit'    => 100,
+				'rows'     => $per_page > 0 ? array_slice( $rows, ( $page_no - 1 ) * $per_page, $per_page ) : array_slice( $rows, 0, 1000 ),
+				'limit'    => $per_page > 0 ? $per_page : 1000,
+				'page'     => $page_no,
+				'per_page' => $per_page,
+				'pages'    => $per_page > 0 ? max( 1, (int) ceil( count( $rows ) / $per_page ) ) : 1,
 			)
 		);
 	}
