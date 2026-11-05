@@ -25,6 +25,7 @@ class AJCore_RA_Gmail_Intake {
 	const OPTION     = 'ajcore_ra_gmail_intake';
 	const SHARED_ROW = 'ajcore_gmail_intake_settings';
 	const TAB        = 'gmail-intake';
+	const FLYER_CRON = 'ajcore_ra_flyers_auto_share';
 
 	/** @var array<string,callable> */
 	private $kit;
@@ -50,6 +51,31 @@ class AJCore_RA_Gmail_Intake {
 		add_action( 'admin_post_ajcore_ra_gmail_disconnect', array( __CLASS__, 'handle_disconnect' ) );
 		add_filter( 'ajcore_additional_branded_email_templates', array( __CLASS__, 'add_templates' ) );
 		add_filter( 'ajcore_preserved_setting_prefixes', array( __CLASS__, 'preserved_prefixes' ) );
+		// New RA / ncllcagents.com customers get the shared flyers automatically (daily; adds only, never removes).
+		add_action( 'admin_init', array( __CLASS__, 'fold_aoo_category' ) );
+		add_action( self::FLYER_CRON, array( __CLASS__, 'flyers_auto_share' ) );
+		add_action( 'init', function () {
+			if ( ! wp_next_scheduled( self::FLYER_CRON ) ) {
+				wp_schedule_event( time() + 600, 'daily', self::FLYER_CRON );
+			}
+		} );
+	}
+
+	/** One-time: existing files filed as "Articles of Organization" move into "Formation Documents". */
+	public static function fold_aoo_category() {
+		if ( get_option( 'ajcore_ra_aoo_folded' ) ) {
+			return;
+		}
+		global $wpdb;
+		$wpdb->update( $wpdb->prefix . 'aj_portal_files', array( 'category' => 'Formation Documents' ), array( 'category' => 'Articles of Organization' ) );
+		update_option( 'ajcore_ra_aoo_folded', 1, false );
+	}
+
+	public static function flyers_auto_share() {
+		$self = self::instance();
+		foreach ( array_keys( $self->flyer_groups() ) as $key ) {
+			$self->flyers_share_audience( $key, true );
+		}
 	}
 
 	public static function boot_routes() {
@@ -920,7 +946,7 @@ class AJCore_RA_Gmail_Intake {
 		if ( '' !== $company_name && false !== strpos( $lower, 'articles of organization' ) ) {
 			return array(
 				'filename' => 'AOO of ' . $company_name,
-				'category' => 'Articles of Organization',
+				'category' => 'Formation Documents',
 			);
 		}
 
@@ -2552,10 +2578,8 @@ class AJCore_RA_Gmail_Intake {
 		return $ids;
 	}
 
-	/** Share a flyer with the NC LLC Agents audience (Registered Agent customers or ncllcagents.com logins) — preview with apply=0. */
-	public function flyers_share_all_route( WP_REST_Request $request ) {
-		$key    = sanitize_key( (string) $request->get_param( 'key' ) );
-		$apply  = rest_sanitize_boolean( $request->get_param( 'apply' ) );
+	/** Shares one flyer with the audience; returns the number of new shares (or WP_Error). apply=false only counts. */
+	private function flyers_share_audience( $key, $apply ) {
 		$fileid = $this->flyer_canonical_id( $key );
 		if ( ! $fileid ) {
 			return new WP_Error( 'no_flyer', __( 'Upload this flyer first.', 'ajcore-ra' ), array( 'status' => 400 ) );
@@ -2590,6 +2614,17 @@ class AJCore_RA_Gmail_Intake {
 				$this->flyer_share_file( $fileid, $email, $this->flyer_customer_user_id( $c->stripe_customer_id ) );
 			}
 			$added++;
+		}
+		return $added;
+	}
+
+	/** Share a flyer with the NC LLC Agents audience (Registered Agent customers or ncllcagents.com logins) — preview with apply=0. */
+	public function flyers_share_all_route( WP_REST_Request $request ) {
+		$key   = sanitize_key( (string) $request->get_param( 'key' ) );
+		$apply = rest_sanitize_boolean( $request->get_param( 'apply' ) );
+		$added = $this->flyers_share_audience( $key, $apply );
+		if ( is_wp_error( $added ) ) {
+			return $added;
 		}
 		return rest_ensure_response( array( 'applied' => $apply, 'new_shares' => $added ) );
 	}

@@ -235,12 +235,25 @@ function ajcore_ra_authorization_body_lines() {
  */
 /** Files categories RA's filing intake files into. Added to whatever the site has saved, and shown to customers as an important group. */
 function ajcore_ra_portal_file_settings( $settings ) {
-	foreach ( array( 'Formation Documents' ) as $cat ) {
-		if ( ! in_array( $cat, (array) $settings['categories'], true ) ) {
-			$settings['categories'][] = $cat;
+	// Filing categories are RA's; AJCore ships only "Others". Added on read, so existing saved settings pick them up.
+	$groups = array(
+		'important_categories' => array( 'IRS EIN Letters', 'Formation Documents' ),
+		'extra_categories'     => array( 'SOSNC Flyers' ),
+	);
+	$cats = array_values( array_diff( (array) $settings['categories'], array( 'Others', 'Articles of Organization' ) ) );
+	$settings['important_categories'] = array_values( array_diff( (array) $settings['important_categories'], array( 'Articles of Organization' ) ) );
+	foreach ( array( 'Formation Documents', 'IRS EIN Letters', 'SOSNC Flyers', 'Change of RA' ) as $cat ) {
+		if ( ! in_array( $cat, $cats, true ) ) {
+			$cats[] = $cat;
 		}
-		if ( ! in_array( $cat, (array) $settings['important_categories'], true ) ) {
-			$settings['important_categories'][] = $cat;
+	}
+	$cats[] = 'Others';
+	$settings['categories'] = $cats;
+	foreach ( $groups as $key => $names ) {
+		foreach ( $names as $cat ) {
+			if ( ! in_array( $cat, (array) $settings[ $key ], true ) ) {
+				$settings[ $key ][] = $cat;
+			}
 		}
 	}
 	return $settings;
