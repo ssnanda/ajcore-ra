@@ -1970,7 +1970,9 @@ class AJCore_RA_Gmail_Intake {
 				'response_type' => 'code',
 				'scope'         => 'https://www.googleapis.com/auth/gmail.modify',
 				'access_type'   => 'offline',
-				'prompt'        => 'consent',
+				// select_account: always show Google's account chooser, so the intake mailbox can be picked
+				// instead of whichever account the browser is already signed in to.
+				'prompt'        => 'select_account consent',
 				'state'         => $authorize_state,
 			),
 			'https://accounts.google.com/o/oauth2/v2/auth'
