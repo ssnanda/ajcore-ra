@@ -1625,14 +1625,15 @@ class AJCore_RA_Gmail_Intake {
 		$paragraphs = $copy['paragraphs'];
 		if ( ! empty( $filed_categories ) ) {
 			$file_settings = ajcore_get_portal_file_settings();
-			$grouped       = array( 'important' => array(), 'extra' => array(), 'other' => array() );
+			$grouped       = array( 'important' => array(), 'other' => array(), 'receipts' => array(), 'extra' => array() );
 			foreach ( (array) $filed_filenames as $filed_name ) {
 				$grouped[ ajcore_portal_file_category_group( $filed_categories[ $filed_name ] ?? '', $file_settings ) ][] = sanitize_text_field( $filed_name );
 			}
 			$group_labels = array(
 				'important' => __( 'Important', 'ajcore-ra' ),
-				'extra'     => __( 'Extra', 'ajcore-ra' ),
 				'other'     => __( 'Other', 'ajcore-ra' ),
+				'receipts'  => __( 'Receipts', 'ajcore-ra' ),
+				'extra'     => __( 'Important Flyers from Secretary of State', 'ajcore-ra' ),
 			);
 			foreach ( $grouped as $group => $names ) {
 				if ( $names ) {
