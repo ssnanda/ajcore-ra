@@ -44,10 +44,12 @@ class AJCore_RA_Rentec {
 		add_action( 'admin_post_ajcore_ra_save_rentec', array( __CLASS__, 'handle_save' ) );
 		add_action( 'wp_ajax_ajcore_test_rentec_connection', array( __CLASS__, 'ajax_test' ) );
 		add_filter( 'ajcore_expense_invoice_options', array( __CLASS__, 'expense_invoice_options' ) );
+		add_filter( 'ajcore_endpoint_catalog', array( __CLASS__, 'catalog_writes' ) );
 	}
 
 	public static function boot_routes() {
 		self::instance()->register_routes();
+		self::instance()->register_write_routes();
 	}
 
 	public static function ajax_test() {
@@ -506,6 +508,299 @@ class AJCore_RA_Rentec {
 		return $flattened;
 	}
 
+	// ── Extra Rentec resources: messages, files, properties, tenants, leases, expenses, notes ──
+	// Rentec's v3 "write" is create-only (no update/delete) apart from sticky notes; these routes mirror that.
+
+	/** Field whitelist per creatable record: name => type (str|email|text|int|num|bool|date|enum:a,b). */
+	private function rentec_record_specs() {
+		return array(
+			'properties' => array(
+				'path'     => 'properties',
+				'required' => array(),
+				'fields'   => array( 'nickname' => 'str', 'address' => 'str', 'city' => 'str', 'state' => 'str', 'zip' => 'str', 'monthly_rent' => 'num', 'security_dep' => 'num', 'bedrooms' => 'int', 'bathrooms' => 'num', 'sqft' => 'int', 'notes' => 'text', 'multiplex' => 'bool', 'multiunits' => 'int', 'owner_id' => 'int', 'default_bank' => 'int', 'default_bank_expense' => 'int' ),
+			),
+			'tenants'    => array(
+				'path'     => 'tenants',
+				'required' => array(),
+				'fields'   => array( 'f_name' => 'str', 'l_name' => 'str', 'm_int' => 'str', 'company' => 'str', 'email' => 'email', 'phone' => 'str', 'mphone' => 'str', 'employer_phone' => 'str', 'dob' => 'date', 'notes' => 'text' ),
+			),
+			'leases'     => array(
+				'path'     => 'leases',
+				'required' => array( 'renter_id', 'property_id', 'move_in_date' ),
+				'fields'   => array( 'renter_id' => 'int', 'property_id' => 'int', 'move_in_date' => 'date', 'begin_charges_date' => 'date', 'lease_begin_date' => 'date', 'lease_end_date' => 'date', 'rent_amount' => 'num', 'rent_period' => 'enum:daily,weekly,monthly,yearly,biweekly,quarterly', 'product_id' => 'int', 'prorate' => 'bool' ),
+			),
+			'expenses'   => array(
+				'path'     => 'transactions/expense',
+				'required' => array( 'category_id', 'amount', 'pmt_type' ),
+				'fields'   => array( 'property_id' => 'int', 'bank_id' => 'int', 'renter_id' => 'int', 'vendor_id' => 'int', 'category_id' => 'int', 'amount' => 'num', 'transaction_time' => 'str', 'memo' => 'str', 'check_num' => 'str', 'pmt_type' => 'enum:CH,PCH,CA,CR,O,ACH' ),
+			),
+			'messages'   => array(
+				'path'     => 'messages',
+				'required' => array( 'body' ),
+				'fields'   => array( 'subject' => 'str', 'body' => 'text', 'renter_id' => 'int', 'prospect_id' => 'int', 'owner_id' => 'int', 'vendor_id' => 'int', 'date' => 'date' ),
+			),
+		);
+	}
+
+	private function clean_rentec_value( $value, $type ) {
+		if ( 'int' === $type ) {
+			return absint( $value );
+		}
+		if ( 'num' === $type ) {
+			return round( max( 0, (float) $value ), 2 );
+		}
+		if ( 'bool' === $type ) {
+			return rest_sanitize_boolean( $value );
+		}
+		if ( 'email' === $type ) {
+			return sanitize_email( (string) $value );
+		}
+		if ( 'text' === $type ) {
+			return sanitize_textarea_field( (string) $value );
+		}
+		if ( 'date' === $type ) {
+			$value = sanitize_text_field( (string) $value );
+			return preg_match( '/^\d{4}-\d{2}-\d{2}$/', $value ) ? $value : '';
+		}
+		if ( 0 === strpos( $type, 'enum:' ) ) {
+			$value = sanitize_text_field( (string) $value );
+			return in_array( $value, explode( ',', substr( $type, 5 ) ), true ) ? $value : '';
+		}
+		return sanitize_text_field( (string) $value );
+	}
+
+	public function register_write_routes() {
+		$ops = array( 'AJCore_Extensions', 'can_manage_ops' );
+		$ns  = AJCore_Extensions::rest_namespace();
+		register_rest_route( $ns, '/ops/rentec/records/(?P<kind>properties|tenants|leases|expenses|messages)', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( $this, 'create_ops_rentec_record' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/rentec/(?P<kind>properties|tenants)/(?P<id>\d+)/notes', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( $this, 'add_ops_rentec_entity_note' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/rentec/files', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( $this, 'upload_ops_rentec_file' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/rentec/lookup', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( $this, 'get_ops_rentec_lookup' ), 'permission_callback' => $ops ) );
+	}
+
+	public static function catalog_writes( $catalog ) {
+		$e = static function ( $method, $path, $purpose ) {
+			return array( 'surface' => 'OPS', 'method' => $method, 'path' => $path, 'auth' => 'Admin', 'purpose' => $purpose, 'app' => 'OPS rentec' );
+		};
+		$catalog[] = $e( 'POST', '/ops/rentec/records/{kind}', 'Creates a Rentec record. kind: properties | tenants | leases | expenses | messages (create-only; Rentec has no update/delete).' );
+		$catalog[] = $e( 'POST', '/ops/rentec/{properties|tenants}/{id}/notes', 'Adds a note to a Rentec property or tenant.' );
+		$catalog[] = $e( 'POST', '/ops/rentec/files', 'Uploads a file to Rentec (multipart: file, optional property_id, renter_id, owner_id, vendor_id, workorder_id, transaction_id, share_owner).' );
+		$catalog[] = $e( 'GET', '/ops/rentec/lookup', 'Finds a tenant, owner, vendor or prospect by exact name, email or phone (type, q) for the message recipient picker.' );
+		return $catalog;
+	}
+
+	public function create_ops_rentec_record( WP_REST_Request $request ) {
+		$selected = $this->get_rentec_account_for_ops_request( $request );
+		if ( is_wp_error( $selected ) ) {
+			return $selected;
+		}
+		$specs = $this->rentec_record_specs();
+		$kind  = sanitize_key( (string) $request->get_param( 'kind' ) );
+		if ( ! isset( $specs[ $kind ] ) ) {
+			return new WP_Error( 'ajcore_rentec_kind', __( 'Unknown Rentec record type.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$spec    = $specs[ $kind ];
+		$payload = array();
+		foreach ( $spec['fields'] as $field => $type ) {
+			$raw = $request->get_param( $field );
+			if ( null === $raw || '' === $raw ) {
+				continue;
+			}
+			$value = $this->clean_rentec_value( $raw, $type );
+			if ( '' === $value || ( in_array( $type, array( 'int' ), true ) && 0 === $value ) ) {
+				continue;
+			}
+			$payload[ $field ] = $value;
+		}
+		// Rentec wants "yyyy-mm-dd hh:ii:ss" for the expense time; the form sends just the date.
+		if ( ! empty( $payload['transaction_time'] ) && preg_match( '/^\d{4}-\d{2}-\d{2}$/', $payload['transaction_time'] ) ) {
+			$payload['transaction_time'] .= ' 12:00:00';
+		}
+		foreach ( $spec['required'] as $field ) {
+			if ( ! isset( $payload[ $field ] ) || '' === $payload[ $field ] || 0 === $payload[ $field ] ) {
+				return new WP_Error( 'ajcore_rentec_required', sprintf( __( '%s is required.', 'ajcore-ra' ), $field ), array( 'status' => 400 ) );
+			}
+		}
+		if ( 'tenants' === $kind && empty( $payload['company'] ) && ( empty( $payload['f_name'] ) || empty( $payload['l_name'] ) ) ) {
+			return new WP_Error( 'ajcore_rentec_required', __( 'First and last name, or a company, is required.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		if ( 'properties' === $kind && empty( $payload['address'] ) ) {
+			return new WP_Error( 'ajcore_rentec_required', __( 'Address is required.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		if ( 'expenses' === $kind && empty( $payload['property_id'] ) && empty( $payload['bank_id'] ) ) {
+			return new WP_Error( 'ajcore_rentec_required', __( 'A property or a bank account is required.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		if ( 'messages' === $kind && empty( $payload['renter_id'] ) && empty( $payload['prospect_id'] ) && empty( $payload['owner_id'] ) && empty( $payload['vendor_id'] ) ) {
+			return new WP_Error( 'ajcore_rentec_required', __( 'Choose who the message is for.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$body = $this->request_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/' . $spec['path'], $selected['account']['key'], 'POST', $payload );
+		if ( is_wp_error( $body ) ) {
+			return $body;
+		}
+		return rest_ensure_response( array( 'success' => true, 'account' => $selected['id'], 'record' => $body['data'] ?? $body ) );
+	}
+
+	public function add_ops_rentec_entity_note( WP_REST_Request $request ) {
+		$selected = $this->get_rentec_account_for_ops_request( $request );
+		if ( is_wp_error( $selected ) ) {
+			return $selected;
+		}
+		$note = sanitize_textarea_field( (string) $request->get_param( 'note' ) );
+		if ( '' === $note ) {
+			return new WP_Error( 'ajcore_rentec_note_required', __( 'Enter a note.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$kind = 'tenants' === $request->get_param( 'kind' ) ? 'tenants' : 'properties';
+		$body = $this->request_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/' . $kind . '/' . absint( $request->get_param( 'id' ) ) . '/notes', $selected['account']['key'], 'POST', array( 'note' => $note ) );
+		if ( is_wp_error( $body ) ) {
+			return $body;
+		}
+		return rest_ensure_response( array( 'success' => true, 'data' => $body['data'] ?? $body ) );
+	}
+
+	/** Uploads any document (max 20 MB) to Rentec, optionally attached to a property, tenant, owner, vendor, work order or transaction. */
+	public function upload_ops_rentec_file( WP_REST_Request $request ) {
+		$selected = $this->get_rentec_account_for_ops_request( $request );
+		if ( is_wp_error( $selected ) ) {
+			return $selected;
+		}
+		$files = $request->get_file_params();
+		$file  = isset( $files['file'] ) && is_array( $files['file'] ) ? $files['file'] : null;
+		if ( ! $file || empty( $file['tmp_name'] ) || ! is_uploaded_file( $file['tmp_name'] ) || ! empty( $file['error'] ) ) {
+			return new WP_Error( 'ajcore_rentec_file_required', __( 'Choose a file to upload.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		if ( (int) $file['size'] > 20 * MB_IN_BYTES ) {
+			return new WP_Error( 'ajcore_rentec_file_too_large', __( 'Files must be 20 MB or smaller.', 'ajcore-ra' ), array( 'status' => 413 ) );
+		}
+		$contents = file_get_contents( $file['tmp_name'] );
+		if ( false === $contents ) {
+			return new WP_Error( 'ajcore_rentec_file_read_failed', __( 'The uploaded file could not be read.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$type     = wp_check_filetype_and_ext( $file['tmp_name'], $file['name'] );
+		$mime     = (string) ( $type['type'] ?? '' );
+		$mime     = '' !== $mime ? $mime : 'application/octet-stream';
+		$boundary = 'ajcore-' . wp_generate_password( 24, false, false );
+		$eol      = "\r\n";
+		$body     = '';
+		foreach ( array( 'property_id', 'renter_id', 'owner_id', 'vendor_id', 'workorder_id', 'transaction_id' ) as $field ) {
+			$id = absint( $request->get_param( $field ) );
+			if ( $id ) {
+				$body .= '--' . $boundary . $eol . 'Content-Disposition: form-data; name="' . $field . '"' . $eol . $eol . $id . $eol;
+			}
+		}
+		if ( rest_sanitize_boolean( $request->get_param( 'share_owner' ) ) ) {
+			$body .= '--' . $boundary . $eol . 'Content-Disposition: form-data; name="share_owner"' . $eol . $eol . 'true' . $eol;
+		}
+		$body .= '--' . $boundary . $eol . 'Content-Disposition: form-data; name="file"; filename="' . sanitize_file_name( $file['name'] ) . '"' . $eol . 'Content-Type: ' . $mime . $eol . $eol . $contents . $eol . '--' . $boundary . '--' . $eol;
+		$response = wp_remote_post( 'https://secure.rentecdirect.com/api/v3/files', array(
+			'headers' => array( 'Accept' => 'application/json', 'Content-Type' => 'multipart/form-data; boundary=' . $boundary, 'X-API-Key' => $selected['account']['key'] ),
+			'body'    => $body,
+			'timeout' => 45,
+		) );
+		if ( is_wp_error( $response ) ) {
+			return new WP_Error( 'ajcore_rentec_upload_failed', $response->get_error_message(), array( 'status' => 502 ) );
+		}
+		$status        = (int) wp_remote_retrieve_response_code( $response );
+		$response_body = json_decode( wp_remote_retrieve_body( $response ), true );
+		if ( $status < 200 || $status >= 300 ) {
+			$message = isset( $response_body['message'] ) ? sanitize_text_field( (string) $response_body['message'] ) : sprintf( __( 'Rentec returned HTTP status %d.', 'ajcore-ra' ), $status );
+			return new WP_Error( 'ajcore_rentec_upload_failed', $message, array( 'status' => 502 ) );
+		}
+		return rest_ensure_response( is_array( $response_body ) ? $response_body : array( 'success' => true ) );
+	}
+
+	/** Name search across tenants / owners / vendors / prospects for the message recipient picker. */
+	public function get_ops_rentec_lookup( WP_REST_Request $request ) {
+		$selected = $this->get_rentec_account_for_ops_request( $request );
+		if ( is_wp_error( $selected ) ) {
+			return $selected;
+		}
+		$map  = array( 'tenant' => 'tenant', 'owner' => 'owner', 'vendor' => 'vendor', 'prospect' => 'prospect' );
+		$type = sanitize_key( (string) $request->get_param( 'type' ) );
+		if ( ! isset( $map[ $type ] ) ) {
+			return new WP_Error( 'ajcore_rentec_kind', __( 'Unknown lookup type.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		// Rentec's lookup takes exact fields, not free text: email, phone, or first/last name.
+		$q    = sanitize_text_field( (string) $request->get_param( 'q' ) );
+		$args = array();
+		if ( false !== strpos( $q, '@' ) ) {
+			$args['email'] = $q;
+		} elseif ( strlen( preg_replace( '/\D+/', '', $q ) ) >= 7 ) {
+			$args['phone'] = preg_replace( '/\D+/', '', $q );
+		} else {
+			$parts = preg_split( '/\s+/', trim( $q ) );
+			if ( count( $parts ) > 1 ) {
+				$args['f_name'] = array_shift( $parts );
+				$args['l_name'] = implode( ' ', $parts );
+			} elseif ( '' !== $q ) {
+				$args['l_name'] = $q;
+			}
+		}
+		if ( ! $args ) {
+			return new WP_Error( 'ajcore_rentec_lookup_required', __( 'Enter a name, email or phone.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$url  = add_query_arg( array_map( 'rawurlencode', $args ), 'https://secure.rentecdirect.com/api/v3/lookup/' . $map[ $type ] );
+		$body = $this->request_rentec_for_ops( $url, $selected['account']['key'] );
+		if ( is_wp_error( $body ) ) {
+			return $body;
+		}
+		return rest_ensure_response( array( 'account' => $selected['id'], 'rows' => array_slice( (array) ( $body['data'] ?? array() ), 0, 25 ) ) );
+	}
+
+	/** Adds _party ("Tenant: Jane Doe"), _party_type and _preview to message rows (one bulk call per party type present). */
+	private function label_rentec_messages_for_ops( array $rows, $key ) {
+		$sources = array(
+			'renter_id'   => array( 'Tenant', 'tenants', 'renter_id' ),
+			'vendor_id'   => array( 'Vendor', 'vendors', 'vendor_id' ),
+			'owner_id'    => array( 'Owner', 'owners', 'owner_id' ),
+			'prospect_id' => array( 'Lead', 'leads', 'prospect_id' ),
+		);
+		$names = array();
+		foreach ( $sources as $field => $src ) {
+			$needed = false;
+			foreach ( $rows as $row ) {
+				if ( ! empty( $row[ $field ] ) ) {
+					$needed = true;
+					break;
+				}
+			}
+			if ( ! $needed ) {
+				continue;
+			}
+			$body = $this->request_rentec_for_ops( 'https://secure.rentecdirect.com/api/v3/' . $src[1], $key );
+			if ( is_wp_error( $body ) ) {
+				continue;
+			}
+			foreach ( (array) ( $body['data'] ?? array() ) as $person ) {
+				if ( ! is_array( $person ) || empty( $person[ $src[2] ] ) ) {
+					continue;
+				}
+				$name = trim( (string) ( $person['f_name'] ?? '' ) . ' ' . (string) ( $person['l_name'] ?? '' ) );
+				$name = '' !== $name ? $name : (string) ( $person['name'] ?? $person['company'] ?? $person['contact'] ?? '' );
+				$names[ $field ][ absint( $person[ $src[2] ] ) ] = sanitize_text_field( $name );
+			}
+		}
+		foreach ( $rows as &$row ) {
+			$row['_party'] = '';
+			$row['_party_type'] = '';
+			foreach ( $sources as $field => $src ) {
+				if ( ! empty( $row[ $field ] ) ) {
+					$row['_party_type'] = $src[0];
+					$row['_party']      = $names[ $field ][ absint( $row[ $field ] ) ] ?? ( $src[0] . ' #' . absint( $row[ $field ] ) );
+					break;
+				}
+			}
+			$text = trim( preg_replace( '/\s+/', ' ', wp_strip_all_tags( (string) ( $row['body'] ?? '' ) ) ) );
+			$row['_preview'] = mb_substr( $text, 0, 160 );
+			$row['_direction'] = 'OUT' === ( $row['direction'] ?? '' ) ? 'Sent' : ( 'IN' === ( $row['direction'] ?? '' ) ? 'Received' : (string) ( $row['direction'] ?? '' ) );
+		}
+		unset( $row );
+		usort( $rows, function ( $a, $b ) {
+			return strcmp( (string) ( $b['email_time'] ?? '' ), (string) ( $a['email_time'] ?? '' ) );
+		} );
+		return $rows;
+	}
+
+
 	public function get_ops_rentec_resource( WP_REST_Request $request ) {
 		$selected = $this->get_rentec_account_for_ops_request( $request );
 		if ( is_wp_error( $selected ) ) {
@@ -517,7 +812,7 @@ class AJCore_RA_Rentec {
 		// (confirmed against the published OpenAPI spec) — so the closest real thing the API can
 		// give that screen is the lease roster: who currently occupies which property, and for how
 		// long. That is the list renters insurance is tracked against.
-		$allowed_resources = array( 'tenants', 'leads', 'vendors', 'transactions', 'work_orders', 'files', 'messages', 'leases' );
+		$allowed_resources = array( 'tenants', 'leads', 'vendors', 'transactions', 'work_orders', 'files', 'messages', 'leases', 'properties', 'owners', 'accounts', 'products', 'applications' );
 		$resource          = sanitize_key( (string) $request->get_param( 'resource' ) );
 		if ( ! in_array( $resource, $allowed_resources, true ) ) {
 			$resource = 'work_orders';
@@ -528,6 +823,15 @@ class AJCore_RA_Rentec {
 		$url = 'https://secure.rentecdirect.com/api/v3/' . $resource;
 		if ( 'transactions' === $resource ) {
 			$url = add_query_arg( 'page', 1, $url );
+		}
+		if ( 'properties' === $resource ) {
+			$url = add_query_arg( 'include_subunits', 'true', $url );
+		}
+		if ( 'messages' === $resource ) {
+			$url = add_query_arg( 'page_size', 100, $url );
+			if ( rest_sanitize_boolean( $request->get_param( 'unread_only' ) ) ) {
+				$url = add_query_arg( 'unread_only', 'true', $url );
+			}
 		}
 
 		$statuses = array();
@@ -588,6 +892,17 @@ class AJCore_RA_Rentec {
 				$row['_details']     = sanitize_textarea_field( (string) ( $row['description'] ?? '' ) );
 			}
 			unset( $row );
+		}
+		if ( 'properties' === $resource ) {
+			$rows = $this->flatten_rentec_properties_for_ops( $rows );
+			foreach ( $rows as &$row ) {
+				$city = implode( ', ', array_filter( array_map( 'strval', array( $row['city'] ?? '', $row['state'] ?? '', $row['zip'] ?? '' ) ) ) );
+				$row['_address'] = implode( ', ', array_filter( array_map( 'strval', array( $row['address'] ?? '', $city ) ) ) );
+			}
+			unset( $row );
+		}
+		if ( 'messages' === $resource ) {
+			$rows = $this->label_rentec_messages_for_ops( $rows, $accounts[ $account ]['key'] );
 		}
 		if ( 'leases' === $resource ) {
 			// Lease rows carry only renter_id/property_id. Resolve both in two bulk calls (same
