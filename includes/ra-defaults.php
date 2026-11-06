@@ -25,6 +25,7 @@ add_filter( 'ajcore_brand_setting_prefixes', 'ajcore_ra_brand_setting_prefixes' 
 add_filter( 'ajcore_portal_office_address', 'ajcore_ra_portal_office_address', 10, 2 );
 add_filter( 'ajcore_portal_file_settings', 'ajcore_ra_portal_file_settings' );
 add_filter( 'ajcore_service_status_labels', 'ajcore_ra_service_status_labels' );
+add_filter( 'ajcore_service_workflow_labels', 'ajcore_ra_service_workflow_labels' );
 add_filter( 'ajcore_service_status_pipelines', 'ajcore_ra_service_status_pipelines' );
 add_filter( 'ajcore_service_request_product_type', 'ajcore_ra_service_request_product_type', 10, 2 );
 add_filter( 'ajcore_portal_menu_default_items', 'ajcore_ra_portal_menu_compliance_on', 20 );
@@ -359,4 +360,13 @@ function ajcore_ra_service_request_product_type( $type, $name ) {
 		return ( false !== strpos( $name, 'setup' ) || false !== strpos( $name, 'one time' ) || false !== strpos( $name, 'one-time' ) ) ? 'virtual_office_setup' : 'virtual_office_subscription';
 	}
 	return $type;
+}
+
+/** Display names for the RA workflows (Workflows view). */
+function ajcore_ra_service_workflow_labels( $names ) {
+	$names['llc_setup']                     = __( 'LLC Setup', 'ajcore-ra' );
+	$names['virtual_office_setup']          = __( 'Virtual Office Setup', 'ajcore-ra' );
+	$names['virtual_office_subscription']   = __( 'Virtual Office Subscription', 'ajcore-ra' );
+	$names['registered_agent_subscription'] = __( 'Registered Agent Subscription', 'ajcore-ra' );
+	return $names;
 }
