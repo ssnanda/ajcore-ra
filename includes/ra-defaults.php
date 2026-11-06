@@ -31,6 +31,7 @@ add_filter( 'ajcore_service_request_product_type', 'ajcore_ra_service_request_pr
 add_filter( 'ajcore_service_request_types', 'ajcore_ra_service_request_types' );
 add_filter( 'ajcore_service_request_quick_actions', 'ajcore_ra_pllc_quick_actions', 10, 4 );
 add_filter( 'ajcore_service_request_action_map', 'ajcore_ra_action_map' );
+add_filter( 'ajcore_service_request_waiting_statuses', function ( $s ) { $s[] = 'waiting_licensing_board'; return $s; } );
 add_filter( 'ajcore_customer_billing_types', 'ajcore_ra_customer_billing_types' );
 add_filter( 'ajcore_partners_enabled', '__return_true' );
 add_filter( 'ajcore_portal_menu_default_items', 'ajcore_ra_portal_menu_compliance_on', 20 );
