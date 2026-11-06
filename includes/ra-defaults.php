@@ -379,8 +379,8 @@ function ajcore_ra_service_request_types( $types ) {
 
 /** Partner-billed customer types (University Place). */
 function ajcore_ra_customer_billing_types( $types ) {
-	$types['opus']        = array( 'label' => __( 'OPUS — create in Stripe; OPUS pays fixed VO rate', 'ajcore-ra' ), 'local' => false, 'partner' => 'opus', 'hint' => __( 'Creates the customer in Stripe and syncs it to AJ Core immediately.', 'ajcore-ra' ) );
-	$types['alliance_vo'] = array( 'label' => __( 'Alliance VO — local AJCore customer only; do not create in Stripe', 'ajcore-ra' ), 'local' => true, 'partner' => 'alliance_vo', 'hint' => __( 'Creates only an AJCore customer assigned to Alliance VO.', 'ajcore-ra' ) );
+	$types['opus']        = array( 'label' => __( 'OPUS (Stripe)', 'ajcore-ra' ), 'local' => false, 'partner' => 'opus', 'hint' => __( 'Created in Stripe. OPUS pays the fixed VO rate.', 'ajcore-ra' ) );
+	$types['alliance_vo'] = array( 'label' => __( 'Alliance VO (local)', 'ajcore-ra' ), 'local' => true, 'partner' => 'alliance_vo', 'hint' => __( 'Local customer assigned to Alliance VO. Not created in Stripe.', 'ajcore-ra' ) );
 	return $types;
 }
 
