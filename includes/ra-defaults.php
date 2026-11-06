@@ -34,6 +34,10 @@ add_filter( 'ajcore_service_request_action_map', 'ajcore_ra_action_map' );
 add_filter( 'ajcore_service_request_waiting_statuses', function ( $s ) { $s[] = 'waiting_licensing_board'; return $s; } );
 add_filter( 'ajcore_customer_billing_types', 'ajcore_ra_customer_billing_types' );
 add_filter( 'ajcore_partners_enabled', '__return_true' );
+// AJOps menu items AJ Core RA provides (AJ Core lists its own).
+add_filter( 'ajcore_ops_modules', function ( $modules ) {
+	return array_merge( (array) $modules, array( 'partners', 'compliance', 'websites', 'business-profiles', 'mail', 'gmail-intake', 'esign', 'rentec' ) );
+} );
 add_filter( 'ajcore_portal_menu_default_items', 'ajcore_ra_portal_menu_compliance_on', 20 );
 add_filter( 'ajcore_partner_site_domain', 'ajcore_ra_partner_site_domain', 10, 2 );
 add_filter( 'ajcore_reservation_location', 'ajcore_ra_reservation_location' );
