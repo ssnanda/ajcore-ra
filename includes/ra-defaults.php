@@ -27,7 +27,9 @@ add_filter( 'ajcore_portal_file_settings', 'ajcore_ra_portal_file_settings' );
 add_filter( 'ajcore_service_status_labels', 'ajcore_ra_service_status_labels' );
 add_filter( 'ajcore_service_workflow_labels', 'ajcore_ra_service_workflow_labels' );
 add_filter( 'ajcore_service_status_pipelines', 'ajcore_ra_service_status_pipelines' );
-add_filter( 'ajcore_service_request_product_type', 'ajcore_ra_service_request_product_type', 10, 2 );
+add_filter( 'ajcore_service_request_product_type', 'ajcore_ra_service_request_product_type', 10, 3 );
+add_filter( 'ajcore_service_request_types', 'ajcore_ra_service_request_types' );
+add_filter( 'ajcore_customer_billing_types', 'ajcore_ra_customer_billing_types' );
 add_filter( 'ajcore_portal_menu_default_items', 'ajcore_ra_portal_menu_compliance_on', 20 );
 add_filter( 'ajcore_partner_site_domain', 'ajcore_ra_partner_site_domain', 10, 2 );
 add_filter( 'ajcore_reservation_location', 'ajcore_ra_reservation_location' );
@@ -349,7 +351,11 @@ function ajcore_ra_service_status_pipelines( $sets ) {
 }
 
 /** Maps a request's product name (lowercased, separators removed) to the RA product types above. */
-function ajcore_ra_service_request_product_type( $type, $name ) {
+function ajcore_ra_service_request_product_type( $type, $name, $request = null ) {
+	$request_type = is_object( $request ) && isset( $request->request_type ) ? sanitize_key( (string) $request->request_type ) : '';
+	if ( in_array( $request_type, array( 'llc_setup', 'virtual_office_setup', 'virtual_office_subscription', 'registered_agent_subscription' ), true ) ) {
+		return $request_type;
+	}
 	if ( false !== strpos( $name, 'llc setup' ) || false !== strpos( $name, 'entity setup' ) || false !== strpos( $name, 'new entity' ) ) {
 		return 'llc_setup';
 	}
@@ -360,6 +366,22 @@ function ajcore_ra_service_request_product_type( $type, $name ) {
 		return ( false !== strpos( $name, 'setup' ) || false !== strpos( $name, 'one time' ) || false !== strpos( $name, 'one-time' ) ) ? 'virtual_office_setup' : 'virtual_office_subscription';
 	}
 	return $type;
+}
+
+/** Types offered in New request (the type sets the workflow). */
+function ajcore_ra_service_request_types( $types ) {
+	$types['llc_setup']                     = __( 'LLC Setup', 'ajcore-ra' );
+	$types['virtual_office_setup']          = __( 'Virtual Office Setup', 'ajcore-ra' );
+	$types['virtual_office_subscription']   = __( 'Virtual Office Subscription', 'ajcore-ra' );
+	$types['registered_agent_subscription'] = __( 'Registered Agent Subscription', 'ajcore-ra' );
+	return $types;
+}
+
+/** Partner-billed customer types (University Place). */
+function ajcore_ra_customer_billing_types( $types ) {
+	$types['opus']        = array( 'label' => __( 'OPUS — create in Stripe; OPUS pays fixed VO rate', 'ajcore-ra' ), 'local' => false, 'partner' => 'opus', 'hint' => __( 'Creates the customer in Stripe and syncs it to AJ Core immediately.', 'ajcore-ra' ) );
+	$types['alliance_vo'] = array( 'label' => __( 'Alliance VO — local AJCore customer only; do not create in Stripe', 'ajcore-ra' ), 'local' => true, 'partner' => 'alliance_vo', 'hint' => __( 'Creates only an AJCore customer assigned to Alliance VO.', 'ajcore-ra' ) );
+	return $types;
 }
 
 /** Display names for the RA workflows (Workflows view). */
