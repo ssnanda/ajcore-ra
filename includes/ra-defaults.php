@@ -34,6 +34,40 @@ add_filter( 'ajcore_service_request_action_map', 'ajcore_ra_action_map' );
 add_filter( 'ajcore_service_request_waiting_statuses', function ( $s ) { $s[] = 'waiting_licensing_board'; return $s; } );
 add_filter( 'ajcore_customer_billing_types', 'ajcore_ra_customer_billing_types' );
 add_filter( 'ajcore_partners_enabled', '__return_true' );
+// Numbers AJ Core RA adds to the AJOps menu and dashboard (see AJCore REST get_ops_counts).
+add_filter( 'ajcore_ops_counts', function ( $counts ) {
+	$row = static function ( $value, $label, $alert = false ) {
+		return array( 'value' => (int) $value, 'label' => $label, 'alert' => (bool) $alert && (int) $value > 0 );
+	};
+	$call = static function ( $route, $args = array() ) {
+		$req = new WP_REST_Request( 'GET', '/ajcore/v1' . $route );
+		foreach ( $args as $k => $v ) {
+			$req->set_param( $k, $v );
+		}
+		$res = rest_do_request( $req );
+		return $res->is_error() ? array() : (array) $res->get_data();
+	};
+	try {
+		if ( class_exists( 'AJCore_RA_Website' ) ) {
+			$counts['websites'] = $row( count( (array) AJCore_RA_Website::list_sites() ), 'Websites' );
+		}
+		if ( class_exists( 'AJCore_RA_Business_Profile' ) ) {
+			$counts['business-profiles'] = $row( count( (array) AJCore_RA_Business_Profile::api_list() ), 'Profiles' );
+		}
+		$esign = $call( '/ops/esign/summary' );
+		if ( isset( $esign['waiting'] ) ) {
+			$counts['esign'] = $row( $esign['waiting'], 'Waiting for signature', true );
+		}
+		$gmail = $call( '/ops/gmail-intake', array( 'per_page' => 1 ) );
+		if ( isset( $gmail['stats'] ) ) {
+			$st = (array) $gmail['stats'];
+			$counts['gmail-intake'] = $row( (int) ( $st['needs_review'] ?? 0 ) + (int) ( $st['matched_pending_file'] ?? 0 ) + (int) ( $st['skipped_no_attachment'] ?? 0 ), 'Needs review', true );
+		}
+	} catch ( \Throwable $e ) {
+		// Counts are optional; never break the menu over them.
+	}
+	return $counts;
+} );
 // AJOps menu items AJ Core RA provides (AJ Core lists its own).
 add_filter( 'ajcore_ops_modules', function ( $modules ) {
 	return array_merge( (array) $modules, array( 'partners', 'compliance', 'websites', 'business-profiles', 'mail', 'gmail-intake', 'esign', 'rentec' ) );
