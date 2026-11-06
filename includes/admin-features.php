@@ -31,7 +31,7 @@ function ajcore_ra_features() {
 		),
 		'Compliance'         => array(
 			'Compliance API (entities, filings, portal)'    => array( 'moved' ),
-			'Compliance portal tab and admin screens'       => array( 'pending' ),
+			'Compliance tab and admin screens'              => array( 'moved', 'Tasks screen is generic in AJCore, renamed Compliance; RA supplies its templates and filings' ),
 			'Compliance reminder job and emails'            => array( 'moved' ),
 			'Task templates and filing tasks'               => array( 'moved' ),
 			'Website tab and customer websites'             => array( 'moved' ),

@@ -22,6 +22,8 @@ Last updated: 2026-11-05. Numbers are stable; do not renumber.
 8. [ ] Luma: remove LUMA_* from the live OpenShift ConfigMap/Secret
 9. [ ] Live ddev.site cleanup (see memory to-do)
 
+Phase 1 status 2026-11-05: all code moves are done. Remaining items 8 and 9 are manual clean-up, not code.
+
 Zoho Mail (shared inbox): moved to RA 2026-11-05 (own settings option `ajcore_ra_zoho_mail`, seeded once from AJCore's old zoho_mail_* keys; same URLs and redirect URI). Not working yet; revisit when Zoho's API change lands. AJCore still carries the old zoho_mail_* settings keys (unused) so a settings save cannot drop them before the seed.
 
 Not moving: **Zoho Calendar and Reservations** (decided), **AJPhone** (generic), **Service Requests** (see 12) and the **accounting catalog** (core Products & Services uses it).
