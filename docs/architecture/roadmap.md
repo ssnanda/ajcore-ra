@@ -37,6 +37,8 @@ Not moving: **Zoho Calendar and Reservations** (decided), **AJPhone** (generic),
     - Today's Service Requests are Stripe-tied (customer + price/product); build the generic engine beside them, migrate RA over afterwards.
 13. [ ] HOA inspections as a request type with its own steps.
 
+Compliance (decided 2026-11-05): "Tasks" is now called Compliance everywhere users see it. AJCore keeps only the generic compliance feature plus generic templates (license/permit renewal, insurance renewal, tax filing, upload document, review and sign, annual review). Registered Agent compliance (entities, filings, reminders, and the BOI report, annual report, confirm-agent-address and tax-return templates) lives in AJCore-RA. HOA compliance will live in AJCore-HOA. The customer portal Compliance tab is off by default in AJCore, on by default in RA, and toggled under Client Portal, Menu. Still to do: an enable/disable checkbox in AJOps.
+
 Invoice workflows (decided 2026-11-05): AJCore ships a generic invoice template (Received, Approved, Paid; vendor, amount, due date, attachments, payment method). AJCore-RA and AJCore-HOA register their own variants through a filter, adding steps/fields or replacing the template. AJCore holds no business-specific steps.
 
 Invoices (done 2026-11-05): the standalone expense-invoices screen, routes and RA class were removed. The `aj_portal_expense_invoices` table is no longer created for new sites; existing sites keep it until dropped by hand. Invoices come back as a workflow template on Requests (above).

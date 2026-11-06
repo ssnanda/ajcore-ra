@@ -51,6 +51,31 @@ class AJCore_RA_Compliance_Tasks {
 			'task_scope'      => 'client',
 			'client_visible'  => true,
 		);
+		// The sample tasks older AJCore versions seeded on every site; now offered as templates (never auto-created).
+		$templates['ra_boi_report'] = array(
+			'label'           => __( 'BOI report', 'ajcore-ra' ),
+			'title'           => __( 'File your Beneficial Ownership Information (BOI) report', 'ajcore-ra' ),
+			'action_required' => __( 'Tell us if your company must file a BOI report with FinCEN and we will prepare it for you.', 'ajcore-ra' ),
+			'task_frequency'  => 'one_time',
+			'task_scope'      => 'client',
+			'client_visible'  => true,
+		);
+		$templates['ra_tax_return_multi_member'] = array(
+			'label'           => __( 'Tax return: multi-member LLC / K-1s', 'ajcore-ra' ),
+			'title'           => __( 'Tax return for multi-member LLCs / K-1s', 'ajcore-ra' ),
+			'action_required' => __( 'Your multi-member LLC tax return and K-1s are due. Send us your records or confirm your preparer has them.', 'ajcore-ra' ),
+			'task_frequency'  => 'recurring',
+			'task_scope'      => 'client',
+			'client_visible'  => true,
+		);
+		$templates['ra_tax_return_pass_through'] = array(
+			'label'           => __( 'Tax return: pass-through LLC', 'ajcore-ra' ),
+			'title'           => __( 'Tax return for pass-through LLCs', 'ajcore-ra' ),
+			'action_required' => __( 'Your pass-through LLC tax return is due. Send us your records or confirm your preparer has them.', 'ajcore-ra' ),
+			'task_frequency'  => 'recurring',
+			'task_scope'      => 'client',
+			'client_visible'  => true,
+		);
 		return $templates;
 	}
 

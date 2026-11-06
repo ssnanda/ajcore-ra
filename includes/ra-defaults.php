@@ -24,6 +24,7 @@ add_filter( 'ajcore_customer_brand', 'ajcore_ra_customer_brand', 10, 2 );
 add_filter( 'ajcore_brand_setting_prefixes', 'ajcore_ra_brand_setting_prefixes' );
 add_filter( 'ajcore_portal_office_address', 'ajcore_ra_portal_office_address', 10, 2 );
 add_filter( 'ajcore_portal_file_settings', 'ajcore_ra_portal_file_settings' );
+add_filter( 'ajcore_portal_menu_default_items', 'ajcore_ra_portal_menu_compliance_on', 20 );
 add_filter( 'ajcore_partner_site_domain', 'ajcore_ra_partner_site_domain', 10, 2 );
 add_filter( 'ajcore_reservation_location', 'ajcore_ra_reservation_location' );
 add_filter( 'ajcore_business_contact', 'ajcore_ra_business_contact' );
@@ -294,4 +295,14 @@ function ajcore_ra_portal_office_address( $address, $context ) {
 		'name'  => 'University Place Office Suites',
 		'lines' => array( '1914 J N PEASE PL.', 'CHARLOTTE, NC 28262' ),
 	);
+}
+
+/** The customer portal Compliance tab is off by default in AJCore; Registered Agent sites turn it on (still editable under Client Portal, Menu). */
+function ajcore_ra_portal_menu_compliance_on( $items ) {
+	foreach ( (array) $items as $i => $item ) {
+		if ( is_array( $item ) && isset( $item['id'] ) && 'tasks' === $item['id'] ) {
+			$items[ $i ]['enabled'] = true;
+		}
+	}
+	return $items;
 }
