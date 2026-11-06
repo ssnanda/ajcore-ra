@@ -43,6 +43,8 @@ Compliance (decided 2026-11-05): "Tasks" is now called Compliance everywhere use
 
 Request statuses (2026-11-06): AJCore ships only generic workflow statuses (New, Welcome, Under Review, Pending Customer, Pending Agent, Meeting Scheduled, Active, Completed, Cancelled) and one generic pipeline. RA adds its statuses, per-product pipelines and product detection through the filters ajcore_service_status_labels, ajcore_service_status_pipelines and ajcore_service_request_product_type. Still in AJCore code (not yet extracted): the quick-action logic keyed on signing_cmra / updating_sosn and the payment-state values updating_sosn and signing_cmra; fold these into the Requests engine (item 12). The iOS apps still carry their own status labels.
 
+Gmail Intake (idea 2026-11-06, not decided): move the mailbox connection, filing engine and intake log back into AJCore as a generic feature, with the intake rules (what to match, how to name and categorize, who to notify) supplied by AJCore-RA and AJCore-HOA through filters. Today it is entirely in RA. Decide before building HOA intake (vendor invoice emails, violation photos).
+
 Invoice workflows (decided 2026-11-05): AJCore ships a generic invoice template (Received, Approved, Paid; vendor, amount, due date, attachments, payment method). AJCore-RA and AJCore-HOA register their own variants through a filter, adding steps/fields or replacing the template. AJCore holds no business-specific steps.
 
 Invoices (done 2026-11-05): the standalone expense-invoices screen, routes and RA class were removed. The `aj_portal_expense_invoices` table is no longer created for new sites; existing sites keep it until dropped by hand. Invoices come back as a workflow template on Requests (above).
