@@ -18,13 +18,13 @@ Last updated: 2026-11-05. Numbers are stable; do not renumber.
 4. [x] Articles of Organization folded into Formation Documents
 5. [x] Expense invoices removed entirely (never used); invoices return as a workflow on Requests (see 12)
 6. [x] AJPhone stays in AJCore (decided 2026-11-05: phone integration is generic, every business can use it)
-7. [ ] Zoho calendar / Reservations (left alone until tested)
+7. [x] Zoho Calendar and Reservations stay in AJCore (decided 2026-11-05)
 8. [ ] Luma: remove LUMA_* from the live OpenShift ConfigMap/Secret
 9. [ ] Live ddev.site cleanup (see memory to-do)
 
 Zoho Mail (shared inbox): moved to RA 2026-11-05 (own settings option `ajcore_ra_zoho_mail`, seeded once from AJCore's old zoho_mail_* keys; same URLs and redirect URI). Not working yet; revisit when Zoho's API change lands. AJCore still carries the old zoho_mail_* settings keys (unused) so a settings save cannot drop them before the seed.
 
-Not moving: **AJPhone** (generic), **Service Requests** (see 12) and the **accounting catalog** (core Products & Services uses it).
+Not moving: **Zoho Calendar and Reservations** (decided), **AJPhone** (generic), **Service Requests** (see 12) and the **accounting catalog** (core Products & Services uses it).
 
 ## Phase 2: ajcore-hoa (basic)
 

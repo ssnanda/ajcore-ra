@@ -45,12 +45,12 @@ function ajcore_ra_features() {
 		),
 		'Integrations'       => array(
 			'Rentec Direct (API, settings, screens, write forms)' => array( 'moved' ),
-			'Zoho Calendar and Reservations'                => array( 'pending', 'Untested; left alone for now' ),
 			'Zoho Mail (shared inbox)'                      => array( 'moved', 'Not working yet; ready for when Zoho\'s API change lands' ),
 		),
 		'Stays in AJCore'    => array(
 			'Service requests'                              => array( 'core', 'Becomes the generic Requests workflow engine' ),
 			'Accounting catalog (charge/payment categories)' => array( 'core', 'Used by Products & Services' ),
+			'Zoho Calendar and Reservations'                => array( 'core', 'Decided: stays in AJCore' ),
 			'AJPhone (phone integration)'                   => array( 'core', 'Generic; every business can use it' ),
 			'Leads, customers, payments, portal, files'     => array( 'core' ),
 		),
