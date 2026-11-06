@@ -34,6 +34,8 @@ add_filter( 'ajcore_service_request_action_map', 'ajcore_ra_action_map' );
 add_filter( 'ajcore_service_request_waiting_statuses', function ( $s ) { $s[] = 'waiting_licensing_board'; return $s; } );
 add_filter( 'ajcore_customer_billing_types', 'ajcore_ra_customer_billing_types' );
 add_filter( 'ajcore_partners_enabled', '__return_true' );
+// Registered Agent / Virtual Office customer filters in AJOps.
+add_filter( 'ajcore_registered_agent_enabled', '__return_true' );
 // Numbers AJ Core RA adds to the AJOps menu and dashboard (see AJCore REST get_ops_counts).
 add_filter( 'ajcore_ops_counts', function ( $counts ) {
 	$row = static function ( $value, $label, $alert = false ) {
