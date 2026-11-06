@@ -29,6 +29,8 @@ add_filter( 'ajcore_service_workflow_labels', 'ajcore_ra_service_workflow_labels
 add_filter( 'ajcore_service_status_pipelines', 'ajcore_ra_service_status_pipelines' );
 add_filter( 'ajcore_service_request_product_type', 'ajcore_ra_service_request_product_type', 10, 3 );
 add_filter( 'ajcore_service_request_types', 'ajcore_ra_service_request_types' );
+add_filter( 'ajcore_service_request_quick_actions', 'ajcore_ra_pllc_quick_actions', 10, 4 );
+add_filter( 'ajcore_service_request_action_map', 'ajcore_ra_action_map' );
 add_filter( 'ajcore_customer_billing_types', 'ajcore_ra_customer_billing_types' );
 add_filter( 'ajcore_partners_enabled', '__return_true' );
 add_filter( 'ajcore_portal_menu_default_items', 'ajcore_ra_portal_menu_compliance_on', 20 );
@@ -324,6 +326,7 @@ function ajcore_ra_service_status_labels( $labels ) {
 		'address_proof_needed'    => __( 'Address Proof Needed', 'ajcore-ra' ),
 		'vo_setup_required'       => __( 'Virtual Office Setup Required', 'ajcore-ra' ),
 		'sosnc_client'            => __( 'Customer Updating SOS/NC', 'ajcore-ra' ),
+		'waiting_licensing_board' => __( 'Waiting on Licensing Board', 'ajcore-ra' ),
 		'updating_sosn'           => __( 'RA Change Filed with SOS/NC', 'ajcore-ra' ),
 		'included_with_llc_setup' => __( 'Included with LLC Setup', 'ajcore-ra' ),
 	);
@@ -348,25 +351,96 @@ function ajcore_ra_service_status_pipelines( $sets ) {
 	$sets['virtual_office_subscription']   = array( 'new', 'welcome', 'signing_cmra', 'active', 'cancelled' );
 	// One thing: update the registered agent on SOS/NC (we do it, or the customer does), then it is active.
 	$sets['registered_agent_subscription'] = array( 'new', 'welcome', 'updating_sosn', 'active', 'cancelled' );
+	// A PLLC (professional LLC) also needs its licensing board's approval before the registered agent change is filed.
+	$sets['registered_agent_subscription_pllc'] = array( 'new', 'welcome', 'waiting_licensing_board', 'updating_sosn', 'active', 'cancelled' );
 	return $sets;
 }
 
 /** Maps a request's product name (lowercased, separators removed) to the RA product types above. */
 function ajcore_ra_service_request_product_type( $type, $name, $request = null ) {
 	$request_type = is_object( $request ) && isset( $request->request_type ) ? sanitize_key( (string) $request->request_type ) : '';
-	if ( in_array( $request_type, array( 'llc_setup', 'virtual_office_setup', 'virtual_office_subscription', 'registered_agent_subscription' ), true ) ) {
+	if ( 'registered_agent_subscription' === $request_type ) {
+		return ajcore_ra_request_is_pllc( $request, $name ) ? 'registered_agent_subscription_pllc' : 'registered_agent_subscription';
+	}
+	if ( in_array( $request_type, array( 'llc_setup', 'virtual_office_setup', 'virtual_office_subscription' ), true ) ) {
 		return $request_type;
 	}
 	if ( false !== strpos( $name, 'llc setup' ) || false !== strpos( $name, 'entity setup' ) || false !== strpos( $name, 'new entity' ) ) {
 		return 'llc_setup';
 	}
 	if ( false !== strpos( $name, 'registered agent' ) ) {
-		return 'registered_agent_subscription';
+		return ajcore_ra_request_is_pllc( $request, $name ) ? 'registered_agent_subscription_pllc' : 'registered_agent_subscription';
 	}
 	if ( false !== strpos( $name, 'virtual office' ) ) {
 		return ( false !== strpos( $name, 'setup' ) || false !== strpos( $name, 'one time' ) || false !== strpos( $name, 'one-time' ) ) ? 'virtual_office_setup' : 'virtual_office_subscription';
 	}
 	return $type;
+}
+
+/**
+ * True when the request's customer is a PLLC (customer name, or the business profile's business name, says so).
+ * Only the workflow's steps depend on this; an existing request keeps its current status either way.
+ */
+function ajcore_ra_request_is_pllc( $request, $name = '' ) {
+	static $cache = array();
+	$re = '/\bp\.?\s?l\.?\s?l\.?\s?c\b|professional\s+limited\s+liability/i';
+	if ( '' !== $name && preg_match( $re, (string) $name ) ) {
+		return true;
+	}
+	$customer_id = is_object( $request ) && ! empty( $request->stripe_customer_id ) ? (string) $request->stripe_customer_id : '';
+	if ( '' === $customer_id || ! class_exists( 'AJCore_Extensions' ) ) {
+		return false;
+	}
+	if ( isset( $cache[ $customer_id ] ) ) {
+		return $cache[ $customer_id ];
+	}
+	$found = false;
+	$kit   = AJCore_Extensions::rest_toolkit();
+	$db    = isset( $kit['portal_db'] ) ? $kit['portal_db']() : null;
+	if ( $db ) {
+		$names = array();
+		foreach ( array( array( 'aj_portal_stripe_customers', 'stripe_customer_id' ), array( 'aj_portal_local_customers', 'local_customer_id' ) ) as $src ) {
+			$table = $kit['portal_table']( $src[0] );
+			if ( $kit['table_exists']( $db, $table ) ) {
+				$names[] = (string) $db->get_var( $db->prepare( "SELECT name FROM `{$table}` WHERE {$src[1]} = %s LIMIT 1", $customer_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+			}
+		}
+		$mappings = $kit['portal_table']( 'aj_portal_entity_mappings' );
+		if ( $kit['table_exists']( $db, $mappings ) ) {
+			$names[] = (string) $db->get_var( $db->prepare( "SELECT entity_label FROM `{$mappings}` WHERE stripe_customer_id = %s AND entity_type = 'business_profile' LIMIT 1", $customer_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		}
+		foreach ( $names as $n ) {
+			if ( '' !== $n && preg_match( $re, $n ) ) {
+				$found = true;
+				break;
+			}
+		}
+	}
+	$cache[ $customer_id ] = $found;
+	return $found;
+}
+
+/** Next-step buttons for the PLLC Registered Agent workflow (the standard one is built into AJ Core). */
+function ajcore_ra_pllc_quick_actions( $actions, $request, $product_type, $service_status ) {
+	if ( 'registered_agent_subscription_pllc' !== $product_type || ! is_array( $actions ) ) {
+		return $actions;
+	}
+	// Only the steps before the SOS/NC filing change; from there on AJ Core's own buttons (Activate, Cancel, ...) apply.
+	if ( 'waiting_licensing_board' === $service_status ) {
+		return array( 'update_sosn' => __( 'File RA Change with SOS/NC', 'ajcore-ra' ) ) + array_diff_key( $actions, array_flip( array( 'activate', 'complete', 'under_review', 'pending_customer', 'pending_agent' ) ) );
+	}
+	if ( in_array( $service_status, array( 'new', '', 'welcome', 'under_review' ), true ) && ! empty( $actions ) ) {
+		// AJ Core builds its generic buttons for this type (Start Review, ...); a PLLC goes to the licensing board instead.
+		return array( 'wait_licensing_board' => __( 'Waiting on Licensing Board', 'ajcore-ra' ) ) + array_diff_key( $actions, array_flip( array( 'under_review', 'pending_customer', 'pending_agent', 'complete', 'update_sosn' ) ) );
+	}
+	return $actions;
+}
+
+function ajcore_ra_action_map( $map ) {
+	if ( is_array( $map ) ) {
+		$map['wait_licensing_board'] = 'waiting_licensing_board';
+	}
+	return $map;
 }
 
 /** Types offered in New request (the type sets the workflow). */
@@ -391,5 +465,6 @@ function ajcore_ra_service_workflow_labels( $names ) {
 	$names['virtual_office_setup']          = __( 'Virtual Office Setup', 'ajcore-ra' );
 	$names['virtual_office_subscription']   = __( 'Virtual Office Subscription', 'ajcore-ra' );
 	$names['registered_agent_subscription'] = __( 'Registered Agent Subscription', 'ajcore-ra' );
+	$names['registered_agent_subscription_pllc'] = __( 'Registered Agent Subscription (PLLC)', 'ajcore-ra' );
 	return $names;
 }
