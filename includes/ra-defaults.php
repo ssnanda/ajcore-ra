@@ -24,6 +24,9 @@ add_filter( 'ajcore_customer_brand', 'ajcore_ra_customer_brand', 10, 2 );
 add_filter( 'ajcore_brand_setting_prefixes', 'ajcore_ra_brand_setting_prefixes' );
 add_filter( 'ajcore_portal_office_address', 'ajcore_ra_portal_office_address', 10, 2 );
 add_filter( 'ajcore_portal_file_settings', 'ajcore_ra_portal_file_settings' );
+add_filter( 'ajcore_service_status_labels', 'ajcore_ra_service_status_labels' );
+add_filter( 'ajcore_service_status_pipelines', 'ajcore_ra_service_status_pipelines' );
+add_filter( 'ajcore_service_request_product_type', 'ajcore_ra_service_request_product_type', 10, 2 );
 add_filter( 'ajcore_portal_menu_default_items', 'ajcore_ra_portal_menu_compliance_on', 20 );
 add_filter( 'ajcore_partner_site_domain', 'ajcore_ra_partner_site_domain', 10, 2 );
 add_filter( 'ajcore_reservation_location', 'ajcore_ra_reservation_location' );
@@ -305,4 +308,55 @@ function ajcore_ra_portal_menu_compliance_on( $items ) {
 		}
 	}
 	return $items;
+}
+
+/** Registered Agent / LLC / Virtual Office request statuses (AJCore ships only the generic ones). */
+function ajcore_ra_service_status_labels( $labels ) {
+	$ra = array(
+		'sosnc_filing'            => __( 'Filed with SOS/NC', 'ajcore-ra' ),
+		'llc_documents_emailed'   => __( 'LLC Documents Emailed', 'ajcore-ra' ),
+		'signing_cmra'            => __( 'Signing CMRA', 'ajcore-ra' ),
+		'id_proof_needed'         => __( 'ID Proof Needed', 'ajcore-ra' ),
+		'address_proof_needed'    => __( 'Address Proof Needed', 'ajcore-ra' ),
+		'vo_setup_required'       => __( 'Virtual Office Setup Required', 'ajcore-ra' ),
+		'sosnc_client'            => __( 'Customer Updating SOS/NC', 'ajcore-ra' ),
+		'updating_sosn'           => __( 'RA Change Filed with SOS/NC', 'ajcore-ra' ),
+		'included_with_llc_setup' => __( 'Included with LLC Setup', 'ajcore-ra' ),
+	);
+	// Keep the generic order, slotting RA's statuses in before Active/Completed/Cancelled.
+	$tail = array();
+	foreach ( array( 'active', 'completed', 'cancelled' ) as $key ) {
+		if ( isset( $labels[ $key ] ) ) {
+			$tail[ $key ] = $labels[ $key ];
+			unset( $labels[ $key ] );
+		}
+	}
+	return $labels + $ra + $tail;
+}
+
+/** Fixed forward pipelines per Registered Agent product. */
+function ajcore_ra_service_status_pipelines( $sets ) {
+	// This bundle always includes a year of Registered Agent service, so it settles into "active" like a standalone subscription.
+	$sets['llc_setup']                     = array( 'new', 'welcome', 'meeting_scheduled', 'sosnc_filing', 'llc_documents_emailed', 'active', 'cancelled' );
+	// Always bundled with a Virtual Office subscription; settles into "active" once the one-time proof setup is done.
+	$sets['virtual_office_setup']          = array( 'new', 'welcome', 'signing_cmra', 'id_proof_needed', 'address_proof_needed', 'active', 'cancelled' );
+	// Buying this subscription means one thing: get the CMRA signed, then it is active.
+	$sets['virtual_office_subscription']   = array( 'new', 'welcome', 'signing_cmra', 'active', 'cancelled' );
+	// One thing: update the registered agent on SOS/NC (we do it, or the customer does), then it is active.
+	$sets['registered_agent_subscription'] = array( 'new', 'welcome', 'updating_sosn', 'active', 'cancelled' );
+	return $sets;
+}
+
+/** Maps a request's product name (lowercased, separators removed) to the RA product types above. */
+function ajcore_ra_service_request_product_type( $type, $name ) {
+	if ( false !== strpos( $name, 'llc setup' ) || false !== strpos( $name, 'entity setup' ) || false !== strpos( $name, 'new entity' ) ) {
+		return 'llc_setup';
+	}
+	if ( false !== strpos( $name, 'registered agent' ) ) {
+		return 'registered_agent_subscription';
+	}
+	if ( false !== strpos( $name, 'virtual office' ) ) {
+		return ( false !== strpos( $name, 'setup' ) || false !== strpos( $name, 'one time' ) || false !== strpos( $name, 'one-time' ) ) ? 'virtual_office_setup' : 'virtual_office_subscription';
+	}
+	return $type;
 }
