@@ -30,6 +30,7 @@ add_filter( 'ajcore_service_status_pipelines', 'ajcore_ra_service_status_pipelin
 add_filter( 'ajcore_service_request_product_type', 'ajcore_ra_service_request_product_type', 10, 3 );
 add_filter( 'ajcore_service_request_types', 'ajcore_ra_service_request_types' );
 add_filter( 'ajcore_customer_billing_types', 'ajcore_ra_customer_billing_types' );
+add_filter( 'ajcore_partners_enabled', '__return_true' );
 add_filter( 'ajcore_portal_menu_default_items', 'ajcore_ra_portal_menu_compliance_on', 20 );
 add_filter( 'ajcore_partner_site_domain', 'ajcore_ra_partner_site_domain', 10, 2 );
 add_filter( 'ajcore_reservation_location', 'ajcore_ra_reservation_location' );
