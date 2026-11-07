@@ -19,6 +19,8 @@ class AJCore_RA_CMRA {
 		add_filter( 'ajcore_admin_portal_tabs', array( __CLASS__, 'admin_tab' ), 9 );
 		add_action( 'ajcore_admin_portal_tab_render', array( __CLASS__, 'render_admin_tab' ) );
 		add_action( 'admin_post_ajcore_ra_cmra_save', array( __CLASS__, 'handle_save' ) );
+		add_action( 'rest_api_init', array( __CLASS__, 'register_routes' ) );
+		add_filter( 'ajcore_ops_counts', array( __CLASS__, 'filter_counts' ) );
 	}
 
 	/** PS Form 1583 fields by section: key => label override or '' (label is derived from the key). 'type': date|check|area|text. */
@@ -87,47 +89,43 @@ class AJCore_RA_CMRA {
 		return add_query_arg( array_merge( array( 'page' => 'ajforms-client-portal', 'tab' => self::TAB ), $args ), admin_url( 'admin.php' ) );
 	}
 
-	public static function handle_save() {
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Not allowed.', 'ajcore-ra' ) );
-		}
-		check_admin_referer( 'ajcore_ra_cmra_save' );
-		$cid = sanitize_text_field( wp_unslash( $_POST['customer_id'] ?? '' ) );
+	/**
+	 * Saves a Form 1583 record: $fields = key => value for every field in sections(), plus the status and date.
+	 * Returns true, or a WP_Error. Used by the admin form and the REST route.
+	 */
+	public static function save_record( $cid, $status, $date, array $fields ) {
 		$ctx = self::db();
 		if ( '' === $cid || ! $ctx ) {
-			wp_safe_redirect( self::url() );
-			exit;
+			return new WP_Error( 'unavailable', 'Mailboxes are not available.', array( 'status' => 500 ) );
 		}
 		$db  = $ctx['db'];
 		$row = $db->get_row( $db->prepare( "SELECT extra FROM `{$ctx['table']}` WHERE customer_id = %s", $cid ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
 		if ( ! $row ) {
-			wp_safe_redirect( self::url() );
-			exit;
+			return new WP_Error( 'not_found', 'Mailbox not found.', array( 'status' => 404 ) );
 		}
 		$extra = json_decode( (string) $row['extra'], true );
 		$extra = is_array( $extra ) ? $extra : array();
 		$rec   = array();
-		foreach ( self::sections() as $fields ) {
-			foreach ( $fields as $key => $type ) {
-				$raw = wp_unslash( $_POST['f'][ $key ] ?? '' ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		foreach ( self::sections() as $sec ) {
+			foreach ( $sec as $key => $type ) {
+				$raw = $fields[ $key ] ?? '';
 				if ( 'check' === $type ) {
 					$rec[ $key ] = $raw ? '1' : '';
 				} elseif ( 'area' === $type ) {
-					$rec[ $key ] = sanitize_textarea_field( $raw );
+					$rec[ $key ] = sanitize_textarea_field( (string) $raw );
 				} elseif ( 'date' === $type ) {
-					$rec[ $key ] = preg_match( '/^\d{4}-\d{2}-\d{2}$/', (string) $raw ) ? $raw : '';
+					$rec[ $key ] = preg_match( '/^\d{4}-\d{2}-\d{2}$/', (string) $raw ) ? (string) $raw : '';
 				} else {
-					$rec[ $key ] = sanitize_text_field( $raw );
+					$rec[ $key ] = sanitize_text_field( (string) $raw );
 				}
 			}
 		}
 		$extra['form_1583'] = $rec;
-		$status = sanitize_key( wp_unslash( $_POST['form_1583_status'] ?? 'none' ) );
-		$date   = sanitize_text_field( wp_unslash( $_POST['form_1583_date'] ?? '' ) );
+		$status = sanitize_key( (string) $status );
 		$data   = array(
 			'extra'            => wp_json_encode( $extra ),
 			'form_1583_status' => in_array( $status, array( 'none', 'sent', 'received', 'notarized' ), true ) ? $status : 'none',
-			'form_1583_date'   => preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date ) ? $date : null,
+			'form_1583_date'   => preg_match( '/^\d{4}-\d{2}-\d{2}$/', (string) $date ) ? (string) $date : null,
 		);
 		foreach ( self::column_map() as $field => $col ) {
 			if ( '' !== (string) $rec[ $field ] ) {
@@ -135,8 +133,106 @@ class AJCore_RA_CMRA {
 			}
 		}
 		$db->update( $ctx['table'], $data, array( 'customer_id' => $cid ) );
-		wp_safe_redirect( self::url( array( 'pmb' => $cid, 'saved' => 1 ) ) );
+		return true;
+	}
+
+	public static function handle_save() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'Not allowed.', 'ajcore-ra' ) );
+		}
+		check_admin_referer( 'ajcore_ra_cmra_save' );
+		$cid    = sanitize_text_field( wp_unslash( $_POST['customer_id'] ?? '' ) );
+		$fields = isset( $_POST['f'] ) && is_array( $_POST['f'] ) ? wp_unslash( $_POST['f'] ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		$res    = self::save_record( $cid, wp_unslash( $_POST['form_1583_status'] ?? 'none' ), wp_unslash( $_POST['form_1583_date'] ?? '' ), $fields ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		wp_safe_redirect( is_wp_error( $res ) ? self::url() : self::url( array( 'pmb' => $cid, 'saved' => 1 ) ) );
 		exit;
+	}
+
+	// ------------------------------------------------------------------ REST + counts (AJOps, iOS)
+
+	/** @return array<int,array<string,mixed>> */
+	private static function mailbox_summaries() {
+		$today = gmdate( 'Y-m-d' );
+		$soon  = gmdate( 'Y-m-d', strtotime( '+60 days' ) );
+		$out   = array();
+		foreach ( self::mailboxes() as $r ) {
+			$e     = (string) $r['id_expiration_date'];
+			$out[] = array(
+				'customer_id'      => (string) $r['customer_id'],
+				'name'             => (string) $r['name'],
+				'pmb'              => (string) $r['pmb_number'],
+				'mailbox_since'    => (string) $r['mailbox_start_date'],
+				'id_type'          => (string) $r['id_type'],
+				'id_issuer'        => (string) $r['id_issuer'],
+				'id_expires'       => $e,
+				'id_expired'       => '' !== $e && $e < $today,
+				'id_expiring_soon' => '' !== $e && $e >= $today && $e <= $soon,
+				'form_1583_status' => (string) ( $r['form_1583_status'] ?: 'none' ),
+				'form_1583_date'   => (string) $r['form_1583_date'],
+			);
+		}
+		return $out;
+	}
+
+	public static function rest_list() {
+		return rest_ensure_response( array( 'mailboxes' => self::mailbox_summaries() ) );
+	}
+
+	public static function rest_record( WP_REST_Request $request ) {
+		$cid = sanitize_text_field( (string) $request['id'] );
+		foreach ( self::mailboxes() as $row ) {
+			if ( (string) $row['customer_id'] !== $cid ) {
+				continue;
+			}
+			$extra = json_decode( (string) $row['extra'], true );
+			$rec   = is_array( $extra ) && isset( $extra['form_1583'] ) && is_array( $extra['form_1583'] ) ? $extra['form_1583'] : array();
+			foreach ( self::column_map() as $field => $col ) {
+				if ( ! isset( $rec[ $field ] ) || '' === (string) $rec[ $field ] ) {
+					$rec[ $field ] = (string) ( $row[ $col ] ?? '' );
+				}
+			}
+			$sections = array();
+			foreach ( self::sections() as $title => $fields ) {
+				$list = array();
+				foreach ( $fields as $key => $type ) {
+					$list[] = array( 'key' => $key, 'label' => self::label( $key ), 'type' => $type, 'value' => (string) ( $rec[ $key ] ?? '' ) );
+				}
+				$sections[] = array( 'title' => $title, 'fields' => $list );
+			}
+			return rest_ensure_response( array(
+				'mailbox'  => array( 'customer_id' => $cid, 'name' => (string) $row['name'], 'pmb' => (string) $row['pmb_number'], 'form_1583_status' => (string) ( $row['form_1583_status'] ?: 'none' ), 'form_1583_date' => (string) $row['form_1583_date'] ),
+				'sections' => $sections,
+			) );
+		}
+		return new WP_Error( 'not_found', 'Mailbox not found.', array( 'status' => 404 ) );
+	}
+
+	public static function rest_save( WP_REST_Request $request ) {
+		$fields = $request->get_param( 'fields' );
+		$res    = self::save_record( sanitize_text_field( (string) $request['id'] ), $request->get_param( 'form_1583_status' ), $request->get_param( 'form_1583_date' ), is_array( $fields ) ? $fields : array() );
+		return is_wp_error( $res ) ? $res : rest_ensure_response( array( 'success' => true ) );
+	}
+
+	public static function register_routes() {
+		$ns  = AJCore_Extensions::rest_namespace();
+		$ops = array( 'AJCore_Extensions', 'can_manage_ops' );
+		register_rest_route( $ns, '/ops/cmra/mailboxes', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( __CLASS__, 'rest_list' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/cmra/mailboxes/(?P<id>[A-Za-z0-9_\-]+)', array(
+			array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( __CLASS__, 'rest_record' ), 'permission_callback' => $ops ),
+			array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_save' ), 'permission_callback' => $ops ),
+		) );
+	}
+
+	/** AJOps menu number: mailboxes whose Form 1583 is not notarized. */
+	public static function filter_counts( $counts ) {
+		$n = 0;
+		foreach ( self::mailbox_summaries() as $m ) {
+			if ( 'notarized' !== $m['form_1583_status'] ) {
+				$n++;
+			}
+		}
+		$counts['cmra'] = array( 'value' => $n, 'label' => 'Form 1583 not notarized', 'alert' => true );
+		return $counts;
 	}
 
 	public static function admin_tab( $tabs ) {
