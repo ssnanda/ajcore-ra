@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       AJ Core RA
  * Description:       Registered Agent (NC LLC Agents) extension for AJ Core. Requires the AJ Core plugin.
- * Version:           0.1.89
+ * Version:           0.1.90
  * Requires PHP:      7.4
  * Author:            IT Spector LLC
  * Author URI:        https://itspector.com
@@ -15,7 +15,7 @@ if ( ! defined( 'WPINC' ) ) {
 	die;
 }
 
-define( 'AJCORE_RA_VERSION', '0.1.89' );
+define( 'AJCORE_RA_VERSION', '0.1.90' );
 define( 'AJCORE_RA_MIN_EXTENSION_API', 24 );
 define( 'AJCORE_RA_BASENAME', plugin_basename( __FILE__ ) );
 
@@ -36,6 +36,7 @@ require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-esign.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-rentec-screens.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-rentec.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-mail.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-cmra.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-zoho-mail.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-gmail-intake.php';
 AJCore_RA_Compliance_Schema::init();
@@ -70,6 +71,7 @@ function ajcore_ra_boot() {
 	AJCore_RA_Esign::init();
 	AJCore_RA_Rentec::init();
 	AJCore_RA_Mail::init();
+	AJCore_RA_CMRA::init();
 	AJCore_RA_Zoho_Mail::init();
 	AJCore_RA_Gmail_Intake::init();
 	add_filter( 'ajcore_endpoint_catalog', 'ajcore_ra_endpoint_catalog' );
