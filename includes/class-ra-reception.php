@@ -130,6 +130,11 @@ class AJCore_RA_Reception {
 		register_rest_route( $ns, '/reception/lookup-by-phone', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'lookup' ), 'permission_callback' => $kiosk ) );
 		register_rest_route( $ns, '/reception/check-in', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'check_in' ), 'permission_callback' => $kiosk ) );
 		register_rest_route( $ns, '/ops/reception/visits', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( __CLASS__, 'visits' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/reception/devices', array(
+			array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( __CLASS__, 'rest_devices' ), 'permission_callback' => $ops ),
+			array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_device_add' ), 'permission_callback' => $ops ),
+		) );
+		register_rest_route( $ns, '/ops/reception/devices/(?P<id>[A-Za-z0-9]+)/revoke', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_device_revoke' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/check-out', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_check_out' ), 'permission_callback' => $ops ) );
 	}
 
@@ -342,6 +347,34 @@ class AJCore_RA_Reception {
 
 	public static function rest_check_out( WP_REST_Request $request ) {
 		self::do_check_out( (int) $request['id'] );
+		return rest_ensure_response( array( 'success' => true ) );
+	}
+
+	public static function rest_devices() {
+		$out = array();
+		foreach ( self::devices() as $d ) {
+			$out[] = array( 'id' => $d['id'], 'name' => $d['name'], 'created' => $d['created'], 'last_seen' => $d['last_seen'] );
+		}
+		return rest_ensure_response( array( 'devices' => $out ) );
+	}
+
+	/** Creates a device key. The key is returned once and only its hash is stored. */
+	public static function rest_device_add( WP_REST_Request $request ) {
+		$name = sanitize_text_field( (string) $request->get_param( 'name' ) );
+		$name = '' !== $name ? $name : 'Front desk iPad';
+		$key  = wp_generate_password( 40, false, false );
+		$id   = wp_generate_password( 8, false, false );
+		$devices   = self::devices();
+		$devices[] = array( 'id' => $id, 'name' => $name, 'hash' => hash( 'sha256', $key ), 'created' => gmdate( 'Y-m-d H:i:s' ), 'last_seen' => '' );
+		update_option( self::DEVICES, $devices, false );
+		return rest_ensure_response( array( 'id' => $id, 'name' => $name, 'key' => $key ) );
+	}
+
+	public static function rest_device_revoke( WP_REST_Request $request ) {
+		$id = sanitize_text_field( (string) $request['id'] );
+		update_option( self::DEVICES, array_values( array_filter( self::devices(), static function ( $d ) use ( $id ) {
+			return $d['id'] !== $id;
+		} ) ), false );
 		return rest_ensure_response( array( 'success' => true ) );
 	}
 
