@@ -497,6 +497,7 @@ function ajcore_ra_service_request_types( $types ) {
 function ajcore_ra_customer_billing_types( $types ) {
 	$types['opus']        = array( 'label' => __( 'OPUS (Stripe)', 'ajcore-ra' ), 'local' => false, 'partner' => 'opus', 'hint' => __( 'Created in Stripe. OPUS pays the fixed VO rate.', 'ajcore-ra' ) );
 	$types['alliance_vo'] = array( 'label' => __( 'Alliance VO (local)', 'ajcore-ra' ), 'local' => true, 'partner' => 'alliance_vo', 'hint' => __( 'Local customer assigned to Alliance VO. Not created in Stripe.', 'ajcore-ra' ) );
+	$types['suite_client'] = array( 'label' => __( 'Suite Clients (local)', 'ajcore-ra' ), 'local' => true, 'hint' => __( 'Office suite client. Local customer, not created in Stripe.', 'ajcore-ra' ) );
 	return $types;
 }
 
