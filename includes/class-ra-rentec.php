@@ -457,6 +457,31 @@ class AJCore_RA_Rentec {
 		);
 	}
 
+	/**
+	 * Tenant (or other list) rows for every configured Rentec account, from the local copy when fresh. Used by the
+	 * Suite Clients sync. Returns array( account id => array( 'label', 'rows' => list ) ) or a WP_Error when disabled.
+	 */
+	public static function rows_for_sync( $resource = 'tenants' ) {
+		$self     = self::instance();
+		$settings = function_exists( 'ajforms_get_settings' ) ? $self->get_settings() : get_option( 'ajforms_settings', array() );
+		if ( '1' !== (string) ( $settings['rentec_enabled'] ?? '0' ) ) {
+			return new WP_Error( 'ajcore_rentec_disabled', __( 'The Rentec integration is disabled.', 'ajcore-ra' ), array( 'status' => 409 ) );
+		}
+		$out = array();
+		foreach ( $self->get_rentec_accounts_for_ops() as $id => $account ) {
+			if ( '' === (string) $account['key'] ) {
+				continue;
+			}
+			$body = $self->cached_rentec_for_ops( $self->rentec_list_url( $resource ), $account['key'], 600 );
+			if ( is_wp_error( $body ) ) {
+				return $body;
+			}
+			$rows = isset( $body['data'] ) && is_array( $body['data'] ) ? $body['data'] : ( array_values( $body ) === $body ? $body : array() );
+			$out[ (string) $id ] = array( 'label' => (string) $account['label'], 'rows' => $rows );
+		}
+		return $out;
+	}
+
 	private function get_rentec_account_for_ops_request( WP_REST_Request $request ) {
 		$settings = function_exists( 'ajforms_get_settings' ) ? $this->get_settings() : get_option( 'ajforms_settings', array() );
 		if ( '1' !== (string) ( $settings['rentec_enabled'] ?? '0' ) ) {
