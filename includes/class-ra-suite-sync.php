@@ -3,7 +3,7 @@
  * Suite Clients: one-way refresh from Rentec.
  *
  * Suite Clients are local AJ Core customers (customer_kind = suite_client) that mirror the Rentec tenants of the
- * "UPOS" property ("UPOS_VO" virtual-office tenants are not included). Rentec is the source: new tenants become
+ * multi-unit "UPOS" property (every unit under it: 103, 104, ...; "UPOS_VO" virtual-office tenants are not included). Rentec is the source: new tenants become
  * Suite Clients, and name / email / phone changes made in Rentec update the linked customer. Nothing is written
  * back to Rentec and nothing is ever deleted or archived here.
  *
@@ -40,27 +40,69 @@ class AJCore_RA_Suite_Sync {
 		return ( 11 === strlen( $d ) && '1' === $d[0] ) ? substr( $d, 1 ) : $d;
 	}
 
-	/** Rentec tenants that sit on the property, as normalized rows keyed "account:renter_id". */
+	/** Walks Rentec's nested property list: every property at or under the one named $target gets id => unit label. */
+	private static function collect_units( $props, $target, $inside, array &$ids, array &$tops ) {
+		foreach ( (array) $props as $p ) {
+			if ( ! is_array( $p ) ) {
+				continue;
+			}
+			$nick   = trim( (string) ( $p['nickname'] ?? '' ) );
+			$pid    = absint( $p['property_id'] ?? 0 );
+			$is_top = ! $inside && 0 === strcasecmp( $nick, $target );
+			if ( ! $inside && count( $tops ) < 15 ) {
+				$tops[] = $nick;
+			}
+			if ( ( $inside || $is_top ) && $pid ) {
+				$ids[ $pid ] = $is_top ? '' : trim( preg_replace( '/^' . preg_quote( $target, '/' ) . '(?![A-Za-z0-9_])[\s:,\-]*/i', '', $nick ) );
+			}
+			self::collect_units( $p['subunits'] ?? array(), $target, $inside || $is_top, $ids, $tops );
+		}
+	}
+
+	/**
+	 * Rentec tenants that live in the multi-unit property named $property (its units 103, 104, ...), keyed
+	 * "account:renter_id". The property is found by name in Rentec's property list and every unit under it counts,
+	 * so a unit's own nickname format does not matter; "UPOS_VO" is a different property and is not included.
+	 * Also returns what was read, for the preview when nothing matches.
+	 *
+	 * @return array{tenants:array,diag:array}|WP_Error
+	 */
 	private static function rentec_tenants( $property ) {
 		$accounts = AJCore_RA_Rentec::rows_for_sync( 'tenants' );
 		if ( is_wp_error( $accounts ) ) {
 			return $accounts;
 		}
-		$re  = '/^' . preg_quote( $property, '/' ) . '\s*[:,]/i';
-		$out = array();
+		$props = AJCore_RA_Rentec::rows_for_sync( 'properties' );
+		if ( is_wp_error( $props ) ) {
+			return $props;
+		}
+		$out  = array();
+		$diag = array( 'accounts' => array(), 'nicknames' => array(), 'similar' => array() );
 		foreach ( $accounts as $acct => $data ) {
+			$ids  = array();
+			$tops = array();
+			self::collect_units( $props[ $acct ]['rows'] ?? array(), $property, false, $ids, $tops );
+			$diag['accounts'][] = array( 'id' => (string) $acct, 'label' => (string) $data['label'], 'tenants' => count( $data['rows'] ), 'units' => count( $ids ) );
+			foreach ( $tops as $n ) {
+				if ( '' !== $n && count( $diag['nicknames'] ) < 15 && ! in_array( $n, $diag['nicknames'], true ) ) {
+					$diag['nicknames'][] = $n;
+				}
+				if ( '' !== $n && false !== stripos( $n, $property ) && ! in_array( $n, $diag['similar'], true ) ) {
+					$diag['similar'][] = $n;
+				}
+			}
+			if ( ! $ids ) {
+				continue; // this Rentec account has no such property
+			}
 			foreach ( $data['rows'] as $t ) {
 				if ( ! is_array( $t ) || empty( $t['renter_id'] ) || ! empty( $t['archived'] ) || ! empty( $t['subtenant'] ) ) {
 					continue;
 				}
 				$units = array();
 				foreach ( (array) ( $t['properties'] ?? array() ) as $pr ) {
-					if ( ! empty( $pr['move_out'] ) ) {
-						continue;
-					}
-					$nick = (string) ( $pr['nickname'] ?? '' );
-					if ( preg_match( $re, $nick ) ) {
-						$units[] = trim( preg_replace( $re, '', $nick ) );
+					$pid = absint( $pr['property_id'] ?? 0 );
+					if ( $pid && isset( $ids[ $pid ] ) && empty( $pr['move_out'] ) ) {
+						$units[] = '' !== $ids[ $pid ] ? $ids[ $pid ] : trim( (string) ( $pr['nickname'] ?? '' ) );
 					}
 				}
 				if ( ! $units ) {
@@ -80,7 +122,7 @@ class AJCore_RA_Suite_Sync {
 				);
 			}
 		}
-		return $out;
+		return array( 'tenants' => $out, 'diag' => $diag );
 	}
 
 	/** The local customers table with each row's metadata decoded. @return array{db:object,table:string,rows:array}|WP_Error */
@@ -111,10 +153,11 @@ class AJCore_RA_Suite_Sync {
 	 * @return array{summary:array,changes:array,ops:array}|WP_Error
 	 */
 	private static function plan( $property ) {
-		$tenants = self::rentec_tenants( $property );
-		if ( is_wp_error( $tenants ) ) {
-			return $tenants;
+		$read = self::rentec_tenants( $property );
+		if ( is_wp_error( $read ) ) {
+			return $read;
 		}
+		$tenants = $read['tenants'];
 		$local = self::local_customers();
 		if ( is_wp_error( $local ) ) {
 			return $local;
@@ -180,7 +223,7 @@ class AJCore_RA_Suite_Sync {
 				$changes[] = array( 'unit' => '', 'kind' => 'not_in_rentec', 'detail' => $cust['name'] . ' — no longer on this property in Rentec (kept here).' );
 			}
 		}
-		return array( 'summary' => $sum, 'changes' => $changes, 'ops' => $ops );
+		return array( 'summary' => $sum, 'changes' => $changes, 'ops' => $ops, 'diag' => $read['diag'] );
 	}
 
 	private static function apply_ops( $local, $ops, $property ) {
@@ -238,7 +281,7 @@ class AJCore_RA_Suite_Sync {
 		if ( is_wp_error( $plan ) ) {
 			return $plan;
 		}
-		return rest_ensure_response( array( 'property' => $property, 'summary' => $plan['summary'], 'changes' => array_slice( $plan['changes'], 0, 400 ), 'changes_total' => count( $plan['changes'] ) ) );
+		return rest_ensure_response( array( 'property' => $property, 'summary' => $plan['summary'], 'changes' => array_slice( $plan['changes'], 0, 400 ), 'changes_total' => count( $plan['changes'] ), 'diagnostics' => $plan['diag'] ) );
 	}
 
 	public static function rest_apply( WP_REST_Request $request ) {
