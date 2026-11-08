@@ -23,7 +23,7 @@ if ( ! defined( 'WPINC' ) ) {
 class AJCore_RA_Reception {
 
 	const TAB        = 'ra-reception';
-	const DB_VERSION = '1';
+	const DB_VERSION = '2'; // 2: tables moved to the portal (shared) DB
 	const DEVICES    = 'ajcore_ra_reception_devices';
 
 	public static function init() {
