@@ -38,16 +38,38 @@ class AJCore_RA_Reception {
 	}
 
 	private static function t( $name ) {
+		return self::db()->prefix . 'aj_ra_reception_' . $name;
+	}
+
+	/** Reception data lives in the portal DB: the shared DB when sharing is on, this site's DB otherwise. */
+	private static function db() {
+		$kit = AJCore_Extensions::rest_toolkit();
+		$db  = isset( $kit['portal_db'] ) ? $kit['portal_db']() : null;
+		if ( $db ) {
+			return $db;
+		}
 		global $wpdb;
-		return $wpdb->prefix . 'aj_ra_reception_' . $name;
+		return $wpdb;
 	}
 
 	public static function maybe_install() {
 		if ( get_option( 'ajcore_ra_reception_db' ) === self::DB_VERSION ) {
 			return;
 		}
-		global $wpdb;
 		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+		// dbDelta writes through the global $wpdb, so point it at the portal DB for the call.
+		global $wpdb;
+		$original = $wpdb;
+		$wpdb     = self::db(); // phpcs:ignore WordPress.WP.GlobalVariablesOverride
+		try {
+			self::create_tables( $wpdb );
+		} finally {
+			$wpdb = $original; // phpcs:ignore WordPress.WP.GlobalVariablesOverride
+		}
+		update_option( 'ajcore_ra_reception_db', self::DB_VERSION );
+	}
+
+	private static function create_tables( $wpdb ) {
 		$cc = $wpdb->get_charset_collate();
 		dbDelta( 'CREATE TABLE ' . self::t( 'guests' ) . " (
 			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
@@ -75,7 +97,6 @@ class AJCore_RA_Reception {
 			KEY guest_id (guest_id),
 			KEY check_in_at (check_in_at)
 		) {$cc};" );
-		update_option( 'ajcore_ra_reception_db', self::DB_VERSION );
 	}
 
 	// ------------------------------------------------------------------ device keys
@@ -229,7 +250,7 @@ class AJCore_RA_Reception {
 	}
 
 	public static function lookup( WP_REST_Request $request ) {
-		global $wpdb;
+		$wpdb = self::db();
 		$phone = self::phone_digits( $request->get_param( 'phone' ) );
 		if ( '' === $phone ) {
 			return new WP_Error( 'bad_request', 'Phone number is required.', array( 'status' => 422 ) );
@@ -246,7 +267,7 @@ class AJCore_RA_Reception {
 	}
 
 	public static function check_in( WP_REST_Request $request ) {
-		global $wpdb;
+		$wpdb = self::db();
 		$phone = self::phone_digits( $request->get_param( 'phone' ) );
 		$name  = trim( sanitize_text_field( (string) $request->get_param( 'full_name' ) ) );
 		$type  = sanitize_key( (string) $request->get_param( 'visit_type' ) );
@@ -285,6 +306,10 @@ class AJCore_RA_Reception {
 		}
 		$wpdb->insert( self::t( 'visits' ), array( 'guest_id' => $gid, 'host_type' => $host['host_type'], 'host_id' => $host['id'], 'host_label' => $host['label'], 'visit_type' => $type, 'status' => 'checked_in', 'notes' => $notes, 'check_in_at' => $now ) );
 		$vid   = (int) $wpdb->insert_id;
+		if ( $vid < 1 ) {
+			// Never tell the iPad "Checked in" when nothing was saved (e.g. tables missing).
+			return new WP_Error( 'save_failed', 'Could not save the visit: ' . ( $wpdb->last_error ? $wpdb->last_error : 'unknown database error' ), array( 'status' => 500 ) );
+		}
 		$guest = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::t( 'guests' ) . ' WHERE id = %d', $gid ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 		$visit = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::t( 'visits' ) . ' WHERE id = %d', $vid ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 
@@ -316,7 +341,7 @@ class AJCore_RA_Reception {
 	}
 
 	public static function visits( WP_REST_Request $request ) {
-		global $wpdb;
+		$wpdb = self::db();
 		$limit  = min( 500, max( 1, absint( $request->get_param( 'limit' ) ?: 100 ) ) );
 		$status = sanitize_key( (string) $request->get_param( 'status' ) );
 		$where  = '' !== $status ? $wpdb->prepare( 'WHERE v.status = %s', $status ) : '';
@@ -330,7 +355,7 @@ class AJCore_RA_Reception {
 	}
 
 	private static function do_check_out( $id ) {
-		global $wpdb;
+		$wpdb = self::db();
 		return false !== $wpdb->update( self::t( 'visits' ), array( 'status' => 'checked_out', 'check_out_at' => current_time( 'mysql' ) ), array( 'id' => (int) $id, 'status' => 'checked_in' ) );
 	}
 
@@ -341,7 +366,7 @@ class AJCore_RA_Reception {
 
 	/** AJOps menu number for Guest Log: visitors who checked in today. */
 	public static function filter_counts( $counts ) {
-		global $wpdb;
+		$wpdb = self::db();
 		$today = current_time( 'Y-m-d' );
 		$n     = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . self::t( 'visits' ) . ' WHERE check_in_at >= %s', $today . ' 00:00:00' ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 		$counts['guest-log'] = array( 'value' => $n, 'label' => 'Visitors today', 'alert' => false );
@@ -429,7 +454,7 @@ class AJCore_RA_Reception {
 		if ( self::TAB !== $tab || ! current_user_can( 'manage_options' ) ) {
 			return;
 		}
-		global $wpdb;
+		$wpdb = self::db();
 		$labels = array( 'appointment' => 'Appointment', 'walk_in' => 'Walk-in', 'returning_visitor' => 'Returning' );
 		$rows   = (array) $wpdb->get_results( 'SELECT v.*, g.full_name, g.phone FROM ' . self::t( 'visits' ) . ' v JOIN ' . self::t( 'guests' ) . ' g ON g.id = v.guest_id ORDER BY v.check_in_at DESC, v.id DESC LIMIT 100' ); // phpcs:ignore WordPress.DB.PreparedSQL
 		$today  = current_time( 'Y-m-d' );
