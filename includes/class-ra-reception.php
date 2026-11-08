@@ -4,7 +4,7 @@
  *
  * Kiosk endpoints (device key in X-AJCore-Device-Key, or staff login):
  *   GET  /reception/ping                 checks the key; returns the site name
- *   GET  /reception/hosts                everyone a visitor can ask for (staff + mailbox customers)
+ *   GET  /reception/hosts                everyone a visitor can ask for (staff + Suite Clients)
  *   GET  /reception/hosts/search?q=      same, filtered
  *   POST /reception/lookup-by-phone      returning visitor
  *   POST /reception/check-in             logs the visit and emails the host
@@ -169,42 +169,15 @@ class AJCore_RA_Reception {
 			$hosts[] = array( 'id' => (string) $u->ID, 'host_type' => 'staff', 'label' => $label, 'subtitle' => '', 'email' => $u->user_email );
 		}
 
-		// Customers a visitor can ask for: mailbox customers (a PMB number on the profile) and Suite Clients.
+		// Customers a visitor can ask for: Suite Clients only (local customers marked customer_kind = suite_client by the
+		// Rentec Suite Clients sync). Mailbox (PMB) customers are deliberately excluded.
 		$kit = AJCore_Extensions::rest_toolkit();
 		$db  = isset( $kit['portal_db'] ) ? $kit['portal_db']() : null;
 		if ( $db ) {
-			$seen = array();
-			$pt = $kit['portal_table']( 'aj_portal_customer_profiles' );
-			if ( $kit['table_exists']( $db, $pt ) ) {
-				$st = $kit['portal_table']( 'aj_portal_stripe_customers' );
-				$lt = $kit['portal_table']( 'aj_portal_local_customers' );
-				$names = array();
-				if ( $kit['table_exists']( $db, $st ) ) {
-					foreach ( (array) $db->get_results( "SELECT stripe_customer_id AS id, name, email FROM `{$st}`" ) as $c ) { // phpcs:ignore WordPress.DB.PreparedSQL
-						$names[ (string) $c->id ] = $c;
-					}
-				}
-				if ( $kit['table_exists']( $db, $lt ) ) {
-					foreach ( (array) $db->get_results( "SELECT local_customer_id AS id, name, email FROM `{$lt}`" ) as $c ) { // phpcs:ignore WordPress.DB.PreparedSQL
-						$names[ (string) $c->id ] = $c;
-					}
-				}
-				foreach ( (array) $db->get_results( "SELECT customer_id, pmb_number FROM `{$pt}` WHERE pmb_number IS NOT NULL AND pmb_number <> ''" ) as $p ) { // phpcs:ignore WordPress.DB.PreparedSQL
-					$c = $names[ (string) $p->customer_id ] ?? null;
-					if ( ! $c ) {
-						continue;
-					}
-					$seen[ (string) $p->customer_id ] = true;
-					$hosts[] = array( 'id' => (string) $p->customer_id, 'host_type' => 'customer', 'label' => '' !== trim( (string) $c->name ) ? (string) $c->name : (string) $c->email, 'subtitle' => '', 'email' => (string) $c->email );
-				}
-				// Suite Clients: local customers marked customer_kind = suite_client (see the Rentec Suite Clients sync).
-				if ( $kit['table_exists']( $db, $lt ) ) {
-					foreach ( (array) $db->get_results( "SELECT local_customer_id AS id, name, email FROM `{$lt}` WHERE metadata LIKE '%\"customer_kind\":\"suite_client\"%' AND (status IS NULL OR status <> 'archived')" ) as $c ) { // phpcs:ignore WordPress.DB.PreparedSQL
-						if ( isset( $seen[ (string) $c->id ] ) ) {
-							continue;
-						}
-						$hosts[] = array( 'id' => (string) $c->id, 'host_type' => 'customer', 'label' => '' !== trim( (string) $c->name ) ? (string) $c->name : (string) $c->email, 'subtitle' => '', 'email' => (string) $c->email );
-					}
+			$lt = $kit['portal_table']( 'aj_portal_local_customers' );
+			if ( $kit['table_exists']( $db, $lt ) ) {
+				foreach ( (array) $db->get_results( "SELECT local_customer_id AS id, name, email FROM `{$lt}` WHERE metadata LIKE '%\"customer_kind\":\"suite_client\"%' AND (status IS NULL OR status <> 'archived')" ) as $c ) { // phpcs:ignore WordPress.DB.PreparedSQL
+					$hosts[] = array( 'id' => (string) $c->id, 'host_type' => 'customer', 'label' => '' !== trim( (string) $c->name ) ? (string) $c->name : (string) $c->email, 'subtitle' => '', 'email' => (string) $c->email );
 				}
 			}
 		}
