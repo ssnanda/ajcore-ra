@@ -99,6 +99,53 @@ class AJCore_RA_Reception {
 		) {$cc};" );
 	}
 
+	/**
+	 * True when the guests + visits tables exist in the portal DB. Checks the DB itself (not only the version
+	 * option, which can say "installed" while the tables are missing) and creates them when absent.
+	 * On failure the DB error is kept in self::$last_error so REST callers can report it.
+	 */
+	private static $last_error = '';
+
+	private static function ensure_tables() {
+		static $ok = null;
+		if ( null !== $ok ) {
+			return $ok;
+		}
+		$db  = self::db();
+		$has = static function () use ( $db ) {
+			foreach ( array( 'guests', 'visits' ) as $n ) {
+				$t = self::t( $n );
+				if ( $db->get_var( $db->prepare( 'SHOW TABLES LIKE %s', $t ) ) !== $t ) {
+					return false;
+				}
+			}
+			return true;
+		};
+		if ( $has() ) {
+			return $ok = true;
+		}
+		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+		global $wpdb;
+		$original = $wpdb;
+		$wpdb     = $db; // phpcs:ignore WordPress.WP.GlobalVariablesOverride
+		try {
+			self::create_tables( $wpdb );
+		} finally {
+			$wpdb = $original; // phpcs:ignore WordPress.WP.GlobalVariablesOverride
+		}
+		$ok = $has();
+		if ( $ok ) {
+			update_option( 'ajcore_ra_reception_db', self::DB_VERSION );
+		} else {
+			self::$last_error = ( $db->last_error ? $db->last_error : 'tables could not be created' ) . ' (db ' . $db->dbname . ', prefix ' . $db->prefix . ')';
+		}
+		return $ok;
+	}
+
+	private static function tables_error() {
+		return new WP_Error( 'reception_tables', 'Reception tables are not available: ' . self::$last_error, array( 'status' => 500 ) );
+	}
+
 	// ------------------------------------------------------------------ device keys
 
 	/** @return array<int,array{id:string,name:string,hash:string,created:string,last_seen:string}> */
@@ -250,6 +297,9 @@ class AJCore_RA_Reception {
 	}
 
 	public static function lookup( WP_REST_Request $request ) {
+		if ( ! self::ensure_tables() ) {
+			return self::tables_error();
+		}
 		$wpdb = self::db();
 		$phone = self::phone_digits( $request->get_param( 'phone' ) );
 		if ( '' === $phone ) {
@@ -267,6 +317,9 @@ class AJCore_RA_Reception {
 	}
 
 	public static function check_in( WP_REST_Request $request ) {
+		if ( ! self::ensure_tables() ) {
+			return self::tables_error();
+		}
 		$wpdb = self::db();
 		$phone = self::phone_digits( $request->get_param( 'phone' ) );
 		$name  = trim( sanitize_text_field( (string) $request->get_param( 'full_name' ) ) );
@@ -341,6 +394,9 @@ class AJCore_RA_Reception {
 	}
 
 	public static function visits( WP_REST_Request $request ) {
+		if ( ! self::ensure_tables() ) {
+			return self::tables_error();
+		}
 		$wpdb = self::db();
 		$limit  = min( 500, max( 1, absint( $request->get_param( 'limit' ) ?: 100 ) ) );
 		$status = sanitize_key( (string) $request->get_param( 'status' ) );
@@ -366,6 +422,9 @@ class AJCore_RA_Reception {
 
 	/** AJOps menu number for Guest Log: visitors who checked in today. */
 	public static function filter_counts( $counts ) {
+		if ( ! self::ensure_tables() ) {
+			return $counts;
+		}
 		$wpdb = self::db();
 		$today = current_time( 'Y-m-d' );
 		$n     = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . self::t( 'visits' ) . ' WHERE check_in_at >= %s', $today . ' 00:00:00' ) ); // phpcs:ignore WordPress.DB.PreparedSQL
