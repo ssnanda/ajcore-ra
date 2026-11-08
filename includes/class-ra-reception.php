@@ -30,6 +30,7 @@ class AJCore_RA_Reception {
 		add_action( 'init', array( __CLASS__, 'maybe_install' ) );
 		add_action( 'rest_api_init', array( __CLASS__, 'register_routes' ) );
 		add_filter( 'ajcore_admin_portal_tabs', array( __CLASS__, 'admin_tab' ), 9 );
+		add_filter( 'ajcore_ops_counts', array( __CLASS__, 'filter_counts' ) );
 		add_action( 'ajcore_admin_portal_tab_render', array( __CLASS__, 'render_admin_tab' ) );
 		add_action( 'admin_post_ajcore_ra_reception_checkout', array( __CLASS__, 'handle_checkout' ) );
 		add_action( 'admin_post_ajcore_ra_reception_device_add', array( __CLASS__, 'handle_device_add' ) );
@@ -165,13 +166,14 @@ class AJCore_RA_Reception {
 		}
 		foreach ( $users as $u ) {
 			$label = '' !== trim( (string) $u->display_name ) ? $u->display_name : $u->user_login;
-			$hosts[] = array( 'id' => (string) $u->ID, 'host_type' => 'staff', 'label' => $label, 'subtitle' => $u->user_email, 'email' => $u->user_email );
+			$hosts[] = array( 'id' => (string) $u->ID, 'host_type' => 'staff', 'label' => $label, 'subtitle' => '', 'email' => $u->user_email );
 		}
 
-		// Mailbox customers (a PMB number on the profile).
+		// Customers a visitor can ask for: mailbox customers (a PMB number on the profile) and Suite Clients.
 		$kit = AJCore_Extensions::rest_toolkit();
 		$db  = isset( $kit['portal_db'] ) ? $kit['portal_db']() : null;
 		if ( $db ) {
+			$seen = array();
 			$pt = $kit['portal_table']( 'aj_portal_customer_profiles' );
 			if ( $kit['table_exists']( $db, $pt ) ) {
 				$st = $kit['portal_table']( 'aj_portal_stripe_customers' );
@@ -192,7 +194,17 @@ class AJCore_RA_Reception {
 					if ( ! $c ) {
 						continue;
 					}
-					$hosts[] = array( 'id' => (string) $p->customer_id, 'host_type' => 'customer', 'label' => '' !== trim( (string) $c->name ) ? (string) $c->name : (string) $c->email, 'subtitle' => 'PMB ' . $p->pmb_number, 'email' => (string) $c->email );
+					$seen[ (string) $p->customer_id ] = true;
+					$hosts[] = array( 'id' => (string) $p->customer_id, 'host_type' => 'customer', 'label' => '' !== trim( (string) $c->name ) ? (string) $c->name : (string) $c->email, 'subtitle' => '', 'email' => (string) $c->email );
+				}
+				// Suite Clients: local customers marked customer_kind = suite_client (see the Rentec Suite Clients sync).
+				if ( $kit['table_exists']( $db, $lt ) ) {
+					foreach ( (array) $db->get_results( "SELECT local_customer_id AS id, name, email FROM `{$lt}` WHERE metadata LIKE '%\"customer_kind\":\"suite_client\"%' AND (status IS NULL OR status <> 'archived')" ) as $c ) { // phpcs:ignore WordPress.DB.PreparedSQL
+						if ( isset( $seen[ (string) $c->id ] ) ) {
+							continue;
+						}
+						$hosts[] = array( 'id' => (string) $c->id, 'host_type' => 'customer', 'label' => '' !== trim( (string) $c->name ) ? (string) $c->name : (string) $c->email, 'subtitle' => '', 'email' => (string) $c->email );
+					}
 				}
 			}
 		}
@@ -200,7 +212,7 @@ class AJCore_RA_Reception {
 		if ( '' !== $q ) {
 			$needle = strtolower( $q );
 			$hosts  = array_values( array_filter( $hosts, static function ( $h ) use ( $needle ) {
-				return false !== strpos( strtolower( $h['label'] . ' ' . $h['subtitle'] ), $needle );
+				return false !== strpos( strtolower( $h['label'] ), $needle );
 			} ) );
 		}
 		usort( $hosts, static function ( $a, $b ) {
@@ -210,7 +222,8 @@ class AJCore_RA_Reception {
 	}
 
 	private static function public_host( $h ) {
-		return array( 'id' => $h['id'], 'host_type' => $h['host_type'], 'label' => $h['label'], 'subtitle' => $h['subtitle'] );
+		// The kiosk gets names only: never an email, phone, PMB or anything else about a customer or staff member.
+		return array( 'id' => $h['id'], 'host_type' => $h['host_type'], 'label' => $h['label'], 'subtitle' => '' );
 	}
 
 	public static function hosts() {
@@ -253,7 +266,10 @@ class AJCore_RA_Reception {
 			return rest_ensure_response( array( 'found' => false ) );
 		}
 		$v = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::t( 'visits' ) . ' WHERE guest_id = %d ORDER BY check_in_at DESC, id DESC LIMIT 1', $g->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
-		return rest_ensure_response( array( 'found' => true, 'guest' => self::guest_row( $g ), 'latest_visit' => $v ? self::visit_row( $v ) : null ) );
+		// The kiosk only gets what is needed to greet a returning visitor: name and last host. No email, no notes.
+		$guest = array( 'id' => (int) $g->id, 'full_name' => (string) $g->full_name, 'phone' => (string) $g->phone, 'email' => '', 'notes' => '' );
+		$last  = $v ? array_intersect_key( self::visit_row( $v ), array_flip( array( 'id', 'host_type', 'host_id', 'host_label', 'visit_type', 'check_in_at' ) ) ) : null;
+		return rest_ensure_response( array( 'found' => true, 'guest' => $guest, 'latest_visit' => $last ) );
 	}
 
 	public static function check_in( WP_REST_Request $request ) {
@@ -348,6 +364,15 @@ class AJCore_RA_Reception {
 	public static function rest_check_out( WP_REST_Request $request ) {
 		self::do_check_out( (int) $request['id'] );
 		return rest_ensure_response( array( 'success' => true ) );
+	}
+
+	/** AJOps menu number for Guest Log: visitors who checked in today. */
+	public static function filter_counts( $counts ) {
+		global $wpdb;
+		$today = current_time( 'Y-m-d' );
+		$n     = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . self::t( 'visits' ) . ' WHERE check_in_at >= %s', $today . ' 00:00:00' ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$counts['guest-log'] = array( 'value' => $n, 'label' => 'Visitors today', 'alert' => false );
+		return $counts;
 	}
 
 	public static function rest_devices() {
