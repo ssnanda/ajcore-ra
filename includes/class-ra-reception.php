@@ -216,6 +216,10 @@ class AJCore_RA_Reception {
 			array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_device_add' ), 'permission_callback' => $ops ),
 		) );
 		register_rest_route( $ns, '/ops/reception/devices/(?P<id>[A-Za-z0-9]+)/revoke', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_device_revoke' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/update', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_update_visit' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/delete', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_delete_visit' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/notes/(?P<note_id>\d+)/update', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_note_update' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/notes/(?P<note_id>\d+)/delete', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_note_delete' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/notify-info', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( __CLASS__, 'rest_notify_info' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/notified', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_mark_notified' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/notes', array( 'methods' => array( 'GET', 'POST' ), 'callback' => array( __CLASS__, 'rest_notes' ), 'permission_callback' => $ops ) );
@@ -440,6 +444,7 @@ class AJCore_RA_Reception {
 		}
 		return rest_ensure_response( array(
 			'phone'      => $phone,
+			'guest_phone' => (string) $v->phone,
 			'host_label' => (string) $v->host_label,
 			'guest_name' => (string) $v->full_name,
 			'site_name'  => wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ),
@@ -458,6 +463,75 @@ class AJCore_RA_Reception {
 		$wpdb->query( $wpdb->prepare( 'UPDATE ' . self::t( 'visits' ) . " SET status = 'notified', notified_at = %s WHERE id = %d AND status = 'checked_in'", $now, $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 		self::add_note( $id, 'Client notified by text' . ( '' !== (string) $request->get_param( 'to' ) ? ' (' . sanitize_text_field( (string) $request->get_param( 'to' ) ) . ')' : '' ) . '.', 'System' );
 		return rest_ensure_response( array( 'success' => true, 'notified_at' => $now ) );
+	}
+
+	/** Staff edit of a visit: the guest's name/phone/email (shared by all that guest's visits) and this visit's type. */
+	public static function rest_update_visit( WP_REST_Request $request ) {
+		if ( ! self::ensure_tables() ) {
+			return self::tables_error();
+		}
+		$wpdb = self::db();
+		$v    = self::get_visit( (int) $request['id'] );
+		if ( ! $v ) {
+			return new WP_Error( 'not_found', 'Visit not found.', array( 'status' => 404 ) );
+		}
+		$name  = trim( sanitize_text_field( (string) $request->get_param( 'full_name' ) ) );
+		$phone = self::phone_digits( $request->get_param( 'phone' ) );
+		$email = sanitize_email( (string) $request->get_param( 'email' ) );
+		$type  = sanitize_key( (string) $request->get_param( 'visit_type' ) );
+		if ( '' === $name || '' === $phone ) {
+			return new WP_Error( 'bad_request', 'Name and phone are required.', array( 'status' => 422 ) );
+		}
+		$taken = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . self::t( 'guests' ) . ' WHERE phone = %s AND id <> %d', $phone, (int) $v->guest_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		if ( $taken ) {
+			return new WP_Error( 'conflict', 'Another guest already uses that phone number.', array( 'status' => 409 ) );
+		}
+		$wpdb->update( self::t( 'guests' ), array( 'full_name' => $name, 'phone' => $phone, 'email' => $email, 'updated_at' => current_time( 'mysql' ) ), array( 'id' => (int) $v->guest_id ) );
+		if ( '' !== $type ) {
+			$wpdb->update( self::t( 'visits' ), array( 'visit_type' => $type ), array( 'id' => (int) $v->id ) );
+		}
+		$v     = self::get_visit( (int) $v->id );
+		$guest = (object) array( 'id' => $v->guest_id, 'full_name' => $v->full_name, 'phone' => $v->phone, 'email' => $v->email, 'notes' => $v->guest_notes );
+		return rest_ensure_response( self::visit_row( $v, $guest ) );
+	}
+
+	/** Deletes a visit and its notes; the guest record goes too when it has no other visits. */
+	public static function rest_delete_visit( WP_REST_Request $request ) {
+		if ( ! self::ensure_tables() ) {
+			return self::tables_error();
+		}
+		$wpdb = self::db();
+		$v    = self::get_visit( (int) $request['id'] );
+		if ( ! $v ) {
+			return new WP_Error( 'not_found', 'Visit not found.', array( 'status' => 404 ) );
+		}
+		$wpdb->delete( self::t( 'visit_notes' ), array( 'visit_id' => (int) $v->id ) );
+		$wpdb->delete( self::t( 'visits' ), array( 'id' => (int) $v->id ) );
+		if ( ! (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . self::t( 'visits' ) . ' WHERE guest_id = %d', (int) $v->guest_id ) ) ) { // phpcs:ignore WordPress.DB.PreparedSQL
+			$wpdb->delete( self::t( 'guests' ), array( 'id' => (int) $v->guest_id ) );
+		}
+		return rest_ensure_response( array( 'success' => true ) );
+	}
+
+	public static function rest_note_update( WP_REST_Request $request ) {
+		if ( ! self::ensure_tables() ) {
+			return self::tables_error();
+		}
+		$wpdb = self::db();
+		$note = trim( sanitize_textarea_field( (string) $request->get_param( 'note' ) ) );
+		if ( '' === $note ) {
+			return new WP_Error( 'bad_request', 'Note is empty.', array( 'status' => 422 ) );
+		}
+		$wpdb->update( self::t( 'visit_notes' ), array( 'note' => $note ), array( 'id' => (int) $request['note_id'], 'visit_id' => (int) $request['id'] ) );
+		return self::notes_response( (int) $request['id'] );
+	}
+
+	public static function rest_note_delete( WP_REST_Request $request ) {
+		if ( ! self::ensure_tables() ) {
+			return self::tables_error();
+		}
+		self::db()->delete( self::t( 'visit_notes' ), array( 'id' => (int) $request['note_id'], 'visit_id' => (int) $request['id'] ) );
+		return self::notes_response( (int) $request['id'] );
 	}
 
 	private static function add_note( $visit_id, $note, $author ) {
@@ -481,7 +555,12 @@ class AJCore_RA_Reception {
 			$author = ( $user && $user->exists() ) ? ( '' !== trim( (string) $user->display_name ) ? $user->display_name : $user->user_login ) : 'Staff';
 			self::add_note( $id, $note, $author );
 		}
-		$rows = (array) $wpdb->get_results( $wpdb->prepare( 'SELECT id, author, note, created_at FROM ' . self::t( 'visit_notes' ) . ' WHERE visit_id = %d ORDER BY id DESC LIMIT 200', $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		return self::notes_response( $id );
+	}
+
+	private static function notes_response( $id ) {
+		$wpdb = self::db();
+		$rows = (array) $wpdb->get_results( $wpdb->prepare( 'SELECT id, author, note, created_at FROM ' . self::t( 'visit_notes' ) . ' WHERE visit_id = %d ORDER BY id DESC LIMIT 200', (int) $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 		return rest_ensure_response( array( 'notes' => array_map( static function ( $r ) {
 			return array( 'id' => (int) $r->id, 'author' => (string) $r->author, 'note' => (string) $r->note, 'created_at' => (string) $r->created_at );
 		}, $rows ) ) );
