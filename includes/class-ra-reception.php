@@ -216,6 +216,7 @@ class AJCore_RA_Reception {
 			array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_device_add' ), 'permission_callback' => $ops ),
 		) );
 		register_rest_route( $ns, '/ops/reception/devices/(?P<id>[A-Za-z0-9]+)/revoke', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_device_revoke' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/reception/clients', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( __CLASS__, 'rest_clients' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/update', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_update_visit' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/delete', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_delete_visit' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/notes/(?P<note_id>\d+)/update', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_note_update' ), 'permission_callback' => $ops ) );
@@ -253,7 +254,18 @@ class AJCore_RA_Reception {
 		}
 		foreach ( $users as $u ) {
 			$label = '' !== trim( (string) $u->display_name ) ? $u->display_name : $u->user_login;
-			$hosts[] = array( 'id' => (string) $u->ID, 'host_type' => 'staff', 'label' => $label, 'subtitle' => '', 'email' => $u->user_email, 'phone' => (string) get_user_meta( $u->ID, 'phone', true ) );
+			$why = array_merge( (array) $u->roles, '1' === (string) get_user_meta( $u->ID, 'ajcore_ops_access', true ) ? array( 'AJOps access' ) : array() );
+			$hosts[] = array(
+				'id'       => (string) $u->ID,
+				'host_type' => 'staff',
+				'label'    => $label,
+				'subtitle' => '',
+				'email'    => $u->user_email,
+				'phone'    => (string) get_user_meta( $u->ID, 'phone', true ),
+				'source'   => 'Staff',
+				'where'    => 'WordPress user (' . implode( ', ', $why ) . ')',
+				'edit_url' => admin_url( 'user-edit.php?user_id=' . (int) $u->ID ),
+			);
 		}
 
 		// Customers a visitor can ask for: Suite Clients only (local customers marked customer_kind = suite_client by the
@@ -264,7 +276,7 @@ class AJCore_RA_Reception {
 			$lt = $kit['portal_table']( 'aj_portal_local_customers' );
 			if ( $kit['table_exists']( $db, $lt ) ) {
 				foreach ( (array) $db->get_results( "SELECT local_customer_id AS id, name, email, phone FROM `{$lt}` WHERE metadata LIKE '%\"customer_kind\":\"suite_client\"%' AND (status IS NULL OR status <> 'archived')" ) as $c ) { // phpcs:ignore WordPress.DB.PreparedSQL
-					$hosts[] = array( 'id' => (string) $c->id, 'host_type' => 'customer', 'label' => '' !== trim( (string) $c->name ) ? (string) $c->name : (string) $c->email, 'subtitle' => '', 'email' => (string) $c->email, 'phone' => (string) $c->phone );
+					$hosts[] = array( 'id' => (string) $c->id, 'host_type' => 'customer', 'label' => '' !== trim( (string) $c->name ) ? (string) $c->name : (string) $c->email, 'subtitle' => '', 'email' => (string) $c->email, 'phone' => (string) $c->phone, 'source' => 'Suite Client', 'where' => 'AJCore customer marked Suite Client (Rentec sync)', 'edit_url' => '' );
 				}
 			}
 		}
@@ -284,6 +296,24 @@ class AJCore_RA_Reception {
 	private static function public_host( $h ) {
 		// The kiosk gets names only: never an email, phone, PMB or anything else about a customer or staff member.
 		return array( 'id' => $h['id'], 'host_type' => $h['host_type'], 'label' => $h['label'], 'subtitle' => '' );
+	}
+
+	/** Everyone a visitor can pick as "Client", with where each one comes from (for the Guest Log's Clients list). */
+	public static function rest_clients() {
+		$out = array();
+		foreach ( self::all_hosts() as $h ) {
+			$out[] = array(
+				'id'        => (string) $h['id'],
+				'host_type' => (string) $h['host_type'],
+				'label'     => (string) $h['label'],
+				'email'     => (string) ( $h['email'] ?? '' ),
+				'phone'     => (string) ( $h['phone'] ?? '' ),
+				'source'    => (string) ( $h['source'] ?? '' ),
+				'where'     => (string) ( $h['where'] ?? '' ),
+				'edit_url'  => (string) ( $h['edit_url'] ?? '' ),
+			);
+		}
+		return rest_ensure_response( array( 'clients' => $out ) );
 	}
 
 	public static function hosts() {
