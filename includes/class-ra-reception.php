@@ -490,9 +490,30 @@ class AJCore_RA_Reception {
 		if ( $taken ) {
 			return new WP_Error( 'conflict', 'Another guest already uses that phone number.', array( 'status' => 409 ) );
 		}
+		// Optional new host ("Here to see"): a staff member / Suite Client from the host list, or 'tour' (no host).
+		$host_type = sanitize_key( (string) $request->get_param( 'host_type' ) );
+		$host_id   = sanitize_text_field( (string) $request->get_param( 'host_id' ) );
+		$host      = null;
+		if ( 'tour' === $host_type ) {
+			$host = array( 'host_type' => 'tour', 'id' => '', 'label' => 'Tour' );
+		} elseif ( '' !== $host_type ) {
+			foreach ( self::all_hosts() as $h ) {
+				if ( $h['host_type'] === $host_type && (string) $h['id'] === $host_id ) {
+					$host = $h;
+					break;
+				}
+			}
+			if ( ! $host ) {
+				return new WP_Error( 'bad_request', 'That host was not found.', array( 'status' => 422 ) );
+			}
+		}
 		$wpdb->update( self::t( 'guests' ), array( 'full_name' => $name, 'phone' => $phone, 'email' => $email, 'updated_at' => current_time( 'mysql' ) ), array( 'id' => (int) $v->guest_id ) );
-		if ( '' !== $type ) {
-			$wpdb->update( self::t( 'visits' ), array( 'visit_type' => $type ), array( 'id' => (int) $v->id ) );
+		$visit_changes = '' !== $type ? array( 'visit_type' => $type ) : array();
+		if ( $host ) {
+			$visit_changes += array( 'host_type' => $host['host_type'], 'host_id' => (string) $host['id'], 'host_label' => $host['label'] );
+		}
+		if ( $visit_changes ) {
+			$wpdb->update( self::t( 'visits' ), $visit_changes, array( 'id' => (int) $v->id ) );
 		}
 		$v     = self::get_visit( (int) $v->id );
 		$guest = (object) array( 'id' => $v->guest_id, 'full_name' => $v->full_name, 'phone' => $v->phone, 'email' => $v->email, 'notes' => $v->guest_notes );
