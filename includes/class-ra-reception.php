@@ -23,7 +23,7 @@ if ( ! defined( 'WPINC' ) ) {
 class AJCore_RA_Reception {
 
 	const TAB        = 'ra-reception';
-	const DB_VERSION = '2'; // 2: tables moved to the portal (shared) DB
+	const DB_VERSION = '4'; // 2: tables moved to the portal (shared) DB; 3: visits.notified_at + visit_notes table; 4: visits.visit_code
 	const DEVICES    = 'ajcore_ra_reception_devices';
 
 	public static function init() {
@@ -93,9 +93,21 @@ class AJCore_RA_Reception {
 			notes text NULL,
 			check_in_at datetime NOT NULL,
 			check_out_at datetime NULL,
+			notified_at datetime NULL,
+			visit_code varchar(24) NOT NULL DEFAULT '',
 			PRIMARY KEY  (id),
 			KEY guest_id (guest_id),
-			KEY check_in_at (check_in_at)
+			KEY check_in_at (check_in_at),
+			KEY visit_code (visit_code)
+		) {$cc};" );
+		dbDelta( 'CREATE TABLE ' . self::t( 'visit_notes' ) . " (
+			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+			visit_id bigint(20) unsigned NOT NULL,
+			author varchar(190) NOT NULL DEFAULT '',
+			note text NOT NULL,
+			created_at datetime NOT NULL,
+			PRIMARY KEY  (id),
+			KEY visit_id (visit_id)
 		) {$cc};" );
 	}
 
@@ -113,7 +125,7 @@ class AJCore_RA_Reception {
 		}
 		$db  = self::db();
 		$has = static function () use ( $db ) {
-			foreach ( array( 'guests', 'visits' ) as $n ) {
+			foreach ( array( 'guests', 'visits', 'visit_notes' ) as $n ) {
 				$t = self::t( $n );
 				if ( $db->get_var( $db->prepare( 'SHOW TABLES LIKE %s', $t ) ) !== $t ) {
 					return false;
@@ -204,6 +216,9 @@ class AJCore_RA_Reception {
 			array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_device_add' ), 'permission_callback' => $ops ),
 		) );
 		register_rest_route( $ns, '/ops/reception/devices/(?P<id>[A-Za-z0-9]+)/revoke', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_device_revoke' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/notify-info', array( 'methods' => WP_REST_Server::READABLE, 'callback' => array( __CLASS__, 'rest_notify_info' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/notified', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_mark_notified' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/notes', array( 'methods' => array( 'GET', 'POST' ), 'callback' => array( __CLASS__, 'rest_notes' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/reception/visits/(?P<id>\d+)/check-out', array( 'methods' => WP_REST_Server::CREATABLE, 'callback' => array( __CLASS__, 'rest_check_out' ), 'permission_callback' => $ops ) );
 	}
 
@@ -234,7 +249,7 @@ class AJCore_RA_Reception {
 		}
 		foreach ( $users as $u ) {
 			$label = '' !== trim( (string) $u->display_name ) ? $u->display_name : $u->user_login;
-			$hosts[] = array( 'id' => (string) $u->ID, 'host_type' => 'staff', 'label' => $label, 'subtitle' => '', 'email' => $u->user_email );
+			$hosts[] = array( 'id' => (string) $u->ID, 'host_type' => 'staff', 'label' => $label, 'subtitle' => '', 'email' => $u->user_email, 'phone' => (string) get_user_meta( $u->ID, 'phone', true ) );
 		}
 
 		// Customers a visitor can ask for: Suite Clients only (local customers marked customer_kind = suite_client by the
@@ -244,8 +259,8 @@ class AJCore_RA_Reception {
 		if ( $db ) {
 			$lt = $kit['portal_table']( 'aj_portal_local_customers' );
 			if ( $kit['table_exists']( $db, $lt ) ) {
-				foreach ( (array) $db->get_results( "SELECT local_customer_id AS id, name, email FROM `{$lt}` WHERE metadata LIKE '%\"customer_kind\":\"suite_client\"%' AND (status IS NULL OR status <> 'archived')" ) as $c ) { // phpcs:ignore WordPress.DB.PreparedSQL
-					$hosts[] = array( 'id' => (string) $c->id, 'host_type' => 'customer', 'label' => '' !== trim( (string) $c->name ) ? (string) $c->name : (string) $c->email, 'subtitle' => '', 'email' => (string) $c->email );
+				foreach ( (array) $db->get_results( "SELECT local_customer_id AS id, name, email, phone FROM `{$lt}` WHERE metadata LIKE '%\"customer_kind\":\"suite_client\"%' AND (status IS NULL OR status <> 'archived')" ) as $c ) { // phpcs:ignore WordPress.DB.PreparedSQL
+					$hosts[] = array( 'id' => (string) $c->id, 'host_type' => 'customer', 'label' => '' !== trim( (string) $c->name ) ? (string) $c->name : (string) $c->email, 'subtitle' => '', 'email' => (string) $c->email, 'phone' => (string) $c->phone );
 				}
 			}
 		}
@@ -283,9 +298,11 @@ class AJCore_RA_Reception {
 	private static function visit_row( $v, $guest = null ) {
 		return array(
 			'id'           => (int) $v->id,
+			'code'         => ! empty( $v->visit_code ) ? (string) $v->visit_code : sprintf( 'G-%s-%03d', str_replace( '-', '', substr( (string) $v->check_in_at, 0, 10 ) ), (int) $v->id ),
 			'guest_id'     => (int) $v->guest_id,
 			'guest'        => $guest ? self::guest_row( $guest ) : null,
 			'host_type'    => (string) $v->host_type,
+			'host_id'      => (string) $v->host_id,
 			'host_id'      => (string) $v->host_id,
 			'host_label'   => (string) $v->host_label,
 			'visit_type'   => (string) $v->visit_type,
@@ -293,6 +310,7 @@ class AJCore_RA_Reception {
 			'notes'        => (string) $v->notes,
 			'check_in_at'  => (string) $v->check_in_at,
 			'check_out_at' => $v->check_out_at ? (string) $v->check_out_at : null,
+			'notified_at'  => ! empty( $v->notified_at ) ? (string) $v->notified_at : null,
 		);
 	}
 
@@ -357,7 +375,11 @@ class AJCore_RA_Reception {
 			$gid = (int) $g->id;
 			$wpdb->update( self::t( 'guests' ), array( 'full_name' => $name, 'email' => '' !== $email ? $email : $g->email, 'notes' => '' !== $notes ? $notes : $g->notes, 'updated_at' => $now ), array( 'id' => $gid ) );
 		}
-		$wpdb->insert( self::t( 'visits' ), array( 'guest_id' => $gid, 'host_type' => $host['host_type'], 'host_id' => $host['id'], 'host_label' => $host['label'], 'visit_type' => $type, 'status' => 'checked_in', 'notes' => $notes, 'check_in_at' => $now ) );
+		// Guest ID: G-YYYYMMDD-NNN = the check-in date plus that day's running number.
+		$day  = substr( $now, 0, 10 );
+		$seq  = 1 + (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . self::t( 'visits' ) . ' WHERE check_in_at >= %s AND check_in_at <= %s', $day . ' 00:00:00', $day . ' 23:59:59' ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$code = sprintf( 'G-%s-%03d', str_replace( '-', '', $day ), $seq );
+		$wpdb->insert( self::t( 'visits' ), array( 'visit_code' => $code, 'guest_id' => $gid, 'host_type' => $host['host_type'], 'host_id' => $host['id'], 'host_label' => $host['label'], 'visit_type' => $type, 'status' => 'checked_in', 'notes' => $notes, 'check_in_at' => $now ) );
 		$vid   = (int) $wpdb->insert_id;
 		if ( $vid < 1 ) {
 			// Never tell the iPad "Checked in" when nothing was saved (e.g. tables missing).
@@ -366,31 +388,10 @@ class AJCore_RA_Reception {
 		$guest = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::t( 'guests' ) . ' WHERE id = %d', $gid ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 		$visit = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::t( 'visits' ) . ' WHERE id = %d', $vid ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 
-		self::notify_host( $visit, $guest, $host );
+		// No arrival email: staff notify the client by text (Guest Log > Notify client in AJOps).
 		do_action( 'ajcore_ra_reception_checked_in', $visit, $guest, $host );
 
 		return new WP_REST_Response( array_merge( self::visit_row( $visit, $guest ), array( 'message' => 'Checked in.' ) ), 201 );
-	}
-
-	/** Emails the host that their visitor has arrived. Silent when the host has no email. */
-	private static function notify_host( $visit, $guest, $host ) {
-		if ( empty( $host['email'] ) || ! is_email( $host['email'] ) ) {
-			return;
-		}
-		$labels = array( 'appointment' => 'Appointment', 'walk_in' => 'Walk-in', 'returning_visitor' => 'Returning visitor' );
-		$site   = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
-		$lines  = array(
-			sprintf( '%s is at the front desk.', $guest->full_name ),
-			'Visit: ' . ( $labels[ $visit->visit_type ] ?? $visit->visit_type ),
-			'Phone: ' . $guest->phone,
-		);
-		if ( ! empty( $guest->email ) ) {
-			$lines[] = 'Email: ' . $guest->email;
-		}
-		if ( ! empty( $visit->notes ) ) {
-			$lines[] = 'Note: ' . $visit->notes;
-		}
-		wp_mail( $host['email'], sprintf( '%s has arrived (%s)', $guest->full_name, $site ), implode( "\n", $lines ) );
 	}
 
 	public static function visits( WP_REST_Request $request ) {
@@ -412,7 +413,78 @@ class AJCore_RA_Reception {
 
 	private static function do_check_out( $id ) {
 		$wpdb = self::db();
-		return false !== $wpdb->update( self::t( 'visits' ), array( 'status' => 'checked_out', 'check_out_at' => current_time( 'mysql' ) ), array( 'id' => (int) $id, 'status' => 'checked_in' ) );
+		// Still on site = checked in, or checked in and the client has been notified.
+		return false !== $wpdb->query( $wpdb->prepare( 'UPDATE ' . self::t( 'visits' ) . " SET status = 'checked_out', check_out_at = %s WHERE id = %d AND status IN ('checked_in','notified')", current_time( 'mysql' ), (int) $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+	}
+
+	private static function get_visit( $id ) {
+		$wpdb = self::db();
+		return $wpdb->get_row( $wpdb->prepare( 'SELECT v.*, g.full_name, g.phone, g.email, g.notes AS guest_notes FROM ' . self::t( 'visits' ) . ' v JOIN ' . self::t( 'guests' ) . ' g ON g.id = v.guest_id WHERE v.id = %d', (int) $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+	}
+
+	/** Who to text for a visit: the host's phone (Suite Client or staff) plus the wording pieces AJOps needs. */
+	public static function rest_notify_info( WP_REST_Request $request ) {
+		if ( ! self::ensure_tables() ) {
+			return self::tables_error();
+		}
+		$v = self::get_visit( (int) $request['id'] );
+		if ( ! $v ) {
+			return new WP_Error( 'not_found', 'Visit not found.', array( 'status' => 404 ) );
+		}
+		$phone = '';
+		foreach ( self::all_hosts() as $h ) {
+			if ( $h['host_type'] === $v->host_type && (string) $h['id'] === (string) $v->host_id ) {
+				$phone = (string) ( $h['phone'] ?? '' );
+				break;
+			}
+		}
+		return rest_ensure_response( array(
+			'phone'      => $phone,
+			'host_label' => (string) $v->host_label,
+			'guest_name' => (string) $v->full_name,
+			'site_name'  => wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ),
+			'status'     => (string) $v->status,
+		) );
+	}
+
+	/** Called by AJOps after the text was sent: status becomes 'notified' (only from checked_in) and a note is logged. */
+	public static function rest_mark_notified( WP_REST_Request $request ) {
+		if ( ! self::ensure_tables() ) {
+			return self::tables_error();
+		}
+		$wpdb = self::db();
+		$id   = (int) $request['id'];
+		$now  = current_time( 'mysql' );
+		$wpdb->query( $wpdb->prepare( 'UPDATE ' . self::t( 'visits' ) . " SET status = 'notified', notified_at = %s WHERE id = %d AND status = 'checked_in'", $now, $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		self::add_note( $id, 'Client notified by text' . ( '' !== (string) $request->get_param( 'to' ) ? ' (' . sanitize_text_field( (string) $request->get_param( 'to' ) ) . ')' : '' ) . '.', 'System' );
+		return rest_ensure_response( array( 'success' => true, 'notified_at' => $now ) );
+	}
+
+	private static function add_note( $visit_id, $note, $author ) {
+		$wpdb = self::db();
+		$wpdb->insert( self::t( 'visit_notes' ), array( 'visit_id' => (int) $visit_id, 'author' => $author, 'note' => $note, 'created_at' => current_time( 'mysql' ) ) );
+		return (int) $wpdb->insert_id;
+	}
+
+	public static function rest_notes( WP_REST_Request $request ) {
+		if ( ! self::ensure_tables() ) {
+			return self::tables_error();
+		}
+		$wpdb = self::db();
+		$id   = (int) $request['id'];
+		if ( WP_REST_Server::CREATABLE === $request->get_method() ) {
+			$note = trim( sanitize_textarea_field( (string) $request->get_param( 'note' ) ) );
+			if ( '' === $note ) {
+				return new WP_Error( 'bad_request', 'Note is empty.', array( 'status' => 422 ) );
+			}
+			$user   = wp_get_current_user();
+			$author = ( $user && $user->exists() ) ? ( '' !== trim( (string) $user->display_name ) ? $user->display_name : $user->user_login ) : 'Staff';
+			self::add_note( $id, $note, $author );
+		}
+		$rows = (array) $wpdb->get_results( $wpdb->prepare( 'SELECT id, author, note, created_at FROM ' . self::t( 'visit_notes' ) . ' WHERE visit_id = %d ORDER BY id DESC LIMIT 200', $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		return rest_ensure_response( array( 'notes' => array_map( static function ( $r ) {
+			return array( 'id' => (int) $r->id, 'author' => (string) $r->author, 'note' => (string) $r->note, 'created_at' => (string) $r->created_at );
+		}, $rows ) ) );
 	}
 
 	public static function rest_check_out( WP_REST_Request $request ) {
@@ -523,7 +595,7 @@ class AJCore_RA_Reception {
 			if ( 0 === strpos( (string) $r->check_in_at, $today ) ) {
 				$today_n++;
 			}
-			if ( 'checked_in' === $r->status ) {
+			if ( in_array( $r->status, array( 'checked_in', 'notified' ), true ) ) {
 				$in_now++;
 			}
 		}
@@ -541,7 +613,7 @@ class AJCore_RA_Reception {
 			echo '<table class="widefat striped" style="font-size:13px"><thead><tr><th>' . esc_html__( 'Arrived', 'ajcore-ra' ) . '</th><th>' . esc_html__( 'Visitor', 'ajcore-ra' ) . '</th><th>' . esc_html__( 'Phone', 'ajcore-ra' ) . '</th><th>' . esc_html__( 'Type', 'ajcore-ra' ) . '</th><th>' . esc_html__( 'Here to see', 'ajcore-ra' ) . '</th><th></th></tr></thead><tbody>';
 			foreach ( $rows as $r ) {
 				echo '<tr><td>' . esc_html( mysql2date( 'M j, g:i a', $r->check_in_at ) ) . '</td><td><b>' . esc_html( $r->full_name ) . '</b></td><td>' . esc_html( $r->phone ) . '</td><td>' . esc_html( $labels[ $r->visit_type ] ?? $r->visit_type ) . '</td><td>' . esc_html( $r->host_label ) . '</td><td>';
-				if ( 'checked_in' === $r->status ) {
+				if ( in_array( $r->status, array( 'checked_in', 'notified' ), true ) ) {
 					echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" style="margin:0">';
 					wp_nonce_field( 'ajcore_ra_reception_checkout' );
 					echo '<input type="hidden" name="action" value="ajcore_ra_reception_checkout"><input type="hidden" name="visit_id" value="' . (int) $r->id . '"><button class="button button-small">' . esc_html__( 'Check out', 'ajcore-ra' ) . '</button></form>';
