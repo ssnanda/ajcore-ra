@@ -366,6 +366,10 @@ class AJCore_RA_Reception {
 				break;
 			}
 		}
+		// A tour has no host: the visit just captures the prospect's details (email/company/interest go in the note).
+		if ( ! $host && 'tour' === $type ) {
+			$host = array( 'id' => '', 'host_type' => 'tour', 'label' => 'Tour', 'email' => '', 'phone' => '' );
+		}
 		if ( ! $host ) {
 			return new WP_Error( 'bad_request', 'Choose who you are here to see.', array( 'status' => 422 ) );
 		}
