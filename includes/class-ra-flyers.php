@@ -4,7 +4,7 @@
  *
  * Split out of Gmail Intake when that moved back to AJCore: the /ajcore/v1/gmail-intake/flyers* URLs, the daily
  * cron hook (ajcore_ra_flyers_auto_share) and the one-time "Articles of Organization" fold are unchanged. The card
- * is drawn on AJCore's Gmail Intake tab through 'ajcore_gmail_intake_tab_after_connection'.
+ * is drawn on AJCore's Files tab through the 'ajcore_file_library_before_list' action.
  */
 
 if ( ! defined( 'WPINC' ) ) {
@@ -30,7 +30,7 @@ class AJCore_RA_Flyers {
 
 	public static function init() {
 		add_action( 'rest_api_init', array( __CLASS__, 'boot_routes' ) );
-		add_action( 'ajcore_gmail_intake_tab_after_connection', array( __CLASS__, 'render_tab_card' ) );
+		add_action( 'ajcore_file_library_before_list', array( __CLASS__, 'render_tab_card' ) );
 		add_filter( 'ajcore_gmail_intake_skip_category', array( __CLASS__, 'skip_category' ), 10, 2 );
 		add_filter( 'ajcore_gmail_intake_group_labels', array( __CLASS__, 'group_labels' ) );
 		// New RA / ncllcagents.com customers get the shared flyers automatically (daily; adds only, never removes).
