@@ -19,7 +19,26 @@ class AJCore_RA_Gmail_Rules {
 		add_filter( 'ajcore_gmail_intake_filename_labels', array( __CLASS__, 'filename_labels' ) );
 		add_filter( 'ajcore_gmail_intake_default_address', array( __CLASS__, 'default_address' ) );
 		add_filter( 'ajcore_gmail_intake_company_name', array( __CLASS__, 'company_name' ), 10, 3 );
+		add_filter( 'ajcore_gmail_intake_filters', array( __CLASS__, 'mailbox_filter' ), 10, 2 );
 		add_filter( 'ajcore_gmail_intake_rules_summary', array( __CLASS__, 'rules_summary' ) );
+	}
+
+	/**
+	 * WHICH EMAILS ENTER THE PIPELINE for ncllcagents.com: edit the lists below to change it. Each filled list narrows the
+	 * result ('match' => 'all'); a list matches if any one of its words appears (subject, or sender name/address).
+	 *  - Zoho: the original NC Secretary of State approval emails ("Congratulations! Your New Business Formation Document...")
+	 *    from sosnc.gov.
+	 *  - Gmail: the same email forwarded from Zoho; the forward comes from our own address, so only the subject is checked.
+	 * Return null instead to fall back to the filter saved in AJCore's settings (blank = every message).
+	 */
+	public static function mailbox_filter( $filter, $source ) {
+		if ( null !== $filter ) {
+			return $filter;
+		}
+		if ( 'zoho' === $source ) {
+			return array( 'subject' => array( 'Congratulations' ), 'sender' => array( 'sosnc.gov' ), 'any' => array(), 'advanced' => '', 'match' => 'all' );
+		}
+		return array( 'subject' => array( 'Congratulations' ), 'sender' => array(), 'any' => array(), 'advanced' => '', 'match' => 'all' );
 	}
 
 	private static function entity_suffix() {
@@ -55,6 +74,10 @@ class AJCore_RA_Gmail_Rules {
 
 	/** Lines for the Mailroom "Filters & rules" panel, describing the rules in this class. */
 	public static function rules_summary( $sections ) {
+		$sections[] = array( 'title' => __( 'Mailbox filter set by AJCore-RA', 'ajcore-ra' ), 'items' => array(
+			__( 'Zoho: subject has "Congratulations" AND sender has "sosnc.gov".', 'ajcore-ra' ),
+			__( 'Gmail (forwards): subject has "Congratulations".', 'ajcore-ra' ),
+		) );
 		$sections[] = array( 'title' => __( 'Company name (AJCore-RA)', 'ajcore-ra' ), 'items' => array(
 			__( 'Subject: "Filing: {name} (…" or "Filing: {name}", or "… for {name}" ending in LLC / Inc / Corp / LLP / LP / PLLC / PLC / Co.', 'ajcore-ra' ),
 			__( 'Body fallback: "Document Filed: … for {name}" (the approval email has no company in its subject).', 'ajcore-ra' ),
