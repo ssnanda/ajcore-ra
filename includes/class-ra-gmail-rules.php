@@ -18,6 +18,57 @@ class AJCore_RA_Gmail_Rules {
 		add_filter( 'ajcore_gmail_intake_classify_text', array( __CLASS__, 'classify_text' ), 10, 3 );
 		add_filter( 'ajcore_gmail_intake_filename_labels', array( __CLASS__, 'filename_labels' ) );
 		add_filter( 'ajcore_gmail_intake_default_address', array( __CLASS__, 'default_address' ) );
+		add_filter( 'ajcore_gmail_intake_company_name', array( __CLASS__, 'company_name' ), 10, 3 );
+		add_filter( 'ajcore_gmail_intake_rules_summary', array( __CLASS__, 'rules_summary' ) );
+	}
+
+	private static function entity_suffix() {
+		return '(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Corporation|LLP|L\.L\.P\.|LP|PLLC|PLC|Co\.)';
+	}
+
+	/**
+	 * Company a NC SOS notice is about. Subject first ("Filing: {name} (", "Filing: {name}", "... for {name}<suffix>", or the
+	 * whole subject when it ends in a suffix), then the body: the approval template's subject is a generic "Congratulations"
+	 * and the name only appears as "Document Filed: ARTICLES OF ORGANIZATIONfor {name}" (no space before "for").
+	 */
+	public static function company_name( $name, $subject, $body_text ) {
+		if ( '' !== trim( (string) $name ) ) {
+			return $name;
+		}
+		$subject = trim( (string) $subject );
+		$suffix  = self::entity_suffix();
+		if ( preg_match( '/Filing:\s*(.+?)\s*\(/i', $subject, $m ) || preg_match( '/Filing:\s*(.+)$/i', $subject, $m ) ) {
+			return trim( $m[1] );
+		}
+		if ( preg_match( '/\bfor\s+([A-Z0-9][A-Za-z0-9&,.\'\-\s]*?\s*' . $suffix . ')\b/i', $subject, $m ) || preg_match( '/^([A-Z0-9][A-Za-z0-9&,.\'\-\s]*?\s*' . $suffix . ')$/i', $subject, $m ) ) {
+			return trim( $m[1] );
+		}
+		$body_text = (string) $body_text;
+		if ( '' === trim( $body_text ) ) {
+			return '';
+		}
+		if ( preg_match( '/Document Filed:\s*.*?for\s+([A-Z0-9][A-Za-z0-9&,.\'\-\s]*?\s*' . $suffix . ')\b/is', $body_text, $m ) || preg_match( '/for\s+([A-Z0-9][A-Za-z0-9&,.\'\-\s]*?\s*' . $suffix . ')\b/i', $body_text, $m ) ) {
+			return trim( preg_replace( '/\s+/', ' ', $m[1] ) );
+		}
+		return '';
+	}
+
+	/** Lines for the Mailroom "Filters & rules" panel, describing the rules in this class. */
+	public static function rules_summary( $sections ) {
+		$sections[] = array( 'title' => __( 'Company name (AJCore-RA)', 'ajcore-ra' ), 'items' => array(
+			__( 'Subject: "Filing: {name} (…" or "Filing: {name}", or "… for {name}" ending in LLC / Inc / Corp / LLP / LP / PLLC / PLC / Co.', 'ajcore-ra' ),
+			__( 'Body fallback: "Document Filed: … for {name}" (the approval email has no company in its subject).', 'ajcore-ra' ),
+		) );
+		$sections[] = array( 'title' => __( 'Which PDFs count as filing documents (AJCore-RA)', 'ajcore-ra' ), 'items' => array(
+			__( 'Filename contains: articles, certificate, ein, notice, filing, annual-report, order, letter, statement, formation, authority, organization, dissolution, amendment, reinstatement or application.', 'ajcore-ra' ),
+		) );
+		$sections[] = array( 'title' => __( 'Classification, from the PDF text, then subject, then body (AJCore-RA)', 'ajcore-ra' ), 'items' => array(
+			__( 'Application for Certificate of Authority → "COA Application of {name}"; Articles of Incorporation → "AOI of {name}"; Certificate of Authority → "COA of {name}"; all in Formation Documents.', 'ajcore-ra' ),
+			__( 'Articles of Organization → "AOO of {name}" in Formation Documents.', 'ajcore-ra' ),
+			__( 'Change of Registered Office and/or Registered Agent → "RA Change Confirmation - {name}" in Change of RA.', 'ajcore-ra' ),
+			__( 'Rural Rise, Misleading Mailings, Notice to Employers → SOSNC Flyers: managed under Shared flyers (Files), never filed from mail.', 'ajcore-ra' ),
+		) );
+		return $sections;
 	}
 
 	public static function default_address( $address ) {
