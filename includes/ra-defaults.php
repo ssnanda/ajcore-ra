@@ -69,6 +69,17 @@ add_filter( 'ajcore_ops_counts', function ( $counts ) {
 add_filter( 'ajcore_ops_modules', function ( $modules ) {
 	return array_merge( (array) $modules, array( 'partners', 'compliance', 'websites', 'business-profiles', 'mail', 'esign', 'rentec', 'cmra', 'reception', 'leases', 'guest-log' ) );
 } );
+// Postal Mail belongs to AJ Core RA: its staff-access section and its /ops/mail route mapping are added here, not in AJ Core.
+add_filter( 'ajcore_ops_sections', function ( $sections ) {
+	$sections         = (array) $sections;
+	$sections['mail'] = 'Postal Mail';
+	return $sections;
+} );
+add_filter( 'ajcore_ops_route_sections', function ( $map ) {
+	$map         = (array) $map;
+	$map['mail'] = 'mail';
+	return $map;
+} );
 add_filter( 'ajcore_portal_menu_default_items', 'ajcore_ra_portal_menu_compliance_on', 20 );
 add_filter( 'ajcore_partner_site_domain', 'ajcore_ra_partner_site_domain', 10, 2 );
 add_filter( 'ajcore_reservation_location', 'ajcore_ra_reservation_location' );

@@ -1,6 +1,6 @@
 <?php
 /**
- * Gmail Intake filing rules for NC Secretary of State mail (the part of Gmail Intake that stays in AJCore-RA).
+ * Pipeline filing rules for NC Secretary of State mail (the part of Pipeline that stays in AJCore-RA).
  *
  * AJCore owns the mailbox, OAuth, log and filing machinery; this class answers its 'ajcore_gmail_intake_*'
  * filters with the document-type keywords, rename prefixes, categories and flyer handling.

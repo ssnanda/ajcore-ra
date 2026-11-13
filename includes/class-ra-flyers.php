@@ -2,7 +2,7 @@
 /**
  * Shared SOSNC flyers (one shared file per flyer, auto-shared with Registered Agent / ncllcagents.com customers).
  *
- * Split out of Gmail Intake when that moved back to AJCore: the /ajcore/v1/gmail-intake/flyers* URLs, the daily
+ * Split out of Pipeline when that moved back to AJCore: the /ajcore/v1/gmail-intake/flyers* URLs, the daily
  * cron hook (ajcore_ra_flyers_auto_share) and the one-time "Articles of Organization" fold are unchanged. The card
  * is drawn on AJCore's Files tab through the 'ajcore_file_library_before_list' action.
  */
@@ -109,7 +109,7 @@ class AJCore_RA_Flyers {
 		return $this->kit['portal_table']( 'aj_portal_stripe_customers' );
 	}
 
-	/** The Shared flyers card (own collapsible section on the Gmail Intake tab). */
+	/** The Shared flyers card (own collapsible section on the Pipeline tab). */
 	public function render_flyers_card() {
 		?>
 		<div class="ajcore-gi-flyers" style="padding:4px 0;max-width:760px;">
