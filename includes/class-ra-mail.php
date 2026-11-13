@@ -91,7 +91,7 @@ class AJCore_RA_Mail {
 	// ── Client Portal admin tab ─────────────────────────────────────────────────
 
 	public static function admin_tab( $tabs ) {
-		$tabs[ self::TAB ] = array( 'label' => __( 'Mail', 'ajcore-ra' ) );
+		$tabs[ self::TAB ] = array( 'label' => __( 'Physical Mail', 'ajcore-ra' ) );
 		return $tabs;
 	}
 
@@ -991,7 +991,7 @@ class AJCore_RA_Mail {
 		<div class="ajforms-settings-card">
 			<div class="ajcore-section-head">
 				<div>
-					<h2><?php esc_html_e( 'Mail', 'ajcore-ra' ); ?></h2>
+					<h2><?php esc_html_e( 'Physical Mail', 'ajcore-ra' ); ?></h2>
 					<p><?php esc_html_e( 'Physical mail / service-of-process intake log — the same data as the AJOps Mail screen.', 'ajcore-ra' ); ?></p>
 				</div>
 			</div>
