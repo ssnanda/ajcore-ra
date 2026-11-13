@@ -496,18 +496,19 @@ class AJCore_RA_Purchases {
 			$parsed = json_decode( (string) $e->parsed, true );
 			$parsed = is_array( $parsed ) ? $parsed : array();
 			$cls    = isset( $parsed['classify'] ) && is_array( $parsed['classify'] ) ? $parsed['classify'] : self::classify( (string) $e->sender, (string) $e->subject );
-			if ( ! in_array( $cls['kind'], array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) && empty( $parsed['body'] ) ) {
+			if ( ! in_array( $cls['kind'], array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) ) {
 				$body = '';
-			} elseif ( isset( $parsed['body'] ) && '' !== $parsed['body'] ) {
-				$body = (string) $parsed['body'];
+			} elseif ( array_key_exists( 'body_debug', $parsed ) ) {
+				$body = (string) ( $parsed['body'] ?? '' );
 			} elseif ( $fetched < $max_fetch && $zoho ) {
 				$m = $zoho->intake_message( (string) $e->message_id, $mailbox );
 				$fetched++;
 				if ( is_wp_error( $m ) ) {
 					continue;
 				}
-				$body           = (string) $m['body_text'];
-				$parsed['body'] = mb_substr( $body, 0, 8000 );
+				$body                 = (string) $m['body_text'];
+				$parsed['body']       = mb_substr( $body, 0, 8000 );
+				$parsed['body_debug'] = (string) ( $m['body_debug'] ?? '' );
 			} else {
 				$left++;
 				continue;
@@ -546,6 +547,7 @@ class AJCore_RA_Purchases {
 		$cls  = self::classify( $row['from_email'] ? $row['from_email'] : $row['from_name'], $row['subject'] );
 		$body = '';
 		$ts   = null;
+		$bdbg = '';
 		if ( in_array( $cls['kind'], array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) ) {
 			$m = $zoho->intake_message( $row['message_id'], $mailbox );
 			if ( is_wp_error( $m ) ) {
@@ -553,6 +555,7 @@ class AJCore_RA_Purchases {
 			}
 			$body = (string) $m['body_text'];
 			$ts   = $m['date_ts'];
+			$bdbg = (string) ( $m['body_debug'] ?? '' );
 		}
 		$fields = self::extract( $cls['kind'], $row['subject'], $body );
 		$when   = $ts ? gmdate( 'Y-m-d H:i:s', $ts ) : ( '' !== (string) $row['received_at'] ? $row['received_at'] : current_time( 'mysql', true ) );
@@ -568,7 +571,7 @@ class AJCore_RA_Purchases {
 			'subject'     => mb_substr( (string) $row['subject'], 0, 500 ),
 			'sender'      => mb_substr( trim( $row['from_name'] . ' <' . $row['from_email'] . '>' ), 0, 255 ),
 			'received_at' => $when,
-			'parsed'      => wp_json_encode( array( 'classify' => $cls, 'fields' => $fields, 'body' => mb_substr( $body, 0, 8000 ) ) ),
+			'parsed'      => wp_json_encode( array( 'classify' => $cls, 'fields' => $fields, 'body' => mb_substr( $body, 0, 8000 ), 'body_debug' => isset( $bdbg ) ? $bdbg : '' ) ),
 			'created_at'  => current_time( 'mysql' ),
 		) );
 		return $order_id;
@@ -821,14 +824,15 @@ class AJCore_RA_Purchases {
 		foreach ( $emails as $e ) {
 			$parsed = json_decode( (string) $e->parsed, true );
 			$parsed = is_array( $parsed ) ? $parsed : array();
-			if ( ! empty( $parsed['body'] ) || ! $zoho || '' === $mailbox ) {
+			if ( array_key_exists( 'body_debug', $parsed ) || ! $zoho || '' === $mailbox ) { // already fetched with the full-body code
 				continue;
 			}
 			$m = $zoho->intake_message( (string) $e->message_id, $mailbox );
 			if ( is_wp_error( $m ) ) {
 				continue;
 			}
-			$parsed['body'] = mb_substr( (string) $m['body_text'], 0, 8000 );
+			$parsed['body']       = mb_substr( (string) $m['body_text'], 0, 8000 );
+			$parsed['body_debug'] = (string) ( $m['body_debug'] ?? '' );
 			$e->parsed      = wp_json_encode( $parsed );
 			$pdb->update( $this->table( 'aj_purchase_emails' ), array( 'parsed' => $e->parsed ), array( 'id' => (int) $e->id ) );
 		}
@@ -1156,7 +1160,7 @@ class AJCore_RA_Purchases {
 					var cl = el( 'button', 'button-link', 'Close' ); cl.type = 'button'; cl.style.marginLeft = '12px'; cl.addEventListener( 'click', function () { $( 'ajra-pu-detail' ).hidden = true; } ); bar.appendChild( cl ); box.appendChild( bar );
 					box.appendChild( el( 'h4', null, 'Emails (' + d.emails.length + ')' ) );
 					var ul = el( 'ul' ); ul.style.cssText = 'margin:0;padding-left:16px;list-style:disc;font-size:12px;';
-					d.emails.forEach( function ( e ) { var li = el( 'li', null, day( e.received_at ) + ' · ' + e.kind + ' · ' + e.subject ); var tx = e.parsed && e.parsed.body ? e.parsed.body : ''; if ( tx ) { var dt = el( 'details' ); dt.open = true; dt.appendChild( el( 'summary', null, 'Email' ) ); var pre = el( 'pre', null, tx ); pre.style.cssText = 'max-height:360px;overflow:auto;white-space:pre-wrap;font-size:11px;background:#f8fafc;padding:8px;border-radius:6px;'; dt.appendChild( pre ); li.appendChild( dt ); } ul.appendChild( li ); } ); box.appendChild( ul );
+					d.emails.forEach( function ( e ) { var li = el( 'li', null, day( e.received_at ) + ' · ' + e.kind + ' · ' + e.subject ); var tx = e.parsed && e.parsed.body ? e.parsed.body : ''; if ( e.parsed && e.parsed.body_debug ) { var wn = el( 'div', null, 'Only the preview could be read: ' + e.parsed.body_debug ); wn.style.cssText = 'color:#b45309;font-size:11px;margin:4px 0;'; li.appendChild( wn ); } if ( tx ) { var dt = el( 'details' ); dt.open = true; dt.appendChild( el( 'summary', null, 'Email' ) ); var pre = el( 'pre', null, tx ); pre.style.cssText = 'max-height:360px;overflow:auto;white-space:pre-wrap;font-size:11px;background:#f8fafc;padding:8px;border-radius:6px;'; dt.appendChild( pre ); li.appendChild( dt ); } ul.appendChild( li ); } ); box.appendChild( ul );
 					$( 'ajra-pu-detail' ).hidden = false;
 				} ).catch( function ( e ) { alert( e.message ); } );
 			}

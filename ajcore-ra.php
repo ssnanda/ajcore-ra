@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       AJ Core RA
  * Description:       Registered Agent (NC LLC Agents) extension for AJ Core. Requires the AJ Core plugin.
- * Version:           0.1.113
+ * Version:           0.1.114
  * Requires PHP:      7.4
  * Author:            IT Spector LLC
  * Author URI:        https://itspector.com
@@ -15,7 +15,7 @@ if ( ! defined( 'WPINC' ) ) {
 	die;
 }
 
-define( 'AJCORE_RA_VERSION', '0.1.113' );
+define( 'AJCORE_RA_VERSION', '0.1.114' );
 define( 'AJCORE_RA_MIN_EXTENSION_API', 26 );
 define( 'AJCORE_RA_BASENAME', plugin_basename( __FILE__ ) );
 
@@ -47,6 +47,7 @@ require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-reception.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-pipeline-rules.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-flyers.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-purchases.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-mail-pipelines.php';
 AJCore_RA_Compliance_Schema::init();
 register_activation_hook( __FILE__, array( 'AJCore_RA_Compliance_Schema', 'activate' ) );
 
@@ -85,6 +86,7 @@ function ajcore_ra_boot() {
 	AJCore_RA_Pipeline_Rules::init();
 	AJCore_RA_Flyers::init();
 	AJCore_RA_Purchases::init();
+	AJCore_RA_Mail_Pipelines::init();
 	add_filter( 'ajcore_endpoint_catalog', 'ajcore_ra_endpoint_catalog' );
 }
 add_action( 'plugins_loaded', 'ajcore_ra_boot', 20 );
