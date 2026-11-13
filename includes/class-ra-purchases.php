@@ -869,8 +869,16 @@ class AJCore_RA_Purchases {
 			return new WP_Error( 'no_zoho', __( 'Zoho is not available.', 'ajcore-ra' ), array( 'status' => 503 ) );
 		}
 		$mailbox = strtolower( sanitize_email( (string) $request->get_param( 'mailbox' ) ) );
-		$labels  = $zoho->list_labels( $mailbox );
-		return is_wp_error( $labels ) ? $labels : rest_ensure_response( array( 'labels' => $labels ) );
+		if ( '' === $mailbox ) {
+			return new WP_Error( 'no_mailbox', __( 'Enter the shared mailbox address first.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$raw    = null;
+		$labels = $zoho->list_labels( $mailbox, $raw );
+		if ( is_wp_error( $labels ) ) {
+			return new WP_Error( $labels->get_error_code(), $labels->get_error_message(), array( 'status' => 502 ) );
+		}
+		// Empty list: include a snippet of what Zoho actually returned so the shape can be checked.
+		return rest_ensure_response( array( 'labels' => $labels, 'debug' => $labels ? '' : substr( (string) wp_json_encode( $raw ), 0, 400 ) ) );
 	}
 
 	// ── WP admin view (inside the Pipeline tab) ─────────────────────────────────
@@ -994,24 +1002,40 @@ class AJCore_RA_Purchases {
 				[ [ 'Total spent', money( s.total_spent ) ], [ 'This month', money( s.this_month ) ], [ 'Orders', String( total ) ], [ 'No property', String( s.unassigned ) ] ].forEach( function ( x ) {
 					var chip = el( 'span', 'ajmr-fchip' ); chip.appendChild( el( 'b', null, x[ 0 ] ) ); chip.appendChild( document.createTextNode( ' ' + x[ 1 ] ) ); chips.appendChild( chip );
 				} );
-				if ( data.last_run && data.last_run.at ) { chips.appendChild( el( 'span', 'ajmr-fnote', 'Last pass ' + data.last_run.at + ' · ' + data.last_run[ 'new' ] + ' new' ) ); }
+				if ( data.last_run && typeof data.last_run.at === 'string' ) { chips.appendChild( el( 'span', 'ajmr-fnote', 'Last pass ' + data.last_run.at + ' · ' + data.last_run[ 'new' ] + ' new' ) ); }
 
 				fillSelect( 'ajra-pu-property', data.by_property.map( function ( p ) { return p.property; } ).filter( function ( p ) { return p !== '(no property)'; } ), st.property, 'All properties' );
 				fillSelect( 'ajra-pu-vendor', data.vendors, st.vendor, 'All vendors' );
 
 				var tb = $( 'ajra-pu-table' ).querySelector( 'tbody' ); tb.innerHTML = '';
 				if ( ! data.orders.length ) { var r0 = el( 'tr' ), c0 = el( 'td', null, 'No orders match.' ); c0.colSpan = 7; r0.appendChild( c0 ); tb.appendChild( r0 ); }
-				data.orders.forEach( function ( o ) {
-					var tr = el( 'tr' ); tr.style.cursor = 'pointer';
-					var td = el( 'td' ); td.addEventListener( 'click', function ( e ) { e.stopPropagation(); } );
-					var cb = el( 'input' ); cb.type = 'checkbox'; cb.checked = !! selected[ o.id ]; cb.addEventListener( 'change', function () { if ( cb.checked ) { selected[ o.id ] = true; } else { delete selected[ o.id ]; } syncBulk(); } ); td.appendChild( cb ); tr.appendChild( td );
-					tr.appendChild( el( 'td', null, day( o.order_date ) ) ); tr.appendChild( el( 'td', null, o.vendor ) );
-					var ord = el( 'td' ); ord.appendChild( el( 'strong', null, o.order_no || o.invoice_no || '—' ) ); if ( o.order_no && o.invoice_no ) { ord.appendChild( el( 'div', 'description', 'Invoice ' + o.invoice_no ) ); } tr.appendChild( ord );
-					tr.appendChild( el( 'td', null, o.property_name || o.property_tag || '—' ) );
-					var tot = el( 'td', null, money( o.total ) ); tot.style.textAlign = 'right'; tr.appendChild( tot );
-					var stg = el( 'td' ); stg.appendChild( el( 'span', 'ajcore-status-pill ' + ( o.stage === 'new' ? '' : ( o.stage === 'ignored' ? 'dup' : 'active' ) ), LABEL[ o.stage ] || o.stage ) ); tr.appendChild( stg );
-					tr.addEventListener( 'click', function () { openDetail( o.id ); } );
-					tb.appendChild( tr );
+				// Date first (newest day on top), then each order of that day with all of its emails nested under it.
+				var days = [], byDay = {};
+				data.orders.forEach( function ( o ) { var k = ( o.order_date || '' ).slice( 0, 10 ) || '—'; if ( ! byDay[ k ] ) { byDay[ k ] = []; days.push( k ); } byDay[ k ].push( o ); } );
+				days.sort().reverse();
+				days.forEach( function ( k ) {
+					var list = byDay[ k ], sum = list.reduce( function ( a, o ) { return a + ( Number( o.total ) || 0 ); }, 0 );
+					var hr = el( 'tr', 'ajra-pu-day' ), hc = el( 'td', null, day( k + ' 00:00:00' ) + '  ·  ' + list.length + ( list.length === 1 ? ' order' : ' orders' ) + '  ·  ' + money( sum ) ); hc.colSpan = 7; hr.appendChild( hc ); tb.appendChild( hr );
+					list.forEach( function ( o ) {
+						var tr = el( 'tr' ); tr.style.cursor = 'pointer';
+						var td = el( 'td' ); td.addEventListener( 'click', function ( e ) { e.stopPropagation(); } );
+						var cb = el( 'input' ); cb.type = 'checkbox'; cb.checked = !! selected[ o.id ]; cb.addEventListener( 'change', function () { if ( cb.checked ) { selected[ o.id ] = true; } else { delete selected[ o.id ]; } syncBulk(); } ); td.appendChild( cb ); tr.appendChild( td );
+						tr.appendChild( el( 'td', null, ( o.emails || [] ).length + ( ( o.emails || [] ).length === 1 ? ' email' : ' emails' ) ) ); tr.appendChild( el( 'td', null, o.vendor ) );
+						var ord = el( 'td' ); ord.appendChild( el( 'strong', null, o.order_no || o.invoice_no || '—' ) ); if ( o.order_no && o.invoice_no ) { ord.appendChild( el( 'div', 'description', 'Invoice ' + o.invoice_no ) ); } tr.appendChild( ord );
+						tr.appendChild( el( 'td', null, o.property_name || o.property_tag || '—' ) );
+						var tot = el( 'td', null, money( o.total ) ); tot.style.textAlign = 'right'; tr.appendChild( tot );
+						var stg = el( 'td' ); stg.appendChild( el( 'span', 'ajcore-status-pill ' + ( o.stage === 'new' ? '' : ( o.stage === 'ignored' ? 'dup' : 'active' ) ), LABEL[ o.stage ] || o.stage ) ); tr.appendChild( stg );
+						tr.addEventListener( 'click', function () { openDetail( o.id ); } );
+						tb.appendChild( tr );
+						( o.emails || [] ).forEach( function ( m ) {
+							var er = el( 'tr', 'ajra-pu-mail' ); er.appendChild( el( 'td' ) );
+							var tm = el( 'td', null, ( m.received_at || '' ).slice( 11, 16 ) ); er.appendChild( tm );
+							er.appendChild( el( 'td', null, m.kind ) );
+							var sj = el( 'td', null, m.subject ); sj.colSpan = 3; er.appendChild( sj );
+							er.appendChild( el( 'td', null, ( m.sender || '' ).replace( /<.*$/, '' ) ) );
+							tb.appendChild( er );
+						} );
+					} );
 				} );
 				fillSummary( 'ajra-pu-byprop', data.by_property.map( function ( p ) { return [ p.property, p.orders, p.total ]; } ), function ( name ) { st.property = name === '(no property)' ? '' : name; load(); } );
 				fillSummary( 'ajra-pu-bymonth', data.by_month.map( function ( m ) { return [ m.month, m.orders, m.total ]; } ) );
@@ -1072,6 +1096,7 @@ class AJCore_RA_Purchases {
 				post( '/ops/purchases/stage', { ids: ids, stage: b.getAttribute( 'data-stage' ) } ).then( function () { selected = {}; load(); } ).catch( function ( e ) { alert( e.message ); } );
 			} ); } );
 			$( 'ajra-pu-run' ).addEventListener( 'click', function () {
+				if ( ! data || ! data.mailbox ) { $( 'ajra-pu-status' ).textContent = 'Mailbox not saved yet: enter shop@… in the gear panel and click Save, then Read mailbox.'; $( 'ajra-pu-settings' ).hidden = false; return; }
 				var b = $( 'ajra-pu-run' ); b.disabled = true; $( 'ajra-pu-status' ).textContent = 'Reading the mailbox…';
 				post( '/ops/purchases/process', {} ).then( function ( d ) { $( 'ajra-pu-status' ).textContent = d.new + ' new, ' + d.scanned + ' scanned' + ( d.complete ? ' (whole mailbox read)' : ' (more to read: click Read mailbox again)' ) + ( d.errors && d.errors.length ? ' · ' + d.errors.join( ' | ' ) : '' ); b.disabled = false; load(); } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; b.disabled = false; } );
 			} );
@@ -1088,7 +1113,7 @@ class AJCore_RA_Purchases {
 				api( '/ops/purchases/labels?mailbox=' + encodeURIComponent( $( 'ajra-pu-mailbox' ).value ) ).then( function ( d ) {
 					list.innerHTML = '';
 					d.labels.forEach( function ( l ) { var w = el( 'label' ); w.style.cssText = 'display:inline-block;margin-right:12px;'; var cb = el( 'input' ); cb.type = 'checkbox'; cb.name = 'labels[]'; cb.value = l.id; cb.checked = !! checked[ l.id ]; w.appendChild( cb ); w.appendChild( document.createTextNode( ' ' + l.name ) ); list.appendChild( w ); } );
-					if ( ! d.labels.length ) { list.textContent = 'No labels in this mailbox.'; }
+					if ( ! d.labels.length ) { list.textContent = 'No labels returned. Zoho said: ' + ( d.debug || '(empty)' ); }
 				} ).catch( function ( e ) { list.textContent = e.message; } );
 			} );
 			load();
