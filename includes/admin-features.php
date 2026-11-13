@@ -39,18 +39,19 @@ function ajcore_ra_features() {
 		),
 		'Mail & documents'   => array(
 			'Mail items and mail routes'                    => array( 'moved' ),
-			'Gmail Intake (rules, Formation Documents, COA)' => array( 'moved' ),
+			'Gmail Intake filing rules (Formation Documents, COA, RA change)' => array( 'moved', 'Gmail Intake itself is back in AJCore; RA supplies the rules through filters' ),
 			'Customer flyers (shared copy, auto-share)'     => array( 'moved' ),
 			'E-Signatures (BreezeDoc): templates, PDF upload, webhooks' => array( 'moved' ),
 		),
 		'Integrations'       => array(
 			'Rentec Direct (API, settings, screens, write forms)' => array( 'moved' ),
-			'Zoho Mail (shared inbox)'                      => array( 'moved', 'Not working yet; ready for when Zoho\'s API change lands' ),
 		),
 		'Stays in AJCore'    => array(
 			'Service requests'                              => array( 'core', 'Becomes the generic Requests workflow engine' ),
 			'Accounting catalog (charge/payment categories)' => array( 'core', 'Used by Products & Services' ),
 			'Zoho Calendar and Reservations'                => array( 'core', 'Decided: stays in AJCore' ),
+			'Zoho Mail (shared inbox)'                      => array( 'core', 'Back in AJCore (API 25). Not working yet; ready for when Zoho\'s API change lands' ),
+			'Gmail Intake (mailbox, OAuth, log, filing)'    => array( 'core', 'Back in AJCore (API 25); rules stay in RA' ),
 			'AJPhone (phone integration)'                   => array( 'core', 'Generic; every business can use it' ),
 			'Leads, customers, payments, portal, files'     => array( 'core' ),
 		),

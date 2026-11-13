@@ -60,11 +60,6 @@ add_filter( 'ajcore_ops_counts', function ( $counts ) {
 		if ( isset( $esign['waiting'] ) ) {
 			$counts['esign'] = $row( $esign['waiting'], 'Waiting for signature', true );
 		}
-		$gmail = $call( '/ops/gmail-intake', array( 'per_page' => 1 ) );
-		if ( isset( $gmail['stats'] ) ) {
-			$st = (array) $gmail['stats'];
-			$counts['gmail-intake'] = $row( (int) ( $st['needs_review'] ?? 0 ) + (int) ( $st['matched_pending_file'] ?? 0 ) + (int) ( $st['skipped_no_attachment'] ?? 0 ), 'Needs review', true );
-		}
 	} catch ( \Throwable $e ) {
 		// Counts are optional; never break the menu over them.
 	}
@@ -72,7 +67,7 @@ add_filter( 'ajcore_ops_counts', function ( $counts ) {
 } );
 // AJOps menu items AJ Core RA provides (AJ Core lists its own).
 add_filter( 'ajcore_ops_modules', function ( $modules ) {
-	return array_merge( (array) $modules, array( 'partners', 'compliance', 'websites', 'business-profiles', 'mail', 'gmail-intake', 'esign', 'rentec', 'cmra', 'reception', 'leases', 'guest-log' ) );
+	return array_merge( (array) $modules, array( 'partners', 'compliance', 'websites', 'business-profiles', 'mail', 'esign', 'rentec', 'cmra', 'reception', 'leases', 'guest-log' ) );
 } );
 add_filter( 'ajcore_portal_menu_default_items', 'ajcore_ra_portal_menu_compliance_on', 20 );
 add_filter( 'ajcore_partner_site_domain', 'ajcore_ra_partner_site_domain', 10, 2 );
