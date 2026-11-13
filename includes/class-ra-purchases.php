@@ -474,6 +474,64 @@ class AJCore_RA_Purchases {
 		return $summary;
 	}
 
+	/**
+	 * Re-runs the field extraction on emails already read (after the parser was improved), for orders still in "new".
+	 * Uses the stored email text; emails read before the text was kept are fetched again (up to $max_fetch per call).
+	 * Orders left without any email afterwards (their key changed) are removed.
+	 */
+	public function reparse( $max_fetch = 25 ) {
+		if ( ! $this->ensure_tables() ) {
+			return new WP_Error( 'no_table', __( 'Purchases tables could not be created.', 'ajcore-ra' ) );
+		}
+		$pdb     = $this->pdb();
+		$emails  = $this->table( 'aj_purchase_emails' );
+		$orders  = $this->table( 'aj_purchase_orders' );
+		$rows    = (array) $pdb->get_results( "SELECT e.* FROM `{$emails}` e JOIN `{$orders}` o ON o.id = e.order_id WHERE o.stage = 'new' ORDER BY e.id ASC" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$zoho    = $this->zoho();
+		$mailbox = $this->settings()['mailbox'];
+		$done    = 0;
+		$fetched = 0;
+		$left    = 0;
+		foreach ( $rows as $e ) {
+			$parsed = json_decode( (string) $e->parsed, true );
+			$parsed = is_array( $parsed ) ? $parsed : array();
+			$cls    = isset( $parsed['classify'] ) && is_array( $parsed['classify'] ) ? $parsed['classify'] : self::classify( (string) $e->sender, (string) $e->subject );
+			if ( ! in_array( $cls['kind'], array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) && empty( $parsed['body'] ) ) {
+				$body = '';
+			} elseif ( isset( $parsed['body'] ) && '' !== $parsed['body'] ) {
+				$body = (string) $parsed['body'];
+			} elseif ( $fetched < $max_fetch && $zoho ) {
+				$m = $zoho->intake_message( (string) $e->message_id, $mailbox );
+				$fetched++;
+				if ( is_wp_error( $m ) ) {
+					continue;
+				}
+				$body           = (string) $m['body_text'];
+				$parsed['body'] = mb_substr( $body, 0, 8000 );
+			} else {
+				$left++;
+				continue;
+			}
+			$fields = self::extract( $cls['kind'], (string) $e->subject, $body );
+			$parsed['classify'] = $cls;
+			$parsed['fields']   = $fields;
+			$row                = array( 'message_id' => (string) $e->message_id, 'subject' => (string) $e->subject, 'from_name' => '', 'from_email' => '', 'received_at' => (string) $e->received_at );
+			$oid                = $this->upsert_order( $cls, $fields, (string) $e->received_at, $row );
+			if ( $oid ) {
+				$pdb->update( $emails, array( 'order_id' => $oid, 'parsed' => wp_json_encode( $parsed ) ), array( 'id' => (int) $e->id ) );
+				$done++;
+			}
+		}
+		// Orders in "new" that no longer have an email (merged into another order).
+		$pdb->query( "DELETE o FROM `{$orders}` o LEFT JOIN `{$emails}` e ON e.order_id = o.id WHERE o.stage = 'new' AND e.id IS NULL" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		return array( 'reparsed' => $done, 'fetched' => $fetched, 'remaining' => $left );
+	}
+
+	public function rest_reparse() {
+		$r = $this->reparse();
+		return is_wp_error( $r ) ? $r : rest_ensure_response( $r );
+	}
+
 	public static function cron_pass() {
 		$self = self::instance();
 		$s    = $self->settings();
@@ -510,7 +568,7 @@ class AJCore_RA_Purchases {
 			'subject'     => mb_substr( (string) $row['subject'], 0, 500 ),
 			'sender'      => mb_substr( trim( $row['from_name'] . ' <' . $row['from_email'] . '>' ), 0, 255 ),
 			'received_at' => $when,
-			'parsed'      => wp_json_encode( array( 'classify' => $cls, 'fields' => $fields ) ),
+			'parsed'      => wp_json_encode( array( 'classify' => $cls, 'fields' => $fields, 'body' => mb_substr( $body, 0, 8000 ) ) ),
 			'created_at'  => current_time( 'mysql' ),
 		) );
 		return $order_id;
@@ -592,6 +650,7 @@ class AJCore_RA_Purchases {
 		$ns  = AJCore_Extensions::rest_namespace();
 		$ops = array( 'AJCore_Extensions', 'can_manage_ops' );
 		register_rest_route( $ns, '/ops/purchases', array( 'methods' => 'GET', 'callback' => array( $this, 'rest_list' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/purchases/reparse', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_reparse' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/process', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_process' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/stage', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_stage' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/properties', array( 'methods' => 'GET', 'callback' => array( $this, 'rest_properties' ), 'permission_callback' => $ops ) );
@@ -755,7 +814,24 @@ class AJCore_RA_Purchases {
 		if ( ! $row ) {
 			return new WP_Error( 'not_found', __( 'Order not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
-		$emails = (array) $pdb->get_results( $pdb->prepare( "SELECT message_id, kind, subject, sender, received_at, parsed FROM `{$this->table( 'aj_purchase_emails' )}` WHERE order_id = %d ORDER BY received_at ASC", (int) $row->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$emails = (array) $pdb->get_results( $pdb->prepare( "SELECT id, message_id, kind, subject, sender, received_at, parsed FROM `{$this->table( 'aj_purchase_emails' )}` WHERE order_id = %d ORDER BY received_at ASC", (int) $row->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		// Opening an order shows its emails: fetch (and keep) the text of any email whose body was not stored yet.
+		$zoho    = $this->zoho();
+		$mailbox = $this->settings()['mailbox'];
+		foreach ( $emails as $e ) {
+			$parsed = json_decode( (string) $e->parsed, true );
+			$parsed = is_array( $parsed ) ? $parsed : array();
+			if ( ! empty( $parsed['body'] ) || ! $zoho || '' === $mailbox ) {
+				continue;
+			}
+			$m = $zoho->intake_message( (string) $e->message_id, $mailbox );
+			if ( is_wp_error( $m ) ) {
+				continue;
+			}
+			$parsed['body'] = mb_substr( (string) $m['body_text'], 0, 8000 );
+			$e->parsed      = wp_json_encode( $parsed );
+			$pdb->update( $this->table( 'aj_purchase_emails' ), array( 'parsed' => $e->parsed ), array( 'id' => (int) $e->id ) );
+		}
 		return rest_ensure_response( array(
 			'order'  => $this->row_out( $row ),
 			'emails' => array_map( static function ( $e ) {
@@ -906,6 +982,7 @@ class AJCore_RA_Purchases {
 				<select id="ajra-pu-vendor" class="ajmr-tile ajmr-select"><option value=""><?php esc_html_e( 'All vendors', 'ajcore-ra' ); ?></option></select>
 				<button type="button" class="ajmr-tile ajmr-tool" id="ajra-pu-clear"><span><?php esc_html_e( 'Clear', 'ajcore-ra' ); ?></span></button>
 				<button type="button" class="ajmr-tile ajmr-tool" id="ajra-pu-run"><span><?php esc_html_e( 'Read mailbox', 'ajcore-ra' ); ?></span></button>
+				<button type="button" class="ajmr-tile ajmr-tool" id="ajra-pu-reparse"><span><?php esc_html_e( 'Re-parse', 'ajcore-ra' ); ?></span></button>
 				<button type="button" class="ajmr-tile ajmr-tool" id="ajra-pu-csv"><span><?php esc_html_e( 'Export CSV', 'ajcore-ra' ); ?></span></button>
 			</div>
 			<div class="ajmr-filters"><span class="ajmr-fnote" id="ajra-pu-status"></span></div>
@@ -975,7 +1052,7 @@ class AJCore_RA_Purchases {
 
 			function load() {
 				var q = new URLSearchParams(); [ 'stage', 'property', 'vendor', 'q' ].forEach( function ( k ) { if ( st[ k ] ) { q.set( k === 'stage' && st.stage === 'verify' ? 'stage' : k, st[ k ] ); } } );
-				api( '/ops/purchases?' + q.toString() ).then( function ( d ) { data = d; render(); } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; } );
+				api( '/ops/purchases?' + q.toString() ).then( function ( d ) { var first = ! data; data = d; render(); if ( first && d.mailbox && ! ( d.last_run && typeof d.last_run.at === 'string' ) ) { $( 'ajra-pu-run' ).click(); } } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; } );
 			}
 
 			function tile( key, label, count, tint, icon ) {
@@ -1002,7 +1079,7 @@ class AJCore_RA_Purchases {
 				[ [ 'Total spent', money( s.total_spent ) ], [ 'This month', money( s.this_month ) ], [ 'Orders', String( total ) ], [ 'No property', String( s.unassigned ) ] ].forEach( function ( x ) {
 					var chip = el( 'span', 'ajmr-fchip' ); chip.appendChild( el( 'b', null, x[ 0 ] ) ); chip.appendChild( document.createTextNode( ' ' + x[ 1 ] ) ); chips.appendChild( chip );
 				} );
-				if ( data.last_run && typeof data.last_run.at === 'string' ) { chips.appendChild( el( 'span', 'ajmr-fnote', 'Last pass ' + data.last_run.at + ' · ' + data.last_run[ 'new' ] + ' new' ) ); }
+				if ( data.last_run && typeof data.last_run.at === 'string' ) { chips.appendChild( el( 'span', 'ajmr-fnote', 'Last pass ' + data.last_run.at + ' · ' + data.last_run.scanned + ' scanned · ' + data.last_run[ 'new' ] + ' new' + ( data.last_run.errors && data.last_run.errors.length ? ' · ERROR: ' + data.last_run.errors.join( ' | ' ) : '' ) ) ); }
 
 				fillSelect( 'ajra-pu-property', data.by_property.map( function ( p ) { return p.property; } ).filter( function ( p ) { return p !== '(no property)'; } ), st.property, 'All properties' );
 				fillSelect( 'ajra-pu-vendor', data.vendors, st.vendor, 'All vendors' );
@@ -1028,7 +1105,7 @@ class AJCore_RA_Purchases {
 						tr.addEventListener( 'click', function () { openDetail( o.id ); } );
 						tb.appendChild( tr );
 						( o.emails || [] ).forEach( function ( m ) {
-							var er = el( 'tr', 'ajra-pu-mail' ); er.appendChild( el( 'td' ) );
+							var er = el( 'tr', 'ajra-pu-mail' ); er.style.cursor = 'pointer'; er.addEventListener( 'click', function () { openDetail( o.id ); } ); er.appendChild( el( 'td' ) );
 							var tm = el( 'td', null, ( m.received_at || '' ).slice( 11, 16 ) ); er.appendChild( tm );
 							er.appendChild( el( 'td', null, m.kind ) );
 							var sj = el( 'td', null, m.subject ); sj.colSpan = 3; er.appendChild( sj );
@@ -1079,7 +1156,7 @@ class AJCore_RA_Purchases {
 					var cl = el( 'button', 'button-link', 'Close' ); cl.type = 'button'; cl.style.marginLeft = '12px'; cl.addEventListener( 'click', function () { $( 'ajra-pu-detail' ).hidden = true; } ); bar.appendChild( cl ); box.appendChild( bar );
 					box.appendChild( el( 'h4', null, 'Emails (' + d.emails.length + ')' ) );
 					var ul = el( 'ul' ); ul.style.cssText = 'margin:0;padding-left:16px;list-style:disc;font-size:12px;';
-					d.emails.forEach( function ( e ) { ul.appendChild( el( 'li', null, day( e.received_at ) + ' · ' + e.kind + ' · ' + e.subject ) ); } ); box.appendChild( ul );
+					d.emails.forEach( function ( e ) { var li = el( 'li', null, day( e.received_at ) + ' · ' + e.kind + ' · ' + e.subject ); var tx = e.parsed && e.parsed.body ? e.parsed.body : ''; if ( tx ) { var dt = el( 'details' ); dt.open = true; dt.appendChild( el( 'summary', null, 'Email' ) ); var pre = el( 'pre', null, tx ); pre.style.cssText = 'max-height:360px;overflow:auto;white-space:pre-wrap;font-size:11px;background:#f8fafc;padding:8px;border-radius:6px;'; dt.appendChild( pre ); li.appendChild( dt ); } ul.appendChild( li ); } ); box.appendChild( ul );
 					$( 'ajra-pu-detail' ).hidden = false;
 				} ).catch( function ( e ) { alert( e.message ); } );
 			}
@@ -1099,6 +1176,10 @@ class AJCore_RA_Purchases {
 				if ( ! data || ! data.mailbox ) { $( 'ajra-pu-status' ).textContent = 'Mailbox not saved yet: enter shop@… in the gear panel and click Save, then Read mailbox.'; $( 'ajra-pu-settings' ).hidden = false; return; }
 				var b = $( 'ajra-pu-run' ); b.disabled = true; $( 'ajra-pu-status' ).textContent = 'Reading the mailbox…';
 				post( '/ops/purchases/process', {} ).then( function ( d ) { $( 'ajra-pu-status' ).textContent = d.new + ' new, ' + d.scanned + ' scanned' + ( d.complete ? ' (whole mailbox read)' : ' (more to read: click Read mailbox again)' ) + ( d.errors && d.errors.length ? ' · ' + d.errors.join( ' | ' ) : '' ); b.disabled = false; load(); } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; b.disabled = false; } );
+			} );
+			$( 'ajra-pu-reparse' ).addEventListener( 'click', function () {
+				var b = this; b.disabled = true; $( 'ajra-pu-status' ).textContent = 'Re-parsing…';
+				post( '/ops/purchases/reparse', {} ).then( function ( d ) { $( 'ajra-pu-status' ).textContent = d.reparsed + ' re-parsed, ' + d.fetched + ' fetched' + ( d.remaining ? ', ' + d.remaining + ' left: click Re-parse again' : '' ); b.disabled = false; load(); } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; b.disabled = false; } );
 			} );
 			$( 'ajra-pu-csv' ).addEventListener( 'click', function () {
 				if ( ! data ) { return; }
