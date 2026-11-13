@@ -31,8 +31,8 @@ class AJCore_RA_Flyers {
 	public static function init() {
 		add_action( 'rest_api_init', array( __CLASS__, 'boot_routes' ) );
 		add_action( 'ajcore_file_library_before_list', array( __CLASS__, 'render_tab_card' ) );
-		add_filter( 'ajcore_gmail_intake_skip_category', array( __CLASS__, 'skip_category' ), 10, 2 );
-		add_filter( 'ajcore_gmail_intake_group_labels', array( __CLASS__, 'group_labels' ) );
+		add_filter( 'ajcore_pipeline_skip_category', array( __CLASS__, 'skip_category' ), 10, 2 );
+		add_filter( 'ajcore_pipeline_group_labels', array( __CLASS__, 'group_labels' ) );
 		// New RA / ncllcagents.com customers get the shared flyers automatically (daily; adds only, never removes).
 		add_action( 'admin_init', array( __CLASS__, 'fold_aoo_category' ) );
 		add_action( self::FLYER_CRON, array( __CLASS__, 'flyers_auto_share' ) );
@@ -112,21 +112,21 @@ class AJCore_RA_Flyers {
 	/** The Shared flyers card (own collapsible section on the Pipeline tab). */
 	public function render_flyers_card() {
 		?>
-		<div class="ajcore-gi-flyers" style="padding:4px 0;max-width:760px;">
+		<div class="ajcore-pl-flyers" style="padding:4px 0;max-width:760px;">
 			<strong><?php esc_html_e( 'Shared flyers', 'ajcore-ra' ); ?></strong>
 			<span style="color:#64748b;font-size:12px;"> — <?php esc_html_e( 'one file per flyer, shared with customers. Not imported from mail.', 'ajcore-ra' ); ?></span>
-			<div id="ajcore-gi-flyers-rows" style="margin-top:8px;font-size:13px;"></div>
+			<div id="ajcore-pl-flyers-rows" style="margin-top:8px;font-size:13px;"></div>
 			<p style="margin:8px 0 0;">
-				<button type="button" class="button" id="ajcore-gi-flyers-preview"><?php esc_html_e( 'Preview merge of old duplicates', 'ajcore-ra' ); ?></button>
-				<button type="button" class="button" id="ajcore-gi-flyers-apply" disabled><?php esc_html_e( 'Apply merge', 'ajcore-ra' ); ?></button>
+				<button type="button" class="button" id="ajcore-pl-flyers-preview"><?php esc_html_e( 'Preview merge of old duplicates', 'ajcore-ra' ); ?></button>
+				<button type="button" class="button" id="ajcore-pl-flyers-apply" disabled><?php esc_html_e( 'Apply merge', 'ajcore-ra' ); ?></button>
 			</p>
-			<div id="ajcore-gi-flyers-out" style="font-size:13px;margin-top:6px;"></div>
+			<div id="ajcore-pl-flyers-out" style="font-size:13px;margin-top:6px;"></div>
 		</div>
 		<script>
 		(function () {
 			var base = <?php echo wp_json_encode( rest_url( 'ajcore/v1/gmail-intake/flyers' ) ); ?>, nonce = <?php echo wp_json_encode( wp_create_nonce( 'wp_rest' ) ); ?>;
-			var rows = document.getElementById( 'ajcore-gi-flyers-rows' ), out = document.getElementById( 'ajcore-gi-flyers-out' );
-			var pv = document.getElementById( 'ajcore-gi-flyers-preview' ), ap = document.getElementById( 'ajcore-gi-flyers-apply' );
+			var rows = document.getElementById( 'ajcore-pl-flyers-rows' ), out = document.getElementById( 'ajcore-pl-flyers-out' );
+			var pv = document.getElementById( 'ajcore-pl-flyers-preview' ), ap = document.getElementById( 'ajcore-pl-flyers-apply' );
 			function api( path, opts ) { opts = opts || {}; opts.headers = Object.assign( { 'X-WP-Nonce': nonce }, opts.headers || {} ); return fetch( base + path, opts ).then( function ( r ) { return r.json(); } ); }
 			function el( tag, text ) { var e = document.createElement( tag ); if ( text ) { e.textContent = text; } return e; }
 			function load() {

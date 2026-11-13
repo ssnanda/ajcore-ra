@@ -2,7 +2,7 @@
 /**
  * Pipeline filing rules for NC Secretary of State mail (the part of Pipeline that stays in AJCore-RA).
  *
- * AJCore owns the mailbox, OAuth, log and filing machinery; this class answers its 'ajcore_gmail_intake_*'
+ * AJCore owns the mailbox, OAuth, log and filing machinery; this class answers its 'ajcore_pipeline_*'
  * filters with the document-type keywords, rename prefixes, categories and flyer handling.
  */
 
@@ -10,17 +10,17 @@ if ( ! defined( 'WPINC' ) ) {
 	die;
 }
 
-class AJCore_RA_Gmail_Rules {
+class AJCore_RA_Pipeline_Rules {
 
 	public static function init() {
-		add_filter( 'ajcore_gmail_intake_pdf_is_document', array( __CLASS__, 'pdf_is_document' ), 10, 2 );
-		add_filter( 'ajcore_gmail_intake_suggest_filename', array( __CLASS__, 'suggest_filename' ), 10, 3 );
-		add_filter( 'ajcore_gmail_intake_classify_text', array( __CLASS__, 'classify_text' ), 10, 3 );
-		add_filter( 'ajcore_gmail_intake_filename_labels', array( __CLASS__, 'filename_labels' ) );
-		add_filter( 'ajcore_gmail_intake_default_address', array( __CLASS__, 'default_address' ) );
-		add_filter( 'ajcore_gmail_intake_company_name', array( __CLASS__, 'company_name' ), 10, 3 );
-		add_filter( 'ajcore_gmail_intake_filters', array( __CLASS__, 'mailbox_filter' ), 10, 2 );
-		add_filter( 'ajcore_gmail_intake_rules_summary', array( __CLASS__, 'rules_summary' ) );
+		add_filter( 'ajcore_pipeline_pdf_is_document', array( __CLASS__, 'pdf_is_document' ), 10, 2 );
+		add_filter( 'ajcore_pipeline_suggest_filename', array( __CLASS__, 'suggest_filename' ), 10, 3 );
+		add_filter( 'ajcore_pipeline_classify_text', array( __CLASS__, 'classify_text' ), 10, 3 );
+		add_filter( 'ajcore_pipeline_filename_labels', array( __CLASS__, 'filename_labels' ) );
+		add_filter( 'ajcore_pipeline_default_address', array( __CLASS__, 'default_address' ) );
+		add_filter( 'ajcore_pipeline_company_name', array( __CLASS__, 'company_name' ), 10, 3 );
+		add_filter( 'ajcore_pipeline_filters', array( __CLASS__, 'mailbox_filter' ), 10, 2 );
+		add_filter( 'ajcore_pipeline_rules_summary', array( __CLASS__, 'rules_summary' ) );
 	}
 
 	/**
@@ -72,7 +72,7 @@ class AJCore_RA_Gmail_Rules {
 		return '';
 	}
 
-	/** Lines for the Mailroom "Filters & rules" panel, describing the rules in this class. */
+	/** Lines for the Pipeline "Filters & rules" panel, describing the rules in this class. */
 	public static function rules_summary( $sections ) {
 		$sections[] = array( 'title' => __( 'Mailbox filter set by AJCore-RA', 'ajcore-ra' ), 'items' => array(
 			__( 'Zoho: subject has "Congratulations" AND sender has "sosnc.gov".', 'ajcore-ra' ),
