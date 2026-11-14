@@ -831,6 +831,12 @@ class AJCore_RA_Purchases {
 	/** Why the Rentec property list is empty (shown on the screen), '' when loaded. */
 	private static $rentec_note = '';
 
+	/** The words of a tag for matching: like addr_tokens() without unit words ("Apt 3" -> just "3"). */
+	private static function tag_tokens( $tag ) {
+		$drop = array( 'apt', 'apartment', 'unit', 'ste', 'suite', 'bldg', 'building', 'no', 'number', 'us', 'nc', 'north', 'carolina', 'charlotte', 'concord', 'salisbury' );
+		return array_values( array_diff( self::addr_tokens( $tag ), $drop ) );
+	}
+
 	/** Rentec properties (top level, not their units) with the words of their address, from AJCore-RA's own cached Rentec list. Empty when Rentec is off. */
 	private function rentec_properties() {
 		static $cache = null;
@@ -867,8 +873,8 @@ class AJCore_RA_Purchases {
 
 	/** The one Rentec property whose address holds every word of the tag ("6822" -> 6822 Trimbach Way, Charlotte, NC 28269), or null when none or several match. */
 	private function match_rentec( $tag ) {
-		$want = self::addr_tokens( $tag );
-		if ( ! $want ) {
+		$want = self::tag_tokens( $tag );
+		if ( ! $want || preg_match( '#^\d{1,2}/\d{1,2}(/\d{2,4})?$#', trim( (string) $tag ) ) ) { // empty, or a date like 09/10
 			return null;
 		}
 		$hits = array();
@@ -1319,7 +1325,7 @@ class AJCore_RA_Purchases {
 				<table class="widefat striped" id="ajra-pu-table">
 					<thead><tr>
 						<th style="width:28px"><input type="checkbox" id="ajra-pu-all" aria-label="<?php esc_attr_e( 'Select all', 'ajcore-ra' ); ?>"></th>
-						<th><?php esc_html_e( 'Date', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Vendor', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Order / invoice', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Property', 'ajcore-ra' ); ?></th><th style="text-align:right"><?php esc_html_e( 'Total', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Stage', 'ajcore-ra' ); ?></th>
+						<th><?php esc_html_e( 'Time', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Vendor', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Order / invoice', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Property', 'ajcore-ra' ); ?></th><th style="text-align:right"><?php esc_html_e( 'Total', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Stage', 'ajcore-ra' ); ?></th>
 					</tr></thead>
 					<tbody></tbody>
 				</table>
@@ -1402,20 +1408,19 @@ class AJCore_RA_Purchases {
 						var td = el( 'td' ); td.addEventListener( 'click', function ( e ) { e.stopPropagation(); } );
 						var cb = el( 'input' ); cb.type = 'checkbox'; cb.checked = !! selected[ o.id ]; cb.addEventListener( 'change', function () { if ( cb.checked ) { selected[ o.id ] = true; } else { delete selected[ o.id ]; } syncBulk(); } ); td.appendChild( cb ); tr.appendChild( td );
 						tr.appendChild( el( 'td', null, ( o.order_date || '' ).slice( 11, 16 ) ) ); tr.appendChild( el( 'td', null, o.vendor ) );
-						var ord = el( 'td' ); ord.appendChild( el( 'strong', null, o.order_no || o.invoice_no || '—' ) ); var nb = el( 'span' ); nb.style.cssText = 'margin-left:8px;display:inline-flex;gap:4px;vertical-align:middle;'; ( o.emails || [] ).forEach( function ( m, mi ) { var c = el( 'button', 'button button-small', String( mi + 1 ) ); c.type = 'button'; c.title = m.kind + ' · ' + m.subject; c.style.minWidth = '26px'; c.addEventListener( 'click', function ( ev ) { ev.stopPropagation(); openDetail( o.id, mi ); } ); nb.appendChild( c ); } ); ord.appendChild( nb ); if ( o.order_no && o.invoice_no ) { ord.appendChild( el( 'div', 'description', 'Invoice ' + o.invoice_no ) ); } tr.appendChild( ord );
-						tr.appendChild( el( 'td', null, o.property_name || o.property_tag || '—' ) );
-						var tot = el( 'td', null, money( o.total ) ); tot.style.textAlign = 'right'; tr.appendChild( tot );
+						var ord = el( 'td', 'ajra-pu-ord' ); ord.appendChild( el( 'strong', null, o.order_no || o.invoice_no || '—' ) );
+						var nb = el( 'span', 'ajra-pu-nums' ); ( o.emails || [] ).forEach( function ( m, mi ) { var c = el( 'button', 'ajra-pu-num k-' + ( m.kind || 'other' ), String( mi + 1 ) ); c.type = 'button'; c.title = m.kind + ' · ' + m.subject; c.addEventListener( 'click', function ( ev ) { ev.stopPropagation(); openDetail( o.id, mi ); } ); nb.appendChild( c ); } ); ord.appendChild( nb );
+						if ( o.order_no && o.invoice_no ) { ord.appendChild( el( 'div', 'description', 'Invoice ' + o.invoice_no ) ); }
+						tr.appendChild( ord );
+						var pc = el( 'td', 'ajra-pu-prop' );
+						if ( o.property_name ) { pc.appendChild( el( 'strong', null, o.property_name ) ); if ( o.property_tag && o.property_tag.toLowerCase() !== o.property_name.toLowerCase() ) { pc.appendChild( el( 'div', 'description', o.property_tag ) ); } }
+						else if ( o.property_tag ) { var pt = el( 'span', 'ajra-pu-unnamed', o.property_tag ); pt.title = 'No property name yet: open the order and set one'; pc.appendChild( pt ); }
+						else { pc.appendChild( el( 'span', 'ajra-pu-none', 'no property' ) ); }
+						tr.appendChild( pc );
+						var tot = el( 'td', 'ajra-pu-tot', money( o.total ) ); tot.style.textAlign = 'right'; tr.appendChild( tot );
 						var stg = el( 'td' ); stg.appendChild( el( 'span', 'ajcore-status-pill ' + ( o.stage === 'new' ? '' : ( o.stage === 'ignored' ? 'dup' : 'active' ) ), LABEL[ o.stage ] || o.stage ) ); tr.appendChild( stg );
 						tr.addEventListener( 'click', function () { openDetail( o.id ); } );
 						tb.appendChild( tr );
-						( o.emails || [] ).forEach( function ( m, mi ) {
-							var er = el( 'tr', 'ajra-pu-mail' ); er.style.cursor = 'pointer'; er.addEventListener( 'click', function () { openDetail( o.id, mi ); } ); er.appendChild( el( 'td' ) );
-							var tm = el( 'td', null, ( m.received_at || '' ).slice( 11, 16 ) ); er.appendChild( tm );
-							er.appendChild( el( 'td', null, m.kind ) );
-							var sj = el( 'td', null, m.subject ); sj.colSpan = 3; er.appendChild( sj );
-							er.appendChild( el( 'td', null, ( m.sender || '' ).replace( /<.*$/, '' ) ) );
-							tb.appendChild( er );
-						} );
 					} );
 				} );
 				fillSummary( 'ajra-pu-byprop', data.by_property.map( function ( p ) { return [ p.property, p.orders, p.total ]; } ), function ( name ) { st.property = name === '(no property)' ? '' : name; load(); } );
@@ -1443,6 +1448,7 @@ class AJCore_RA_Purchases {
 				var all = $( 'ajra-pu-all' ); all.checked = n > 0 && data && n === data.orders.length; all.indeterminate = n > 0 && data && n < data.orders.length;
 			}
 
+			var curEmail = 0, emailCount = 0, navTo = null;
 			function openDetail( id, idx ) {
 				api( '/ops/purchases/' + id ).then( function ( d ) {
 					var o = d.order, outer = $( 'ajra-pu-detail-body' ); outer.innerHTML = '';
@@ -1469,6 +1475,7 @@ class AJCore_RA_Purchases {
 					left.appendChild( el( 'h4', null, 'Emails (' + d.emails.length + ')' ) );
 					var tabs = el( 'div' ), pane = el( 'div' ); tabs.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px;'; left.appendChild( tabs ); left.appendChild( pane );
 					function showEmail( n ) {
+						curEmail = n; emailCount = d.emails.length; navTo = showEmail;
 						Array.prototype.forEach.call( tabs.children, function ( b, bi ) { b.className = 'button' + ( bi === n ? ' button-primary' : '' ); } );
 						pane.innerHTML = ''; var e = d.emails[ n ]; if ( ! e ) { pane.appendChild( el( 'p', null, 'No emails.' ) ); return; }
 						pane.appendChild( el( 'strong', null, day( e.received_at ) + ' ' + ( e.received_at || '' ).slice( 11, 16 ) + ' · ' + e.kind + ' · ' + e.subject ) );
@@ -1522,7 +1529,11 @@ class AJCore_RA_Purchases {
 				var a = document.createElement( 'a' ); a.href = URL.createObjectURL( new Blob( [ csv ], { type: 'text/csv' } ) ); a.download = 'purchases.csv'; a.click();
 			} );
 			$( 'ajra-pu-detail' ).addEventListener( 'click', function ( e ) { if ( e.target === this ) { this.hidden = true; } } );
-			document.addEventListener( 'keydown', function ( e ) { if ( e.key === 'Escape' ) { $( 'ajra-pu-detail' ).hidden = true; } } );
+			document.addEventListener( 'keydown', function ( e ) {
+				var dlg = $( 'ajra-pu-detail' ); if ( dlg.hidden ) { return; }
+				if ( e.key === 'Escape' ) { dlg.hidden = true; }
+				else if ( navTo && ( e.key === 'ArrowRight' || e.key === 'ArrowLeft' ) && ! /^(INPUT|TEXTAREA|SELECT)$/.test( ( e.target || {} ).tagName || '' ) ) { navTo( Math.min( emailCount - 1, Math.max( 0, curEmail + ( e.key === 'ArrowRight' ? 1 : -1 ) ) ) ); }
+			} );
 			var lb = $( 'ajra-pu-labels' ), list = $( 'ajra-pu-label-list' );
 			lb.addEventListener( 'click', function () {
 				var checked = {}; list.querySelectorAll( 'input:checked' ).forEach( function ( i ) { checked[ i.value ] = true; } );
