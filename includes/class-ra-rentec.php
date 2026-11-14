@@ -27,6 +27,7 @@ class AJCore_RA_Rentec {
 	const OPTION     = 'ajcore_ra_rentec';
 	const SHARED_ROW = 'ajcore_rentec_settings';
 	const TAB        = 'rentec';
+	const LOG_OPTION = 'ajcore_ra_rentec_log';
 
 	/** @var self|null */
 	private static $instance = null;
@@ -131,17 +132,28 @@ class AJCore_RA_Rentec {
 		if ( $db->get_var( $db->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
 			return false;
 		}
-		$data = array();
+		$cur_raw = $db->get_var( $db->prepare( "SELECT setting_value FROM `{$table}` WHERE setting_name = %s LIMIT 1", self::SHARED_ROW ) );
+		$cur     = json_decode( (string) $cur_raw, true );
+		$cur     = is_array( $cur ) ? $cur : array();
+		$data    = array();
 		foreach ( self::keys() as $key ) {
 			if ( array_key_exists( $key, $settings ) ) {
 				$data[ $key ] = $settings[ $key ];
+			}
+		}
+		// Never publish a blank API key over a non-empty one: every site reads this row, so one
+		// blank save (or an undecryptable local copy) would otherwise empty the keys network-wide.
+		foreach ( self::secret_keys() as $key ) {
+			if ( '' === trim( (string) ( $data[ $key ] ?? '' ) ) && '' !== trim( (string) ( $cur[ $key ] ?? '' ) ) ) {
+				$data[ $key ] = $cur[ $key ];
+				self::log( 'shared_blank_blocked', array( 'field' => $key ) );
 			}
 		}
 		$encoded = wp_json_encode( $data );
 		if ( false === $encoded ) {
 			return false;
 		}
-		$exists = $db->get_var( $db->prepare( "SELECT setting_name FROM `{$table}` WHERE setting_name = %s LIMIT 1", self::SHARED_ROW ) );
+		$exists = null !== $cur_raw;
 		if ( $exists ) {
 			return false !== $db->update( $table, array( 'setting_value' => $encoded, 'updated_at' => current_time( 'mysql' ) ), array( 'setting_name' => self::SHARED_ROW ), array( '%s', '%s' ), array( '%s' ) );
 		}
@@ -169,13 +181,72 @@ class AJCore_RA_Rentec {
 		return $settings;
 	}
 
-	private function store( array $settings ) {
-		$opt = array( 'seeded' => 1 );
+	/** Secret fields whose stored ciphertext exists but decrypts to nothing (encryption key changed/lost). */
+	private static function unreadable_keys() {
+		$opt = get_option( self::OPTION, array() );
+		$opt = is_array( $opt ) ? $opt : array();
+		$out = array();
+		foreach ( self::secret_keys() as $key ) {
+			$raw = (string) ( $opt[ $key ] ?? '' );
+			if ( '' !== $raw && 0 === strpos( $raw, 'ajenc' ) && '' === trim( self::decrypt( $raw ) ) ) {
+				$out[] = $key;
+			}
+		}
+		return $out;
+	}
+
+	/** Compact per-key state of a stored option array: set | empty | unreadable. */
+	private static function key_states( array $opt ) {
+		$states = array();
+		foreach ( self::secret_keys() as $key ) {
+			$raw = (string) ( $opt[ $key ] ?? '' );
+			if ( '' === $raw ) {
+				$states[ $key ] = 'empty';
+			} else {
+				$states[ $key ] = '' === trim( self::decrypt( $raw ) ) ? 'unreadable' : 'set';
+			}
+		}
+		return $states;
+	}
+
+	/** Rolling audit trail (last 50) of everything that writes the Rentec settings. */
+	private static function log( $event, array $extra = array() ) {
+		$log  = get_option( self::LOG_OPTION, array() );
+		$log  = is_array( $log ) ? $log : array();
+		$user = function_exists( 'wp_get_current_user' ) ? wp_get_current_user() : null;
+		$opt  = get_option( self::OPTION, array() );
+		array_unshift(
+			$log,
+			array_merge(
+				array(
+					'at'     => gmdate( 'c' ),
+					'event'  => (string) $event,
+					'user'   => ( $user && $user->exists() ) ? $user->user_login : ( defined( 'WP_CLI' ) && WP_CLI ? 'wp-cli' : 'system' ),
+					'master' => self::is_master() ? 1 : 0,
+					'keys'   => self::key_states( is_array( $opt ) ? $opt : array() ),
+				),
+				$extra
+			)
+		);
+		update_option( self::LOG_OPTION, array_slice( $log, 0, 50 ), false );
+	}
+
+	private function store( array $settings, array $log_extra = array() ) {
+		$prev = get_option( self::OPTION, array() );
+		$prev = is_array( $prev ) ? $prev : array();
+		$opt  = array( 'seeded' => 1 );
 		foreach ( self::keys() as $key ) {
-			$value       = isset( $settings[ $key ] ) ? (string) $settings[ $key ] : self::defaults()[ $key ];
-			$opt[ $key ] = in_array( $key, self::secret_keys(), true ) ? self::encrypt( $value ) : $value;
+			$value     = isset( $settings[ $key ] ) ? (string) $settings[ $key ] : self::defaults()[ $key ];
+			$is_secret = in_array( $key, self::secret_keys(), true );
+			$opt[ $key ] = $is_secret ? self::encrypt( $value ) : $value;
+			// Never replace stored ciphertext with a blank (e.g. one that can't be decrypted right now).
+			if ( $is_secret && '' === $opt[ $key ] && '' !== (string) ( $prev[ $key ] ?? '' ) ) {
+				$opt[ $key ] = (string) $prev[ $key ];
+				$log_extra[ 'kept_' . $key ] = 1;
+			}
 		}
 		update_option( self::OPTION, $opt, false );
+		self::log( 'save', $log_extra );
 		self::write_shared( $settings );
 	}
 
@@ -207,7 +278,8 @@ class AJCore_RA_Rentec {
 			$store[ $key ] = in_array( $key, self::secret_keys(), true ) ? self::encrypt( $settings[ $key ] ) : $settings[ $key ];
 		}
 		update_option( self::OPTION, $store, false );
-		if ( self::is_shared() && self::is_master() && empty( self::read_shared() ) && ! empty( $found ) ) {
+		self::log( 'seed', array( 'found' => array_keys( $found ) ) );
+		if ( self::is_shared()&& self::is_master() && empty( self::read_shared() ) && ! empty( $found ) ) {
 			self::write_shared( $settings );
 		}
 	}
@@ -225,13 +297,15 @@ class AJCore_RA_Rentec {
 		$settings['rentec_enabled']         = isset( $_POST['rentec_enabled'] ) ? '1' : '0';
 		$settings['rentec_account_label_1'] = isset( $_POST['rentec_account_label_1'] ) ? sanitize_text_field( wp_unslash( $_POST['rentec_account_label_1'] ) ) : 'Rentec Account 1';
 		$settings['rentec_account_label_2'] = isset( $_POST['rentec_account_label_2'] ) ? sanitize_text_field( wp_unslash( $_POST['rentec_account_label_2'] ) ) : 'Rentec Account 2';
+		$log_extra = array( 'enabled' => $settings['rentec_enabled'] );
 		foreach ( self::secret_keys() as $field ) {
 			$new = isset( $_POST[ $field ] ) ? trim( sanitize_text_field( wp_unslash( $_POST[ $field ] ) ) ) : '';
 			if ( '' !== $new ) { // blank keeps the saved key
 				$settings[ $field ] = $new;
 			}
+			$log_extra[ 'posted_' . $field ] = '' !== $new ? 'new' : 'blank';
 		}
-		$this->store( $settings );
+		$this->store( $settings, $log_extra );
 		wp_safe_redirect( add_query_arg( array( 'page' => 'ajforms-client-portal', 'tab' => self::TAB, 'saved' => 1 ), admin_url( 'admin.php' ) ) );
 		exit;
 	}
@@ -2205,6 +2279,10 @@ class AJCore_RA_Rentec {
 			<?php if ( $read_only ) : ?>
 				<div class="notice notice-info inline"><p><?php esc_html_e( 'Rentec integration and API accounts are managed by the AJCore master site. This site automatically uses the shared master configuration.', 'ajcore-ra' ); ?></p></div>
 			<?php endif; ?>
+			<?php $unreadable = self::unreadable_keys(); ?>
+			<?php if ( $unreadable ) : ?>
+				<div class="notice notice-warning inline"><p><?php echo esc_html( sprintf( /* translators: %s: field names */ __( 'Stored key can’t be decrypted (%s). Re-enter it and save.', 'ajcore-ra' ), implode( ', ', $unreadable ) ) ); ?></p></div>
+			<?php endif; ?>
 			<form method="post" action="<?php echo esc_url( $form_url ); ?>">
 				<?php wp_nonce_field( 'ajcore_ra_save_rentec' ); ?>
 				<input type="hidden" name="action" value="ajcore_ra_save_rentec">
@@ -2255,6 +2333,22 @@ class AJCore_RA_Rentec {
 					<?php endforeach; ?>
 				</div>
 				<p class="description"><?php esc_html_e( 'Create API V3 keys under Settings → Utilities → API Keys in each Rentec account. Start with read-only permissions.', 'ajcore-ra' ); ?></p>
+				<?php $save_log = get_option( self::LOG_OPTION, array() ); ?>
+				<?php if ( is_array( $save_log ) && $save_log ) : ?>
+					<details style="margin:8px 0;">
+						<summary><?php esc_html_e( 'Save log', 'ajcore-ra' ); ?></summary>
+						<table class="widefat striped" style="margin-top:6px;font-size:12px;">
+							<?php foreach ( array_slice( $save_log, 0, 20 ) as $entry ) : ?>
+								<tr>
+									<td><?php echo esc_html( (string) ( $entry['at'] ?? '' ) ); ?></td>
+									<td><?php echo esc_html( (string) ( $entry['event'] ?? '' ) ); ?></td>
+									<td><?php echo esc_html( (string) ( $entry['user'] ?? '' ) ); ?></td>
+									<td><?php echo esc_html( wp_json_encode( array_diff_key( (array) $entry, array_flip( array( 'at', 'event', 'user' ) ) ) ) ); ?></td>
+								</tr>
+							<?php endforeach; ?>
+						</table>
+					</details>
+				<?php endif; ?>
 				<?php if ( ! $read_only ) : ?>
 					<div class="ajforms-settings-inline-actions">
 						<button type="submit" class="button button-primary"><?php esc_html_e( 'Save Rentec Settings', 'ajcore-ra' ); ?></button>
