@@ -125,6 +125,9 @@ class AJCore_RA_Purchases {
 			if ( ! $pdb->get_var( "SHOW COLUMNS FROM `{$orders}` LIKE 'total_src'" ) ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$pdb->query( "ALTER TABLE `{$orders}` ADD COLUMN total_src tinyint(1) NOT NULL DEFAULT 0 AFTER total" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 			}
+			if ( ! $pdb->get_var( "SHOW COLUMNS FROM `{$orders}` LIKE 'doc'" ) ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$pdb->query( "ALTER TABLE `{$orders}` ADD COLUMN doc varchar(8) NOT NULL DEFAULT '' AFTER label" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			}
 			if ( ! $pdb->get_var( "SHOW COLUMNS FROM `{$orders}` LIKE 'label'" ) ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$pdb->query( "ALTER TABLE `{$orders}` ADD COLUMN label varchar(16) NOT NULL DEFAULT '' AFTER stage" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 			}
@@ -139,6 +142,7 @@ class AJCore_RA_Purchases {
 			property_tag varchar(120) NOT NULL DEFAULT '',
 			property_name varchar(190) NOT NULL DEFAULT '',
 			label varchar(16) NOT NULL DEFAULT '',
+			doc varchar(8) NOT NULL DEFAULT '',
 			total_src tinyint(1) NOT NULL DEFAULT 0,
 			order_date datetime DEFAULT NULL,
 			subtotal decimal(12,2) DEFAULT NULL,
@@ -374,7 +378,13 @@ class AJCore_RA_Purchases {
 		$text = str_replace( "\xc2\xa0", ' ', $text );
 		$text = preg_replace( '/[\x{034F}\x{200B}-\x{200F}\x{2060}\x{FEFF}\x{00AD}]/u', '', (string) $text );
 		$text = preg_replace( '/[ \t]+/', ' ', $text );
-		$out  = array( 'order_no' => '', 'invoice_no' => '', 'total_src' => 0, 'placed_at' => '', 'property_src' => '', 'property_tag' => '', 'subtotal' => null, 'tax' => null, 'total' => null );
+		$out  = array( 'order_no' => '', 'invoice_no' => '', 'total_src' => 0, 'placed_at' => '', 'property_src' => '', 'property_tag' => '', 'subtotal' => null, 'tax' => null, 'total' => null, 'doc' => '' );
+		// Quote ("requesting payment for an order") until a receipt arrives; an "e-Receipt is Enclosed" mail (receipt is an image) marks it paid.
+		if ( preg_match( '/\b(?:requesting|requests?)\s+payment\s+for\s+an\s+order\b/i', $text ) ) {
+			$out['doc'] = 'quote';
+		} elseif ( preg_match( '/e-?receipt\s+is\s+enclosed/i', (string) $subject ) ) {
+			$out['doc'] = 'paid';
+		}
 
 		// Property: delivery address in the email first, the PO# tag as the fallback.
 		$addr = self::delivery_address( $body );
@@ -764,6 +774,13 @@ class AJCore_RA_Purchases {
 		$pdb    = $this->pdb();
 		$orders = $this->table( 'aj_purchase_orders' );
 		$vendor = $cls['vendor'];
+		// A receipt that is only an image has no order number: join it to the quote it paid (same vendor, quote in the 3 days before).
+		if ( 'paid' === ( $f['doc'] ?? '' ) && '' === $f['order_no'] && '' === $f['invoice_no'] ) {
+			$q = $pdb->get_row( $pdb->prepare( "SELECT order_no, property_tag FROM `{$orders}` WHERE vendor = %s AND doc = 'quote' AND order_no NOT LIKE 'msg:%%' AND order_no NOT LIKE 'inv:%%' AND order_date <= %s AND order_date >= %s ORDER BY order_date DESC LIMIT 1", $vendor, $when, gmdate( 'Y-m-d H:i:s', strtotime( $when . ' UTC' ) - 3 * DAY_IN_SECONDS ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			if ( $q ) {
+				$f['order_no'] = (string) $q->order_no;
+			}
+		}
 		$key    = '' !== $f['order_no'] ? $f['order_no'] : ( '' !== $f['invoice_no'] ? 'inv:' . $f['invoice_no'] : 'msg:' . $row['message_id'] );
 		$existing = $pdb->get_row( $pdb->prepare( "SELECT * FROM `{$orders}` WHERE vendor = %s AND order_no = %s", $vendor, $key ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		if ( ! $existing && '' !== $f['invoice_no'] ) {
@@ -772,6 +789,11 @@ class AJCore_RA_Purchases {
 		$name = $this->property_name_for( $f['property_tag'] );
 		if ( $existing ) {
 			$new = array( 'updated_at' => current_time( 'mysql' ) );
+			if ( 'paid' === ( $f['doc'] ?? '' ) ) {
+				$new['doc'] = 'paid';
+			} elseif ( 'quote' === ( $f['doc'] ?? '' ) && 'paid' !== (string) ( $existing->doc ?? '' ) ) {
+				$new['doc'] = 'quote';
+			}
 			$editable = 'new' === $existing->stage; // verified/charged/posted orders keep the figures you confirmed
 			if ( $editable && null !== $f['total'] ) {
 				$cur_src = isset( $existing->total_src ) ? (int) $existing->total_src : 0;
@@ -824,6 +846,7 @@ class AJCore_RA_Purchases {
 			'property_tag'  => $f['property_tag'],
 			'property_name' => $name,
 			'order_date'    => self::order_when( $f, $when ),
+			'doc'           => (string) ( $f['doc'] ?? '' ),
 			'subtotal'      => $f['subtotal'],
 			'tax'           => $f['tax'],
 			'total'         => $f['total'],
@@ -1043,6 +1066,7 @@ class AJCore_RA_Purchases {
 			'vendor'        => (string) $r->vendor,
 			'order_no'      => 0 === strpos( (string) $r->order_no, 'msg:' ) || 0 === strpos( (string) $r->order_no, 'inv:' ) ? '' : (string) $r->order_no,
 			'invoice_no'    => (string) $r->invoice_no,
+			'doc'           => isset( $r->doc ) ? (string) $r->doc : '',
 			'property_tag'  => (string) $r->property_tag,
 			'property_name' => (string) $r->property_name,
 			'order_date'    => (string) $r->order_date,
@@ -1524,6 +1548,7 @@ class AJCore_RA_Purchases {
 						var cb = el( 'input' ); cb.type = 'checkbox'; cb.checked = !! selected[ o.id ]; cb.addEventListener( 'change', function () { if ( cb.checked ) { selected[ o.id ] = true; } else { delete selected[ o.id ]; } syncBulk(); } ); td.appendChild( cb ); tr.appendChild( td );
 						tr.appendChild( el( 'td', 'ajra-pu-when', fmtDT( when( o ) ) ) ); tr.appendChild( el( 'td', 'ajra-pu-when', fmtDT( o.order_date, placedNoTime( o.order_date ) ) ) ); tr.appendChild( el( 'td', null, o.vendor ) );
 						var ord = el( 'td', 'ajra-pu-ord' ); ord.appendChild( el( 'strong', null, o.order_no || o.invoice_no || '—' ) );
+						if ( o.doc === 'quote' ) { ord.appendChild( el( 'span', 'ajra-quote', 'QUOTE' ) ); } else if ( o.doc === 'paid' ) { ord.appendChild( el( 'span', 'ajra-paid', 'PAID' ) ); }
 						var nb = el( 'span', 'ajra-pu-nums' ); ( o.emails || [] ).forEach( function ( m, mi ) { var c = el( 'button', 'ajra-pu-num k-' + ( m.kind || 'other' ), String( mi + 1 ) ); c.type = 'button'; c.title = m.kind + ' · ' + m.subject; c.addEventListener( 'click', function ( ev ) { ev.stopPropagation(); openDetail( o.id, mi ); } ); nb.appendChild( c ); } ); ord.appendChild( nb );
 						if ( o.order_no && o.invoice_no ) { ord.appendChild( el( 'div', 'description', 'Invoice ' + o.invoice_no ) ); }
 						tr.appendChild( ord );
