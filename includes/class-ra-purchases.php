@@ -1066,6 +1066,17 @@ class AJCore_RA_Purchases {
 		$view   = 'marketing' === sanitize_key( (string) $request->get_param( 'label' ) ) ? 'marketing' : '';
 		$where  = array( '' === $view ? "label = ''" : "label = 'marketing'" ); // the normal list hides marketing; the Marketing label shows only those
 		$params = array();
+		// Orders with bad data: issue = no_property | no_name (address not mapped to a named property) | no_total | no_order (no real order number).
+		$issue_sql = array(
+			'no_property' => "property_tag = ''",
+			'no_name'     => "( property_tag <> '' AND property_name = '' )",
+			'no_total'    => 'total IS NULL',
+			'no_order'    => "( order_no LIKE 'msg:%%' OR order_no LIKE 'inv:%%' )",
+		);
+		$issue = sanitize_key( (string) $request->get_param( 'issue' ) );
+		if ( '' === $view && isset( $issue_sql[ $issue ] ) ) {
+			$where[] = $issue_sql[ $issue ];
+		}
 		$stage  = sanitize_key( (string) $request->get_param( 'stage' ) );
 		if ( '' === $view && in_array( $stage, self::STAGES, true ) ) {
 			$where[]  = 'stage = %s';
@@ -1133,6 +1144,7 @@ class AJCore_RA_Purchases {
 		$vendors     = (array) $pdb->get_col( "SELECT DISTINCT vendor FROM `{$orders}` ORDER BY vendor" );
 		$stage_counts = (array) $pdb->get_results( "SELECT stage, COUNT(*) AS n FROM `{$orders}` WHERE label = '' GROUP BY stage" );
 		$marketing    = (int) $pdb->get_var( "SELECT COUNT(*) FROM `{$orders}` WHERE label = 'marketing'" );
+		$ic           = $pdb->get_row( "SELECT SUM(property_tag = '') AS no_property, SUM(property_tag <> '' AND property_name = '') AS no_name, SUM(total IS NULL) AS no_total, SUM(order_no LIKE 'msg:%' OR order_no LIKE 'inv:%') AS no_order FROM `{$orders}` WHERE label = '' AND stage <> 'ignored'" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		// phpcs:enable
 		$counts = array_fill_keys( self::STAGES, 0 );
 		foreach ( $stage_counts as $c ) {
@@ -1174,6 +1186,7 @@ class AJCore_RA_Purchases {
 			'mailbox'     => $s['mailbox'],
 			'last_run'    => $s['last_run'],
 			'marketing'   => $marketing,
+			'issues'      => array( 'no_property' => (int) ( $ic->no_property ?? 0 ), 'no_name' => (int) ( $ic->no_name ?? 0 ), 'no_total' => (int) ( $ic->no_total ?? 0 ), 'no_order' => (int) ( $ic->no_order ?? 0 ) ),
 			'senders'     => class_exists( 'AJCore_Marketing' ) ? AJCore_Marketing::senders() : array(),
 			'rentec'      => array( 'count' => count( $this->rentec_properties() ), 'note' => self::$rentec_note ),
 		) );
@@ -1351,18 +1364,27 @@ class AJCore_RA_Purchases {
 		$boxes = $zoho->mailboxes();
 		?>
 		<div id="ajra-pu">
-			<div class="ajmr-row ajmr-row-main" id="ajra-pu-tiles"></div>
-			<div class="ajmr-filters" id="ajra-pu-chips"></div>
-			<div class="ajmr-row ajmr-row-tools">
+			<div class="ajra-pu-head">
+				<div class="ajra-seg" id="ajra-pu-tiles"></div>
+				<details class="ajra-menu" id="ajra-pu-menu">
+					<summary><?php esc_html_e( 'Actions', 'ajcore-ra' ); ?> &#9662;</summary>
+					<div class="ajra-menu-list">
+						<button type="button" id="ajra-pu-run"><?php esc_html_e( 'Read mailbox', 'ajcore-ra' ); ?></button>
+						<button type="button" id="ajra-pu-reparse"><?php esc_html_e( 'Re-parse orders', 'ajcore-ra' ); ?></button>
+						<button type="button" id="ajra-pu-csv"><?php esc_html_e( 'Export CSV', 'ajcore-ra' ); ?></button>
+						<button type="button" id="ajra-pu-clear"><?php esc_html_e( 'Clear filters', 'ajcore-ra' ); ?></button>
+						<hr>
+						<button type="button" id="ajra-pu-mbx"><?php esc_html_e( 'Mailbox settings', 'ajcore-ra' ); ?></button>
+					</div>
+				</details>
+			</div>
+			<div class="ajra-pu-summary" id="ajra-pu-chips"></div>
+			<div class="ajra-pu-bar">
 				<label class="ajmr-tile ajmr-search"><span class="ajmr-tile-ico"><?php echo '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></span><input type="search" id="ajra-pu-q" placeholder="<?php esc_attr_e( 'Search order, invoice, property, vendor…', 'ajcore-ra' ); ?>" autocomplete="off"></label>
 				<select id="ajra-pu-property" class="ajmr-tile ajmr-select"><option value=""><?php esc_html_e( 'All properties', 'ajcore-ra' ); ?></option></select>
 				<select id="ajra-pu-vendor" class="ajmr-tile ajmr-select"><option value=""><?php esc_html_e( 'All vendors', 'ajcore-ra' ); ?></option></select>
-				<button type="button" class="ajmr-tile ajmr-tool" id="ajra-pu-clear"><span><?php esc_html_e( 'Clear', 'ajcore-ra' ); ?></span></button>
-				<button type="button" class="ajmr-tile ajmr-tool" id="ajra-pu-run"><span><?php esc_html_e( 'Read mailbox', 'ajcore-ra' ); ?></span></button>
-				<button type="button" class="ajmr-tile ajmr-tool" id="ajra-pu-reparse"><span><?php esc_html_e( 'Re-parse', 'ajcore-ra' ); ?></span></button>
-				<button type="button" class="ajmr-tile ajmr-tool" id="ajra-pu-csv"><span><?php esc_html_e( 'Export CSV', 'ajcore-ra' ); ?></span></button>
 			</div>
-			<div class="ajmr-filters"><span class="ajmr-fnote" id="ajra-pu-status"></span></div>
+			<div class="ajra-pu-status" id="ajra-pu-status"></div>
 			<div class="ajmr-panel" id="ajra-pu-settings" hidden style="margin-top:14px">
 				<h3><?php esc_html_e( 'Mailbox and selection', 'ajcore-ra' ); ?></h3>
 				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
@@ -1424,7 +1446,7 @@ class AJCore_RA_Purchases {
 		( function () {
 			var rest = <?php echo wp_json_encode( rest_url( 'ajcore/v1' ) ); ?>, nonce = <?php echo wp_json_encode( wp_create_nonce( 'wp_rest' ) ); ?>;
 			var STAGES = [ 'new', 'verified', 'charged', 'posted', 'ignored' ], LABEL = { 'new': 'New', verified: 'Verified', charged: 'Charged', posted: 'Posted', ignored: 'Ignored' };
-			var st = { stage: '', property: '', vendor: '', q: '', label: '' }, data = null, selected = {};
+			var st = { stage: '', property: '', vendor: '', q: '', label: '', issue: '' }, data = null, selected = {};
 			// Times are stored in UTC; show them in the viewer's own time zone. "Last update" = the order's latest email; "Order date" = when it was placed.
 			function dayLabel( k ) { var d = new Date( k + 'T12:00:00' ); return isNaN( d ) ? k : d.toLocaleDateString( undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' } ); }
 			function ld( s ) { if ( ! s ) { return null; } var d = new Date( s.replace( ' ', 'T' ) + 'Z' ); return isNaN( d ) ? null : d; }
@@ -1442,14 +1464,13 @@ class AJCore_RA_Purchases {
 			function post( path, body ) { return api( path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( body ) } ); }
 
 			function load() {
-				var q = new URLSearchParams(); [ 'stage', 'property', 'vendor', 'q', 'label', 'sort' ].forEach( function ( k ) { if ( st[ k ] ) { q.set( k === 'stage' && st.stage === 'verify' ? 'stage' : k, st[ k ] ); } } );
+				var q = new URLSearchParams(); [ 'stage', 'property', 'vendor', 'q', 'label', 'issue' ].forEach( function ( k ) { if ( st[ k ] ) { q.set( k === 'stage' && st.stage === 'verify' ? 'stage' : k, st[ k ] ); } } );
 				api( '/ops/purchases?' + q.toString() ).then( function ( d ) { var first = ! data; data = d; render(); if ( first && d.mailbox && ! ( d.last_run && typeof d.last_run.at === 'string' ) ) { $( 'ajra-pu-run' ).click(); } } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; } );
 			}
 
-			function tile( key, label, count, tint, icon ) {
-				var t = el( 'a', 'ajmr-tile ajmr-stat ' + tint + ( st.stage === key ? ' is-on' : '' ) ); t.href = '#';
-				var ico = el( 'span', 'ajmr-tile-ico' ); ico.innerHTML = icon; t.appendChild( ico );
-				var tx = el( 'span', 'ajmr-tile-txt' ); tx.appendChild( el( 'small', null, label ) ); tx.appendChild( el( 'strong', null, String( count ) ) ); t.appendChild( tx );
+			function tile( key, label, count ) {
+				var t = el( 'a', 'ajra-seg-btn' + ( st.stage === key && ! st.label ? ' is-on' : '' ) + ( count ? '' : ' is-zero' ) ); t.href = '#';
+				t.appendChild( document.createTextNode( label ) ); t.appendChild( el( 'b', null, String( count ) ) );
 				t.addEventListener( 'click', function ( e ) { e.preventDefault(); st.label = ''; st.stage = st.stage === key ? '' : key; selected = {}; load(); } );
 				return t;
 			}
@@ -1458,27 +1479,32 @@ class AJCore_RA_Purchases {
 			function render() {
 				var s = data.stats, c = s.stages, total = STAGES.reduce( function ( a, k ) { return a + ( c[ k ] || 0 ); }, 0 );
 				var tiles = $( 'ajra-pu-tiles' ); tiles.innerHTML = '';
-				tiles.appendChild( tile( 'verify', 'Needs verification', s.needs_verification, 'is-amber', ICON.alert ) );
-				tiles.appendChild( tile( 'new', 'New', c[ 'new' ] || 0, 'is-amber', ICON.list ) );
-				tiles.appendChild( tile( 'verified', 'Verified', c.verified || 0, 'is-green', ICON.check ) );
-				tiles.appendChild( tile( 'charged', 'Charged', c.charged || 0, 'is-green', ICON.check ) );
+				tiles.appendChild( tile( 'verify', 'To verify', s.needs_verification ) );
+				tiles.appendChild( tile( 'new', 'New', c[ 'new' ] || 0 ) );
+				tiles.appendChild( tile( 'verified', 'Verified', c.verified || 0 ) );
+				tiles.appendChild( tile( 'charged', 'Charged', c.charged || 0 ) );
 				// The Marketing label: a filter on these orders (not a pipeline of its own).
-				var mt = el( 'a', 'ajmr-tile ajmr-stat is-amber' + ( st.label === 'marketing' ? ' is-on' : '' ) ); mt.href = '#'; mt.title = 'Orders labelled Marketing: see, preview and delete them';
-				var mtx = el( 'span', 'ajmr-tile-txt' ); mtx.appendChild( el( 'small', null, 'Marketing' ) ); mtx.appendChild( el( 'strong', null, String( data.marketing || 0 ) ) ); mt.appendChild( mtx );
+				var mt = el( 'a', 'ajra-seg-btn is-mk' + ( st.label === 'marketing' ? ' is-on' : '' ) + ( data.marketing ? '' : ' is-zero' ) ); mt.href = '#'; mt.title = 'Orders labelled Marketing: see, preview and delete them';
+				mt.appendChild( document.createTextNode( 'Marketing' ) ); mt.appendChild( el( 'b', null, String( data.marketing || 0 ) ) );
 				mt.addEventListener( 'click', function ( e ) { e.preventDefault(); st.label = st.label === 'marketing' ? '' : 'marketing'; st.stage = ''; selected = {}; load(); } ); tiles.appendChild( mt );
 				var sb = $( 'ajra-pu-senders-box' ); sb.hidden = st.label !== 'marketing'; var sl = $( 'ajra-pu-senders' ); sl.innerHTML = '';
 				if ( ! ( data.senders || [] ).length ) { sl.appendChild( el( 'span', 'description', 'None yet.' ) ); }
 				( data.senders || [] ).forEach( function ( s ) { var b = el( 'button', 'button button-small', s + '  ×' ); b.type = 'button'; b.style.marginRight = '6px'; b.title = 'Remove'; b.addEventListener( 'click', function () { post( '/ops/purchases/senders', { remove: s } ).then( load ); } ); sl.appendChild( b ); } );
-				var side = el( 'div', 'ajmr-mailboxes' ), g = el( 'div', 'ajmr-tile ajmr-tile-sm' ), gb = el( 'button', 'ajmr-tile-main' ); gb.type = 'button';
-				var gi = el( 'span', 'ajmr-tile-ico' ); gi.innerHTML = ICON.cog; gb.appendChild( gi ); var gt = el( 'span', 'ajmr-tile-txt' ); gt.appendChild( el( 'small', null, 'Mailbox' ) ); gt.appendChild( el( 'strong', null, data.mailbox ? data.mailbox.split( '@' )[ 0 ] : 'Not set' ) ); gb.appendChild( gt );
-				gb.addEventListener( 'click', function () { var p = $( 'ajra-pu-settings' ); p.hidden = ! p.hidden; } ); g.appendChild( gb ); side.appendChild( g ); tiles.appendChild( side );
-
+				// One quiet summary line instead of a row of chips.
 				var chips = $( 'ajra-pu-chips' ); chips.innerHTML = '';
-				[ [ 'Total spent', money( s.total_spent ) ], [ 'This month', money( s.this_month ) ], [ 'Orders', String( total ) ], [ 'No property', String( s.unassigned ) ] ].forEach( function ( x ) {
-					var chip = el( 'span', 'ajmr-fchip' ); chip.appendChild( el( 'b', null, x[ 0 ] ) ); chip.appendChild( document.createTextNode( ' ' + x[ 1 ] ) ); chips.appendChild( chip );
+				// Orders with bad data, as clickable filters (click again to clear).
+				var lab = el( 'span', 'ajra-stat' ); lab.appendChild( el( 'em', null, total + ' orders' ) ); chips.appendChild( lab );
+				chips.appendChild( el( 'span', 'ajra-pu-fix', 'Needs attention:' ) );
+				[ [ 'no_property', 'No property' ], [ 'no_name', 'Property not named' ], [ 'no_total', 'No total' ], [ 'no_order', 'No order #' ] ].forEach( function ( x ) {
+					var n = ( data.issues || {} )[ x[ 0 ] ] || 0, on = st.issue === x[ 0 ];
+					var b = el( 'a', 'ajra-issue' + ( on ? ' is-on' : '' ) + ( n ? '' : ' is-zero' ) ); b.href = '#'; b.appendChild( document.createTextNode( x[ 1 ] ) ); b.appendChild( el( 'b', null, String( n ) ) );
+					b.addEventListener( 'click', function ( e ) { e.preventDefault(); if ( ! n && ! on ) { return; } st.issue = on ? '' : x[ 0 ]; st.label = ''; selected = {}; load(); } ); chips.appendChild( b );
 				} );
-				if ( data.rentec ) { chips.appendChild( el( 'span', 'ajmr-fnote', data.rentec.count ? 'Rentec: ' + data.rentec.count + ' properties loaded' : 'Rentec: no properties (' + ( data.rentec.note || 'none returned' ) + ')' ) ); }
-				if ( data.last_run && typeof data.last_run.at === 'string' ) { chips.appendChild( el( 'span', 'ajmr-fnote', 'Last pass ' + data.last_run.at + ' · ' + data.last_run.scanned + ' scanned · ' + data.last_run[ 'new' ] + ' new' + ( data.last_run.errors && data.last_run.errors.length ? ' · ERROR: ' + data.last_run.errors.join( ' | ' ) : '' ) ) ); }
+				var lr = data.last_run, notes = [];
+				if ( data.rentec ) { notes.push( data.rentec.count ? 'Rentec ' + data.rentec.count + ' properties' : 'Rentec: none (' + ( data.rentec.note || 'none returned' ) + ')' ); }
+				if ( lr && typeof lr.at === 'string' ) { notes.push( 'Read ' + lr.at.slice( 5, 16 ) + ' · ' + lr.scanned + ' scanned, ' + lr[ 'new' ] + ' new' + ( lr.errors && lr.errors.length ? ' · ERROR: ' + lr.errors.join( ' | ' ) : '' ) ); }
+				if ( data.mailbox ) { notes.unshift( data.mailbox ); }
+				if ( notes.length ) { chips.appendChild( el( 'span', 'ajra-pu-note', notes.join( '  ·  ' ) ) ); }
 
 				fillSelect( 'ajra-pu-property', data.by_property.map( function ( p ) { return p.property; } ).filter( function ( p ) { return p !== '(no property)'; } ), st.property, 'All properties' );
 				fillSelect( 'ajra-pu-vendor', data.vendors, st.vendor, 'All vendors' );
@@ -1584,7 +1610,7 @@ class AJCore_RA_Purchases {
 			var qt = null; $( 'ajra-pu-q' ).addEventListener( 'input', function ( e ) { clearTimeout( qt ); qt = setTimeout( function () { st.q = e.target.value.trim(); load(); }, 350 ); } );
 			$( 'ajra-pu-property' ).addEventListener( 'change', function ( e ) { st.property = e.target.value; load(); } );
 			$( 'ajra-pu-vendor' ).addEventListener( 'change', function ( e ) { st.vendor = e.target.value; load(); } );
-			$( 'ajra-pu-clear' ).addEventListener( 'click', function () { st = { stage: '', property: '', vendor: '', q: '', label: '' }; $( 'ajra-pu-q' ).value = ''; selected = {}; load(); } );
+			$( 'ajra-pu-clear' ).addEventListener( 'click', function () { st = { stage: '', property: '', vendor: '', q: '', label: '', issue: '' }; $( 'ajra-pu-q' ).value = ''; selected = {}; load(); } );
 			$( 'ajra-pu-all' ).addEventListener( 'change', function ( e ) { selected = {}; if ( e.target.checked && data ) { data.orders.forEach( function ( o ) { selected[ o.id ] = true; } ); } render(); } );
 			$( 'ajra-pu-bulk-clear' ).addEventListener( 'click', function () { selected = {}; render(); } );
 			$( 'ajra-pu-bulk-marketing' ).addEventListener( 'click', function () {
@@ -1607,6 +1633,9 @@ class AJCore_RA_Purchases {
 				var b = $( 'ajra-pu-run' ); b.disabled = true; $( 'ajra-pu-status' ).textContent = 'Reading the mailbox…';
 				post( '/ops/purchases/process', {} ).then( function ( d ) { $( 'ajra-pu-status' ).textContent = d.new + ' new, ' + d.scanned + ' scanned' + ( d.complete ? ' (whole mailbox read)' : ' (more to read: click Read mailbox again)' ) + ( d.errors && d.errors.length ? ' · ' + d.errors.join( ' | ' ) : '' ); b.disabled = false; load(); } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; b.disabled = false; } );
 			} );
+			$( 'ajra-pu-mbx' ).addEventListener( 'click', function () { var pn = $( 'ajra-pu-settings' ); pn.hidden = ! pn.hidden; if ( ! pn.hidden ) { pn.scrollIntoView( { behavior: 'smooth', block: 'nearest' } ); } } );
+			document.querySelectorAll( '#ajra-pu-menu .ajra-menu-list button' ).forEach( function ( b ) { b.addEventListener( 'click', function () { $( 'ajra-pu-menu' ).removeAttribute( 'open' ); } ); } );
+			document.addEventListener( 'click', function ( e ) { var m = $( 'ajra-pu-menu' ); if ( m && m.hasAttribute( 'open' ) && ! m.contains( e.target ) ) { m.removeAttribute( 'open' ); } } );
 			$( 'ajra-pu-reparse' ).addEventListener( 'click', function () {
 				var b = this; b.disabled = true; $( 'ajra-pu-status' ).textContent = 'Re-parsing…';
 				post( '/ops/purchases/reparse', {} ).then( function ( d ) { $( 'ajra-pu-status' ).textContent = d.reparsed + ' re-parsed, ' + d.fetched + ' fetched' + ( d.remaining ? ', ' + d.remaining + ' left: click Re-parse again' : '' ); b.disabled = false; load(); } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; b.disabled = false; } );
