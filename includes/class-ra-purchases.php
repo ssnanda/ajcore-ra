@@ -1366,6 +1366,7 @@ class AJCore_RA_Purchases {
 		<div id="ajra-pu">
 			<div class="ajra-pu-head">
 				<div class="ajra-seg" id="ajra-pu-tiles"></div>
+				<div class="ajra-pu-issues" id="ajra-pu-chips"></div>
 				<details class="ajra-menu" id="ajra-pu-menu">
 					<summary><?php esc_html_e( 'Actions', 'ajcore-ra' ); ?> &#9662;</summary>
 					<div class="ajra-menu-list">
@@ -1378,7 +1379,6 @@ class AJCore_RA_Purchases {
 					</div>
 				</details>
 			</div>
-			<div class="ajra-pu-summary" id="ajra-pu-chips"></div>
 			<div class="ajra-pu-bar">
 				<label class="ajmr-tile ajmr-search"><span class="ajmr-tile-ico"><?php echo '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></span><input type="search" id="ajra-pu-q" placeholder="<?php esc_attr_e( 'Search order, invoice, property, vendor…', 'ajcore-ra' ); ?>" autocomplete="off"></label>
 				<select id="ajra-pu-property" class="ajmr-tile ajmr-select"><option value=""><?php esc_html_e( 'All properties', 'ajcore-ra' ); ?></option></select>
@@ -1471,7 +1471,7 @@ class AJCore_RA_Purchases {
 			function tile( key, label, count ) {
 				var t = el( 'a', 'ajra-seg-btn' + ( st.stage === key && ! st.label ? ' is-on' : '' ) + ( count ? '' : ' is-zero' ) ); t.href = '#';
 				t.appendChild( document.createTextNode( label ) ); t.appendChild( el( 'b', null, String( count ) ) );
-				t.addEventListener( 'click', function ( e ) { e.preventDefault(); st.label = ''; st.stage = st.stage === key ? '' : key; selected = {}; load(); } );
+				t.addEventListener( 'click', function ( e ) { e.preventDefault(); st.label = ''; st.issue = ''; st.stage = st.stage === key ? '' : key; selected = {}; load(); } );
 				return t;
 			}
 			var ICON = { alert: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>', check: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>', list: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>', cog: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>' };
@@ -1479,6 +1479,8 @@ class AJCore_RA_Purchases {
 			function render() {
 				var s = data.stats, c = s.stages, total = STAGES.reduce( function ( a, k ) { return a + ( c[ k ] || 0 ); }, 0 );
 				var tiles = $( 'ajra-pu-tiles' ); tiles.innerHTML = '';
+				var at = el( 'a', 'ajra-seg-btn' + ( ! st.stage && ! st.label && ! st.issue ? ' is-on' : '' ) ); at.href = '#'; at.appendChild( document.createTextNode( 'All' ) ); at.appendChild( el( 'b', null, String( total ) ) );
+				at.addEventListener( 'click', function ( e ) { e.preventDefault(); st.stage = ''; st.label = ''; st.issue = ''; selected = {}; load(); } ); tiles.appendChild( at );
 				tiles.appendChild( tile( 'verify', 'To verify', s.needs_verification ) );
 				tiles.appendChild( tile( 'new', 'New', c[ 'new' ] || 0 ) );
 				tiles.appendChild( tile( 'verified', 'Verified', c.verified || 0 ) );
@@ -1486,25 +1488,24 @@ class AJCore_RA_Purchases {
 				// The Marketing label: a filter on these orders (not a pipeline of its own).
 				var mt = el( 'a', 'ajra-seg-btn is-mk' + ( st.label === 'marketing' ? ' is-on' : '' ) + ( data.marketing ? '' : ' is-zero' ) ); mt.href = '#'; mt.title = 'Orders labelled Marketing: see, preview and delete them';
 				mt.appendChild( document.createTextNode( 'Marketing' ) ); mt.appendChild( el( 'b', null, String( data.marketing || 0 ) ) );
-				mt.addEventListener( 'click', function ( e ) { e.preventDefault(); st.label = st.label === 'marketing' ? '' : 'marketing'; st.stage = ''; selected = {}; load(); } ); tiles.appendChild( mt );
+				mt.addEventListener( 'click', function ( e ) { e.preventDefault(); st.label = st.label === 'marketing' ? '' : 'marketing'; st.stage = ''; st.issue = ''; selected = {}; load(); } ); tiles.appendChild( mt );
 				var sb = $( 'ajra-pu-senders-box' ); sb.hidden = st.label !== 'marketing'; var sl = $( 'ajra-pu-senders' ); sl.innerHTML = '';
 				if ( ! ( data.senders || [] ).length ) { sl.appendChild( el( 'span', 'description', 'None yet.' ) ); }
 				( data.senders || [] ).forEach( function ( s ) { var b = el( 'button', 'button button-small', s + '  ×' ); b.type = 'button'; b.style.marginRight = '6px'; b.title = 'Remove'; b.addEventListener( 'click', function () { post( '/ops/purchases/senders', { remove: s } ).then( load ); } ); sl.appendChild( b ); } );
 				// One quiet summary line instead of a row of chips.
 				var chips = $( 'ajra-pu-chips' ); chips.innerHTML = '';
 				// Orders with bad data, as clickable filters (click again to clear).
-				var lab = el( 'span', 'ajra-stat' ); lab.appendChild( el( 'em', null, total + ' orders' ) ); chips.appendChild( lab );
 				chips.appendChild( el( 'span', 'ajra-pu-fix', 'Needs attention:' ) );
 				[ [ 'no_property', 'No property' ], [ 'no_name', 'Property not named' ], [ 'no_total', 'No total' ], [ 'no_order', 'No order #' ] ].forEach( function ( x ) {
 					var n = ( data.issues || {} )[ x[ 0 ] ] || 0, on = st.issue === x[ 0 ];
 					var b = el( 'a', 'ajra-issue' + ( on ? ' is-on' : '' ) + ( n ? '' : ' is-zero' ) ); b.href = '#'; b.appendChild( document.createTextNode( x[ 1 ] ) ); b.appendChild( el( 'b', null, String( n ) ) );
-					b.addEventListener( 'click', function ( e ) { e.preventDefault(); if ( ! n && ! on ) { return; } st.issue = on ? '' : x[ 0 ]; st.label = ''; selected = {}; load(); } ); chips.appendChild( b );
+					b.addEventListener( 'click', function ( e ) { e.preventDefault(); if ( ! n && ! on ) { return; } st.issue = on ? '' : x[ 0 ]; st.label = ''; st.stage = ''; selected = {}; load(); } ); chips.appendChild( b );
 				} );
+				// Only problems are shown (no mailbox / Rentec / last-read chatter).
 				var lr = data.last_run, notes = [];
-				if ( data.rentec ) { notes.push( data.rentec.count ? 'Rentec ' + data.rentec.count + ' properties' : 'Rentec: none (' + ( data.rentec.note || 'none returned' ) + ')' ); }
-				if ( lr && typeof lr.at === 'string' ) { notes.push( 'Read ' + lr.at.slice( 5, 16 ) + ' · ' + lr.scanned + ' scanned, ' + lr[ 'new' ] + ' new' + ( lr.errors && lr.errors.length ? ' · ERROR: ' + lr.errors.join( ' | ' ) : '' ) ); }
-				if ( data.mailbox ) { notes.unshift( data.mailbox ); }
-				if ( notes.length ) { chips.appendChild( el( 'span', 'ajra-pu-note', notes.join( '  ·  ' ) ) ); }
+				if ( lr && lr.errors && lr.errors.length ) { notes.push( 'Read error: ' + lr.errors.join( ' | ' ) ); }
+				if ( data.rentec && ! data.rentec.count ) { notes.push( 'Rentec: no properties (' + ( data.rentec.note || 'none returned' ) + ')' ); }
+				var stx = $( 'ajra-pu-status' ); if ( notes.length && ! stx.textContent ) { stx.textContent = notes.join( '  ·  ' ); }
 
 				fillSelect( 'ajra-pu-property', data.by_property.map( function ( p ) { return p.property; } ).filter( function ( p ) { return p !== '(no property)'; } ), st.property, 'All properties' );
 				fillSelect( 'ajra-pu-vendor', data.vendors, st.vendor, 'All vendors' );
