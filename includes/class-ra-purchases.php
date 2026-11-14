@@ -1137,6 +1137,30 @@ class AJCore_RA_Purchases {
 				<button type="button" class="ajmr-tile ajmr-tool" id="ajra-pu-csv"><span><?php esc_html_e( 'Export CSV', 'ajcore-ra' ); ?></span></button>
 			</div>
 			<div class="ajmr-filters"><span class="ajmr-fnote" id="ajra-pu-status"></span></div>
+			<div class="ajmr-panel" id="ajra-pu-settings" hidden style="margin-top:14px">
+				<h3><?php esc_html_e( 'Mailbox and selection', 'ajcore-ra' ); ?></h3>
+				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+					<input type="hidden" name="action" value="ajcore_ra_purchases_save">
+					<?php wp_nonce_field( 'ajcore_ra_purchases_save' ); ?>
+					<table class="form-table" role="presentation">
+						<tr><th><label for="ajra-pu-mailbox"><?php esc_html_e( 'Shared mailbox', 'ajcore-ra' ); ?></label></th><td>
+							<input type="text" name="mailbox" id="ajra-pu-mailbox" class="regular-text" list="ajra-pu-boxes" value="<?php echo esc_attr( $s['mailbox'] ); ?>" placeholder="shop@example.com">
+							<datalist id="ajra-pu-boxes"><?php foreach ( $boxes as $b ) : ?><option value="<?php echo esc_attr( $b['address'] ); ?>"><?php echo esc_html( $b['purpose'] ); ?></option><?php endforeach; ?></datalist>
+							<p class="description"><?php esc_html_e( 'Add mailboxes under Zoho settings, "Other shared mailboxes" (Filings view).', 'ajcore-ra' ); ?></p>
+						</td></tr>
+						<tr><th><?php esc_html_e( 'Zoho labels', 'ajcore-ra' ); ?></th><td>
+							<button type="button" class="button" id="ajra-pu-labels"><?php esc_html_e( 'Load labels', 'ajcore-ra' ); ?></button>
+							<div id="ajra-pu-label-list" style="margin-top:8px;"><?php foreach ( (array) $s['labels'] as $l ) : ?><label style="display:inline-block;margin-right:12px;"><input type="checkbox" name="labels[]" value="<?php echo esc_attr( $l ); ?>" checked> <?php echo esc_html( $l ); ?></label><?php endforeach; ?></div>
+							<p class="description"><?php esc_html_e( 'Only mail carrying a ticked label is read. None ticked = every message.', 'ajcore-ra' ); ?></p>
+						</td></tr>
+						<tr><th><label for="ajra-pu-subject"><?php esc_html_e( 'Subject contains', 'ajcore-ra' ); ?></label></th><td><input type="text" name="subject" id="ajra-pu-subject" class="regular-text" value="<?php echo esc_attr( $s['subject'] ); ?>"></td></tr>
+						<tr><th><label for="ajra-pu-sender"><?php esc_html_e( 'Sender contains', 'ajcore-ra' ); ?></label></th><td><input type="text" name="sender" id="ajra-pu-sender" class="regular-text" value="<?php echo esc_attr( $s['sender'] ); ?>"><p class="description"><?php esc_html_e( 'Comma-separated; any one matches. Blank = every message.', 'ajcore-ra' ); ?></p></td></tr>
+						<tr><th><label for="ajra-pu-match"><?php esc_html_e( 'Match', 'ajcore-ra' ); ?></label></th><td><select name="match" id="ajra-pu-match"><option value="all" <?php selected( $s['match'], 'all' ); ?>><?php esc_html_e( 'All filled fields (narrow)', 'ajcore-ra' ); ?></option><option value="any" <?php selected( $s['match'], 'any' ); ?>><?php esc_html_e( 'Any filled field (broad)', 'ajcore-ra' ); ?></option></select></td></tr>
+						<tr><th><?php esc_html_e( 'Hourly pass', 'ajcore-ra' ); ?></th><td><label><input type="checkbox" name="enabled" value="1" <?php checked( '1', (string) $s['enabled'] ); ?>> <?php esc_html_e( 'Read the mailbox every hour', 'ajcore-ra' ); ?></label></td></tr>
+					</table>
+					<p><button type="submit" class="button button-primary"><?php esc_html_e( 'Save', 'ajcore-ra' ); ?></button></p>
+				</form>
+			</div>
 
 			<div class="ajmr-bulk" id="ajra-pu-bulk" hidden>
 				<strong id="ajra-pu-bulk-n">0</strong> <?php esc_html_e( 'selected', 'ajcore-ra' ); ?>
@@ -1162,30 +1186,6 @@ class AJCore_RA_Purchases {
 				<div class="ajmr-card"><h4><?php esc_html_e( 'By month', 'ajcore-ra' ); ?></h4><table class="widefat striped" id="ajra-pu-bymonth"><tbody></tbody></table></div>
 			</div>
 
-			<div class="ajmr-panel" id="ajra-pu-settings" hidden style="margin-top:14px">
-				<h3><?php esc_html_e( 'Mailbox and selection', 'ajcore-ra' ); ?></h3>
-				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-					<input type="hidden" name="action" value="ajcore_ra_purchases_save">
-					<?php wp_nonce_field( 'ajcore_ra_purchases_save' ); ?>
-					<table class="form-table" role="presentation">
-						<tr><th><label for="ajra-pu-mailbox"><?php esc_html_e( 'Shared mailbox', 'ajcore-ra' ); ?></label></th><td>
-							<input type="text" name="mailbox" id="ajra-pu-mailbox" class="regular-text" list="ajra-pu-boxes" value="<?php echo esc_attr( $s['mailbox'] ); ?>" placeholder="shop@example.com">
-							<datalist id="ajra-pu-boxes"><?php foreach ( $boxes as $b ) : ?><option value="<?php echo esc_attr( $b['address'] ); ?>"><?php echo esc_html( $b['purpose'] ); ?></option><?php endforeach; ?></datalist>
-							<p class="description"><?php esc_html_e( 'Add mailboxes under Zoho settings, "Other shared mailboxes" (Filings view).', 'ajcore-ra' ); ?></p>
-						</td></tr>
-						<tr><th><?php esc_html_e( 'Zoho labels', 'ajcore-ra' ); ?></th><td>
-							<button type="button" class="button" id="ajra-pu-labels"><?php esc_html_e( 'Load labels', 'ajcore-ra' ); ?></button>
-							<div id="ajra-pu-label-list" style="margin-top:8px;"><?php foreach ( (array) $s['labels'] as $l ) : ?><label style="display:inline-block;margin-right:12px;"><input type="checkbox" name="labels[]" value="<?php echo esc_attr( $l ); ?>" checked> <?php echo esc_html( $l ); ?></label><?php endforeach; ?></div>
-							<p class="description"><?php esc_html_e( 'Only mail carrying a ticked label is read. None ticked = every message.', 'ajcore-ra' ); ?></p>
-						</td></tr>
-						<tr><th><label for="ajra-pu-subject"><?php esc_html_e( 'Subject contains', 'ajcore-ra' ); ?></label></th><td><input type="text" name="subject" id="ajra-pu-subject" class="regular-text" value="<?php echo esc_attr( $s['subject'] ); ?>"></td></tr>
-						<tr><th><label for="ajra-pu-sender"><?php esc_html_e( 'Sender contains', 'ajcore-ra' ); ?></label></th><td><input type="text" name="sender" id="ajra-pu-sender" class="regular-text" value="<?php echo esc_attr( $s['sender'] ); ?>"><p class="description"><?php esc_html_e( 'Comma-separated; any one matches. Blank = every message.', 'ajcore-ra' ); ?></p></td></tr>
-						<tr><th><label for="ajra-pu-match"><?php esc_html_e( 'Match', 'ajcore-ra' ); ?></label></th><td><select name="match" id="ajra-pu-match"><option value="all" <?php selected( $s['match'], 'all' ); ?>><?php esc_html_e( 'All filled fields (narrow)', 'ajcore-ra' ); ?></option><option value="any" <?php selected( $s['match'], 'any' ); ?>><?php esc_html_e( 'Any filled field (broad)', 'ajcore-ra' ); ?></option></select></td></tr>
-						<tr><th><?php esc_html_e( 'Hourly pass', 'ajcore-ra' ); ?></th><td><label><input type="checkbox" name="enabled" value="1" <?php checked( '1', (string) $s['enabled'] ); ?>> <?php esc_html_e( 'Read the mailbox every hour', 'ajcore-ra' ); ?></label></td></tr>
-					</table>
-					<p><button type="submit" class="button button-primary"><?php esc_html_e( 'Save', 'ajcore-ra' ); ?></button></p>
-				</form>
-			</div>
 
 			<div class="ajmr-modal" id="ajra-pu-detail" hidden><div class="ajmr-modal-box"><div id="ajra-pu-detail-body"></div></div></div>
 		</div>
