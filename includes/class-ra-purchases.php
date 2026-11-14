@@ -496,9 +496,8 @@ class AJCore_RA_Purchases {
 			$parsed = json_decode( (string) $e->parsed, true );
 			$parsed = is_array( $parsed ) ? $parsed : array();
 			$cls    = isset( $parsed['classify'] ) && is_array( $parsed['classify'] ) ? $parsed['classify'] : self::classify( (string) $e->sender, (string) $e->subject );
-			if ( ! in_array( $cls['kind'], array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) ) {
-				$body = '';
-			} elseif ( isset( $parsed['bv'] ) && (int) $parsed['bv'] >= 3 && empty( $parsed['body_debug'] ) ) {
+			// Every email's text is read (status mails like "delivery scheduled" carry the order and invoice number too).
+			if ( isset( $parsed['bv'] ) && (int) $parsed['bv'] >= 3 && empty( $parsed['body_debug'] ) ) {
 				$body = (string) ( $parsed['body'] ?? '' );
 			} elseif ( $fetched < $max_fetch && $zoho ) {
 				$m = $zoho->intake_message( (string) $e->message_id, $mailbox );
@@ -551,7 +550,7 @@ class AJCore_RA_Purchases {
 		$ts   = null;
 		$bdbg = '';
 		$bhtml = '';
-		if ( in_array( $cls['kind'], array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) ) {
+		if ( true ) {
 			$m = $zoho->intake_message( $row['message_id'], $mailbox );
 			if ( is_wp_error( $m ) ) {
 				return $m;
