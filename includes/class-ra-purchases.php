@@ -1367,11 +1367,10 @@ class AJCore_RA_Purchases {
 			<div class="ajra-pu-head">
 				<div class="ajra-seg" id="ajra-pu-tiles"></div>
 				<div class="ajra-pu-issues" id="ajra-pu-chips"></div>
+				<button type="button" id="ajra-pu-run" class="ajra-sync" title="<?php echo esc_attr__( 'Read new mail, then re-parse stored orders', 'ajcore-ra' ); ?>">&#8635; <?php esc_html_e( 'Sync', 'ajcore-ra' ); ?></button>
 				<details class="ajra-menu" id="ajra-pu-menu">
 					<summary><?php esc_html_e( 'Actions', 'ajcore-ra' ); ?> &#9662;</summary>
 					<div class="ajra-menu-list">
-						<button type="button" id="ajra-pu-run"><?php esc_html_e( 'Read mailbox', 'ajcore-ra' ); ?></button>
-						<button type="button" id="ajra-pu-reparse"><?php esc_html_e( 'Re-parse orders', 'ajcore-ra' ); ?></button>
 						<button type="button" id="ajra-pu-csv"><?php esc_html_e( 'Export CSV', 'ajcore-ra' ); ?></button>
 						<button type="button" id="ajra-pu-clear"><?php esc_html_e( 'Clear filters', 'ajcore-ra' ); ?></button>
 						<hr>
@@ -1629,18 +1628,25 @@ class AJCore_RA_Purchases {
 				var ids = Object.keys( selected ).map( Number ); if ( ! ids.length || ! window.confirm( 'Move ' + ids.length + ' order(s) to "' + LABEL[ b.getAttribute( 'data-stage' ) ] + '"?' ) ) { return; }
 				post( '/ops/purchases/stage', { ids: ids, stage: b.getAttribute( 'data-stage' ) } ).then( function () { selected = {}; load(); } ).catch( function ( e ) { alert( e.message ); } );
 			} ); } );
+			// Sync = read new mail, then re-parse what is stored (repeated until nothing is left).
 			$( 'ajra-pu-run' ).addEventListener( 'click', function () {
-				if ( ! data || ! data.mailbox ) { $( 'ajra-pu-status' ).textContent = 'Mailbox not saved yet: enter shop@… in the gear panel and click Save, then Read mailbox.'; $( 'ajra-pu-settings' ).hidden = false; return; }
-				var b = $( 'ajra-pu-run' ); b.disabled = true; $( 'ajra-pu-status' ).textContent = 'Reading the mailbox…';
-				post( '/ops/purchases/process', {} ).then( function ( d ) { $( 'ajra-pu-status' ).textContent = d.new + ' new, ' + d.scanned + ' scanned' + ( d.complete ? ' (whole mailbox read)' : ' (more to read: click Read mailbox again)' ) + ( d.errors && d.errors.length ? ' · ' + d.errors.join( ' | ' ) : '' ); b.disabled = false; load(); } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; b.disabled = false; } );
+				var stx = $( 'ajra-pu-status' ), b = $( 'ajra-pu-run' );
+				if ( ! data || ! data.mailbox ) { stx.textContent = 'Mailbox not saved yet: enter shop@… in the gear panel and click Save, then Sync.'; $( 'ajra-pu-settings' ).hidden = false; return; }
+				b.disabled = true; stx.textContent = 'Syncing: reading the mailbox…';
+				var msg = '';
+				post( '/ops/purchases/process', {} ).then( function ( d ) {
+					msg = d.new + ' new, ' + d.scanned + ' scanned' + ( d.complete ? '' : ' (more to read: Sync again)' ) + ( d.errors && d.errors.length ? ' · ' + d.errors.join( ' | ' ) : '' );
+					var n = 0, fixed = 0;
+					function again() {
+						stx.textContent = 'Syncing: re-parsing… ' + fixed + ' done';
+						return post( '/ops/purchases/reparse', {} ).then( function ( r ) { fixed += r.reparsed || 0; if ( r.remaining && ++n < 12 ) { return again(); } return r.remaining || 0; } );
+					}
+					return again().then( function ( left ) { stx.textContent = msg + ' · ' + fixed + ' re-parsed' + ( left ? ', ' + left + ' left: Sync again' : '' ); } );
+				} ).catch( function ( e ) { stx.textContent = e.message; } ).then( function () { b.disabled = false; load(); } );
 			} );
 			$( 'ajra-pu-mbx' ).addEventListener( 'click', function () { var pn = $( 'ajra-pu-settings' ); pn.hidden = ! pn.hidden; if ( ! pn.hidden ) { pn.scrollIntoView( { behavior: 'smooth', block: 'nearest' } ); } } );
 			document.querySelectorAll( '#ajra-pu-menu .ajra-menu-list button' ).forEach( function ( b ) { b.addEventListener( 'click', function () { $( 'ajra-pu-menu' ).removeAttribute( 'open' ); } ); } );
 			document.addEventListener( 'click', function ( e ) { var m = $( 'ajra-pu-menu' ); if ( m && m.hasAttribute( 'open' ) && ! m.contains( e.target ) ) { m.removeAttribute( 'open' ); } } );
-			$( 'ajra-pu-reparse' ).addEventListener( 'click', function () {
-				var b = this; b.disabled = true; $( 'ajra-pu-status' ).textContent = 'Re-parsing…';
-				post( '/ops/purchases/reparse', {} ).then( function ( d ) { $( 'ajra-pu-status' ).textContent = d.reparsed + ' re-parsed, ' + d.fetched + ' fetched' + ( d.remaining ? ', ' + d.remaining + ' left: click Re-parse again' : '' ); b.disabled = false; load(); } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; b.disabled = false; } );
-			} );
 			$( 'ajra-pu-csv' ).addEventListener( 'click', function () {
 				if ( ! data ) { return; }
 				var rows = [ [ 'Date', 'Vendor', 'Order', 'Invoice', 'Property tag', 'Property', 'Subtotal', 'Tax', 'Total', 'Stage' ] ].concat( data.orders.map( function ( o ) { return [ o.order_date, o.vendor, o.order_no, o.invoice_no, o.property_tag, o.property_name, o.subtotal, o.tax, o.total, o.stage ]; } ) );
