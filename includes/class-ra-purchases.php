@@ -607,6 +607,14 @@ class AJCore_RA_Purchases {
 				$new['property_tag']  = $f['property_tag'];
 				$new['property_name'] = $name;
 			}
+			if ( '' === (string) $existing->property_name && '' === $existing->property_tag && '' === $f['property_tag'] ) {
+				// nothing to name
+			} elseif ( '' === (string) $existing->property_name && ! isset( $new['property_name'] ) ) {
+				$nm = $this->property_name_for( '' !== $existing->property_tag ? (string) $existing->property_tag : (string) $f['property_tag'] );
+				if ( '' !== $nm ) {
+					$new['property_name'] = $nm;
+				}
+			}
 			if ( '' === $existing->invoice_no && '' !== $f['invoice_no'] ) {
 				$new['invoice_no'] = $f['invoice_no'];
 			}
@@ -637,13 +645,91 @@ class AJCore_RA_Purchases {
 		return (int) $pdb->insert_id;
 	}
 
+	/** Fixed rules: a tag (delivery address / PO#) containing the key gets that property label. Filterable. */
+	private function name_rules() {
+		return (array) apply_filters( 'ajcore_ra_purchase_property_rules', array( 'ardale' => 'High Point Property' ) );
+	}
+
+	/** Words of an address, lower-cased, with street types written one way (Road = Rd, Street = St, ...), so "6822" or "Nimes Rd" can be matched to a full address. */
+	private static function addr_tokens( $s ) {
+		$s   = preg_replace( '/[^a-z0-9 ]+/', ' ', strtolower( (string) $s ) );
+		$abb = array( 'road' => 'rd', 'street' => 'st', 'drive' => 'dr', 'avenue' => 'ave', 'lane' => 'ln', 'court' => 'ct', 'boulevard' => 'blvd', 'circle' => 'cir', 'place' => 'pl', 'parkway' => 'pkwy', 'highway' => 'hwy', 'trail' => 'trl', 'terrace' => 'ter' );
+		$out = array();
+		foreach ( preg_split( '/\s+/', trim( (string) $s ) ) as $w ) {
+			if ( '' !== $w ) {
+				$out[] = isset( $abb[ $w ] ) ? $abb[ $w ] : $w;
+			}
+		}
+		return array_values( array_unique( $out ) );
+	}
+
+	/** Rentec properties (top level, not their units) with the words of their address, from AJCore-RA's own cached Rentec list. Empty when Rentec is off. */
+	private function rentec_properties() {
+		static $cache = null;
+		if ( null !== $cache ) {
+			return $cache;
+		}
+		$cache = array();
+		if ( ! class_exists( 'AJCore_RA_Rentec' ) ) {
+			return $cache;
+		}
+		try {
+			$res = AJCore_RA_Rentec::rows_for_sync( 'properties' );
+		} catch ( \Throwable $e ) {
+			return $cache;
+		}
+		if ( is_wp_error( $res ) ) {
+			return $cache;
+		}
+		foreach ( (array) $res as $account ) {
+			foreach ( (array) ( isset( $account['rows'] ) ? $account['rows'] : array() ) as $p ) {
+				if ( ! is_array( $p ) || empty( $p['address'] ) || empty( $p['property_id'] ) ) {
+					continue;
+				}
+				$label   = trim( preg_replace( '/\s+/', ' ', $p['address'] . ( ! empty( $p['city'] ) ? ', ' . $p['city'] : '' ) . ( ! empty( $p['state'] ) ? ', ' . $p['state'] : '' ) . ( ! empty( $p['zip'] ) ? ' ' . $p['zip'] : '' ) ) );
+				$cache[] = array( 'id' => (string) $p['property_id'], 'label' => $label, 'tokens' => self::addr_tokens( $label . ' ' . ( isset( $p['nickname'] ) ? $p['nickname'] : '' ) ) );
+			}
+		}
+		return $cache;
+	}
+
+	/** The one Rentec property whose address holds every word of the tag ("6822" -> 6822 Trimbach Way, Charlotte, NC 28269), or null when none or several match. */
+	private function match_rentec( $tag ) {
+		$want = self::addr_tokens( $tag );
+		if ( ! $want ) {
+			return null;
+		}
+		$hits = array();
+		foreach ( $this->rentec_properties() as $p ) {
+			if ( ! array_diff( $want, $p['tokens'] ) ) {
+				$hits[] = $p;
+			}
+		}
+		return 1 === count( $hits ) ? $hits[0] : null;
+	}
+
+	/** Property label for a tag: a saved name, else a fixed rule (Ardale), else the matching Rentec property (remembered for next time). */
 	private function property_name_for( $tag ) {
 		if ( '' === $tag ) {
 			return '';
 		}
-		$pdb = $this->pdb();
-		$row = $pdb->get_row( $pdb->prepare( "SELECT name FROM `{$this->table( 'aj_purchase_properties' )}` WHERE tag = %s", $tag ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-		return $row ? (string) $row->name : '';
+		$pdb   = $this->pdb();
+		$props = $this->table( 'aj_purchase_properties' );
+		$row   = $pdb->get_row( $pdb->prepare( "SELECT name FROM `{$props}` WHERE tag = %s", $tag ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( $row && '' !== (string) $row->name ) {
+			return (string) $row->name;
+		}
+		foreach ( $this->name_rules() as $needle => $name ) {
+			if ( false !== stripos( $tag, (string) $needle ) ) {
+				return (string) $name;
+			}
+		}
+		$m = $this->match_rentec( $tag );
+		if ( $m ) {
+			$pdb->query( $pdb->prepare( "INSERT IGNORE INTO `{$props}` (tag, name, rentec_property_id) VALUES (%s, %s, %s)", $tag, $m['label'], $m['id'] ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			return $m['label'];
+		}
+		return '';
 	}
 
 	// ── REST (/ops/purchases*) ──────────────────────────────────────────────────
@@ -1212,6 +1298,7 @@ class AJCore_RA_Purchases {
 				var a = document.createElement( 'a' ); a.href = URL.createObjectURL( new Blob( [ csv ], { type: 'text/csv' } ) ); a.download = 'purchases.csv'; a.click();
 			} );
 			$( 'ajra-pu-detail' ).addEventListener( 'click', function ( e ) { if ( e.target === this ) { this.hidden = true; } } );
+			document.addEventListener( 'keydown', function ( e ) { if ( e.key === 'Escape' ) { $( 'ajra-pu-detail' ).hidden = true; } } );
 			var lb = $( 'ajra-pu-labels' ), list = $( 'ajra-pu-label-list' );
 			lb.addEventListener( 'click', function () {
 				var checked = {}; list.querySelectorAll( 'input:checked' ).forEach( function ( i ) { checked[ i.value ] = true; } );
