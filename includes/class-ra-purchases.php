@@ -632,8 +632,11 @@ class AJCore_RA_Purchases {
 			$parsed = is_array( $parsed ) ? $parsed : array();
 			$cls    = isset( $parsed['classify'] ) && is_array( $parsed['classify'] ) ? $parsed['classify'] : self::classify( (string) $e->sender, (string) $e->subject );
 			// Every email's text is read (status mails like "delivery scheduled" carry the order and invoice number too).
-			if ( isset( $parsed['bv'] ) && (int) $parsed['bv'] >= 3 && empty( $parsed['body_debug'] ) ) {
-				$body = (string) ( $parsed['body'] ?? '' );
+			// An email stored with an empty body (Zoho answered with nothing at read time) is fetched again, up to 3 tries.
+			$stored  = (string) ( $parsed['body'] ?? '' );
+			$tries   = (int) ( $parsed['tries'] ?? 0 );
+			if ( isset( $parsed['bv'] ) && (int) $parsed['bv'] >= 3 && empty( $parsed['body_debug'] ) && ( strlen( trim( $stored ) ) >= 20 || $tries >= 3 ) ) {
+				$body = $stored;
 			} elseif ( $fetched < $max_fetch && $zoho ) {
 				$m = $zoho->intake_message( (string) $e->message_id, $mailbox );
 				$fetched++;
@@ -645,6 +648,7 @@ class AJCore_RA_Purchases {
 				$parsed['body_debug'] = (string) ( $m['body_debug'] ?? '' );
 				$parsed['html']       = (string) ( $m['body_html'] ?? '' );
 				$parsed['bv']         = 3;
+				$parsed['tries']      = $tries + 1;
 			} else {
 				$left++;
 				continue;
@@ -1454,6 +1458,7 @@ class AJCore_RA_Purchases {
 				<select id="ajra-pu-vendor" class="ajmr-tile ajmr-select"><option value=""><?php esc_html_e( 'All vendors', 'ajcore-ra' ); ?></option></select>
 			</div>
 			<div class="ajra-pu-status" id="ajra-pu-status"></div>
+			<div class="ajra-pu-warn" id="ajra-pu-warn"></div>
 			<div class="ajmr-panel" id="ajra-pu-settings" hidden style="margin-top:14px">
 				<h3><?php esc_html_e( 'Mailbox and selection', 'ajcore-ra' ); ?></h3>
 				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
@@ -1577,7 +1582,7 @@ class AJCore_RA_Purchases {
 				var lr = data.last_run, notes = [];
 				if ( lr && lr.errors && lr.errors.length ) { notes.push( 'Read error: ' + lr.errors.join( ' | ' ) ); }
 				if ( data.rentec && ! data.rentec.count ) { notes.push( 'Rentec: no properties (' + ( data.rentec.note || 'none returned' ) + ')' ); }
-				var stx = $( 'ajra-pu-status' ); if ( notes.length && ! stx.textContent ) { stx.textContent = notes.join( '  ·  ' ); }
+				$( 'ajra-pu-warn' ).textContent = notes.join( '  ·  ' );
 
 				fillSelect( 'ajra-pu-property', data.by_property.map( function ( p ) { return p.property; } ).filter( function ( p ) { return p !== '(no property)'; } ), st.property, 'All properties' );
 				fillSelect( 'ajra-pu-vendor', data.vendors, st.vendor, 'All vendors' );
