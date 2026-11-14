@@ -1057,7 +1057,7 @@ class AJCore_RA_Purchases {
 			function el( tag, cls, text ) { var e = document.createElement( tag ); if ( cls ) { e.className = cls; } if ( text != null ) { e.textContent = text; } return e; }
 			function money( v ) { return v == null ? '—' : '$' + Number( v ).toLocaleString( undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 } ); }
 			function day( s ) { if ( ! s ) { return '—'; } var d = new Date( s.replace( ' ', 'T' ) + 'Z' ); return isNaN( d ) ? s : d.toLocaleDateString( undefined, { month: 'short', day: 'numeric', year: 'numeric' } ); }
-			function emailFrame( html ) { var f = document.createElement( 'iframe' ); f.setAttribute( 'sandbox', 'allow-popups' ); f.setAttribute( 'referrerpolicy', 'no-referrer' ); f.srcdoc = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src https: data:; style-src \'unsafe-inline\'; font-src https: data:"><base target="_blank"><style>body{margin:10px;font:14px/1.45 -apple-system,Segoe UI,Arial,sans-serif;color:#111;word-wrap:break-word}img{max-width:100%;height:auto}</style>' + html; f.style.cssText = 'width:100%;height:520px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;resize:vertical;'; return f; }
+			function emailFrame( html ) { var f = document.createElement( 'iframe' ); f.setAttribute( 'sandbox', 'allow-popups' ); f.setAttribute( 'referrerpolicy', 'no-referrer' ); f.srcdoc = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src https: data:; style-src \'unsafe-inline\'; font-src https: data:"><base target="_blank"><style>body{margin:10px;font:14px/1.45 -apple-system,Segoe UI,Arial,sans-serif;color:#111;word-wrap:break-word}img{max-width:100%;height:auto}</style>' + html; f.style.cssText = 'width:100%;height:680px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;resize:vertical;'; return f; }
 			function api( path, opts ) { opts = opts || {}; opts.headers = Object.assign( { 'X-WP-Nonce': nonce }, opts.headers || {} ); return fetch( rest + path, opts ).then( function ( r ) { return r.json().then( function ( d ) { if ( ! r.ok ) { throw new Error( d.message || 'Request failed' ); } return d; } ); } ); }
 			function post( path, body ) { return api( path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( body ) } ); }
 
@@ -1103,20 +1103,20 @@ class AJCore_RA_Purchases {
 				days.sort().reverse();
 				days.forEach( function ( k ) {
 					var list = byDay[ k ], sum = list.reduce( function ( a, o ) { return a + ( Number( o.total ) || 0 ); }, 0 );
-					var hr = el( 'tr', 'ajra-pu-day' ), hc = el( 'td', null, day( k + ' 00:00:00' ) + '  ·  ' + list.length + ( list.length === 1 ? ' order' : ' orders' ) + '  ·  ' + money( sum ) ); hc.colSpan = 7; hr.appendChild( hc ); tb.appendChild( hr );
+					var hr = el( 'tr', 'ajra-pu-day' ), hc = el( 'td', null, day( k + ' 00:00:00' ) + '  ·  ' + list.length + ( list.length === 1 ? ' order' : ' orders' ) + '  ·  ' + list.reduce( function ( a, o ) { return a + ( o.emails || [] ).length; }, 0 ) + '  ·  ' + money( sum ) ); hc.colSpan = 7; hr.appendChild( hc ); tb.appendChild( hr );
 					list.forEach( function ( o ) {
 						var tr = el( 'tr' ); tr.style.cursor = 'pointer';
 						var td = el( 'td' ); td.addEventListener( 'click', function ( e ) { e.stopPropagation(); } );
 						var cb = el( 'input' ); cb.type = 'checkbox'; cb.checked = !! selected[ o.id ]; cb.addEventListener( 'change', function () { if ( cb.checked ) { selected[ o.id ] = true; } else { delete selected[ o.id ]; } syncBulk(); } ); td.appendChild( cb ); tr.appendChild( td );
-						tr.appendChild( el( 'td', null, ( o.emails || [] ).length + ( ( o.emails || [] ).length === 1 ? ' email' : ' emails' ) ) ); tr.appendChild( el( 'td', null, o.vendor ) );
-						var ord = el( 'td' ); ord.appendChild( el( 'strong', null, o.order_no || o.invoice_no || '—' ) ); if ( o.order_no && o.invoice_no ) { ord.appendChild( el( 'div', 'description', 'Invoice ' + o.invoice_no ) ); } tr.appendChild( ord );
+						tr.appendChild( el( 'td', null, ( o.order_date || '' ).slice( 11, 16 ) ) ); tr.appendChild( el( 'td', null, o.vendor ) );
+						var ord = el( 'td' ); ord.appendChild( el( 'strong', null, o.order_no || o.invoice_no || '—' ) ); var nb = el( 'span' ); nb.style.cssText = 'margin-left:8px;display:inline-flex;gap:4px;vertical-align:middle;'; ( o.emails || [] ).forEach( function ( m, mi ) { var c = el( 'button', 'button button-small', String( mi + 1 ) ); c.type = 'button'; c.title = m.kind + ' · ' + m.subject; c.style.minWidth = '26px'; c.addEventListener( 'click', function ( ev ) { ev.stopPropagation(); openDetail( o.id, mi ); } ); nb.appendChild( c ); } ); ord.appendChild( nb ); if ( o.order_no && o.invoice_no ) { ord.appendChild( el( 'div', 'description', 'Invoice ' + o.invoice_no ) ); } tr.appendChild( ord );
 						tr.appendChild( el( 'td', null, o.property_name || o.property_tag || '—' ) );
 						var tot = el( 'td', null, money( o.total ) ); tot.style.textAlign = 'right'; tr.appendChild( tot );
 						var stg = el( 'td' ); stg.appendChild( el( 'span', 'ajcore-status-pill ' + ( o.stage === 'new' ? '' : ( o.stage === 'ignored' ? 'dup' : 'active' ) ), LABEL[ o.stage ] || o.stage ) ); tr.appendChild( stg );
 						tr.addEventListener( 'click', function () { openDetail( o.id ); } );
 						tb.appendChild( tr );
-						( o.emails || [] ).forEach( function ( m ) {
-							var er = el( 'tr', 'ajra-pu-mail' ); er.style.cursor = 'pointer'; er.addEventListener( 'click', function () { openDetail( o.id ); } ); er.appendChild( el( 'td' ) );
+						( o.emails || [] ).forEach( function ( m, mi ) {
+							var er = el( 'tr', 'ajra-pu-mail' ); er.style.cursor = 'pointer'; er.addEventListener( 'click', function () { openDetail( o.id, mi ); } ); er.appendChild( el( 'td' ) );
 							var tm = el( 'td', null, ( m.received_at || '' ).slice( 11, 16 ) ); er.appendChild( tm );
 							er.appendChild( el( 'td', null, m.kind ) );
 							var sj = el( 'td', null, m.subject ); sj.colSpan = 3; er.appendChild( sj );
@@ -1147,10 +1147,12 @@ class AJCore_RA_Purchases {
 				var all = $( 'ajra-pu-all' ); all.checked = n > 0 && data && n === data.orders.length; all.indeterminate = n > 0 && data && n < data.orders.length;
 			}
 
-			function openDetail( id ) {
+			function openDetail( id, idx ) {
 				api( '/ops/purchases/' + id ).then( function ( d ) {
-					var o = d.order, box = $( 'ajra-pu-detail-body' ); box.innerHTML = '';
-					box.appendChild( el( 'h3', null, ( o.vendor || '' ) + ' ' + ( o.order_no || o.invoice_no || '' ) ) );
+					var o = d.order, outer = $( 'ajra-pu-detail-body' ); outer.innerHTML = '';
+					outer.appendChild( el( 'h3', null, ( o.vendor || '' ) + ' ' + ( o.order_no || o.invoice_no || '' ) ) );
+					// Email on the left (the main thing), the order fields on the right.
+					var box = el( 'div' ), left = el( 'div' ), grid = el( 'div' ); grid.style.cssText = 'display:grid;grid-template-columns:minmax(0,1.8fr) minmax(300px,1fr);gap:24px;align-items:start;'; grid.appendChild( left ); grid.appendChild( box ); outer.appendChild( grid );
 					function field( label, input ) { var w = el( 'p' ); w.appendChild( el( 'label', null, label ) ); w.appendChild( document.createElement( 'br' ) ); w.appendChild( input ); box.appendChild( w ); return input; }
 					var tag = el( 'input' ); tag.type = 'text'; tag.className = 'regular-text'; tag.value = o.property_tag; field( 'Property (delivery address, else PO# tag)', tag );
 					var name = el( 'input' ); name.type = 'text'; name.className = 'regular-text'; name.value = o.property_name; field( 'Property name', name );
@@ -1165,9 +1167,21 @@ class AJCore_RA_Purchases {
 					var sv = el( 'button', 'button button-primary', 'Save' ); sv.type = 'button'; sv.addEventListener( 'click', function () { save( '' ); } ); bar.appendChild( sv );
 					[ [ 'verified', 'Save + verified' ], [ 'charged', 'Save + charged' ], [ 'ignored', 'Ignore' ], [ 'new', 'Back to new' ] ].forEach( function ( s ) { if ( o.stage === 'posted' || o.stage === s[ 0 ] ) { return; } var b = el( 'button', 'button', s[ 1 ] ); b.type = 'button'; b.style.marginLeft = '6px'; b.addEventListener( 'click', function () { save( s[ 0 ] ); } ); bar.appendChild( b ); } );
 					var cl = el( 'button', 'button-link', 'Close' ); cl.type = 'button'; cl.style.marginLeft = '12px'; cl.addEventListener( 'click', function () { $( 'ajra-pu-detail' ).hidden = true; } ); bar.appendChild( cl ); box.appendChild( bar );
-					box.appendChild( el( 'h4', null, 'Emails (' + d.emails.length + ')' ) );
-					var ul = el( 'ul' ); ul.style.cssText = 'margin:0;padding-left:16px;list-style:disc;font-size:12px;';
-					d.emails.forEach( function ( e ) { var li = el( 'li', null, day( e.received_at ) + ' · ' + e.kind + ' · ' + e.subject ); var tx = e.parsed && e.parsed.body ? e.parsed.body : ''; if ( e.parsed && e.parsed.html ) { li.appendChild( emailFrame( e.parsed.html ) ); } if ( e.parsed && e.parsed.body_debug ) { var wn = el( 'div', null, 'Only the preview could be read: ' + e.parsed.body_debug ); wn.style.cssText = 'color:#b45309;font-size:11px;margin:4px 0;'; li.appendChild( wn ); } if ( tx ) { var dt = el( 'details' ); dt.open = !( e.parsed && e.parsed.html ); dt.appendChild( el( 'summary', null, 'Plain text' ) ); var pre = el( 'pre', null, tx ); pre.style.cssText = 'max-height:360px;overflow:auto;white-space:pre-wrap;font-size:11px;background:#f8fafc;padding:8px;border-radius:6px;'; dt.appendChild( pre ); li.appendChild( dt ); } ul.appendChild( li ); } ); box.appendChild( ul );
+					// Numbered tabs: 1, 2, 3 ... each previews that email of the order.
+					left.appendChild( el( 'h4', null, 'Emails (' + d.emails.length + ')' ) );
+					var tabs = el( 'div' ), pane = el( 'div' ); tabs.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px;'; left.appendChild( tabs ); left.appendChild( pane );
+					function showEmail( n ) {
+						Array.prototype.forEach.call( tabs.children, function ( b, bi ) { b.className = 'button' + ( bi === n ? ' button-primary' : '' ); } );
+						pane.innerHTML = ''; var e = d.emails[ n ]; if ( ! e ) { pane.appendChild( el( 'p', null, 'No emails.' ) ); return; }
+						pane.appendChild( el( 'strong', null, day( e.received_at ) + ' ' + ( e.received_at || '' ).slice( 11, 16 ) + ' · ' + e.kind + ' · ' + e.subject ) );
+						var sd = el( 'div', 'description', e.sender ); sd.style.margin = '2px 0 8px'; pane.appendChild( sd );
+						var tx = e.parsed && e.parsed.body ? e.parsed.body : '';
+						if ( e.parsed && e.parsed.body_debug ) { var wn = el( 'div', null, 'Only the preview could be read: ' + e.parsed.body_debug ); wn.style.cssText = 'color:#b45309;font-size:12px;margin:4px 0;'; pane.appendChild( wn ); }
+						if ( e.parsed && e.parsed.html ) { pane.appendChild( emailFrame( e.parsed.html ) ); }
+						if ( tx ) { var dt = el( 'details' ); dt.open = ! ( e.parsed && e.parsed.html ); dt.appendChild( el( 'summary', null, 'Plain text' ) ); var pre = el( 'pre', null, tx ); pre.style.cssText = 'max-height:360px;overflow:auto;white-space:pre-wrap;font-size:12px;background:#f8fafc;padding:8px;border-radius:6px;'; dt.appendChild( pre ); pane.appendChild( dt ); }
+					}
+					d.emails.forEach( function ( e, n ) { var b = el( 'button', 'button', String( n + 1 ) ); b.type = 'button'; b.title = e.kind + ' · ' + e.subject; b.addEventListener( 'click', function () { showEmail( n ); } ); tabs.appendChild( b ); } );
+					showEmail( Math.min( Math.max( 0, idx || 0 ), Math.max( 0, d.emails.length - 1 ) ) );
 					$( 'ajra-pu-detail' ).hidden = false;
 				} ).catch( function ( e ) { alert( e.message ); } );
 			}
