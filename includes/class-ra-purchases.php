@@ -92,7 +92,7 @@ class AJCore_RA_Purchases {
 			return 0;
 		}
 		$pdb = $self->pdb();
-		return (int) $pdb->get_var( "SELECT COUNT(*) FROM `{$self->table( 'aj_purchase_orders' )}` WHERE stage = 'new' AND ( total IS NULL OR property_tag = '' )" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		return (int) $pdb->get_var( "SELECT COUNT(*) FROM `{$self->table( 'aj_purchase_orders' )}` WHERE label = '' AND stage = 'new' AND ( total IS NULL OR property_tag = '' )" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 	}
 
 	// ── database ────────────────────────────────────────────────────────────────
@@ -122,6 +122,9 @@ class AJCore_RA_Purchases {
 		$emails  = $this->table( 'aj_purchase_emails' );
 		$props   = $this->table( 'aj_purchase_properties' );
 		if ( $kit['table_exists']( $pdb, $orders ) && $kit['table_exists']( $pdb, $emails ) && $kit['table_exists']( $pdb, $props ) ) {
+			if ( ! $pdb->get_var( "SHOW COLUMNS FROM `{$orders}` LIKE 'label'" ) ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$pdb->query( "ALTER TABLE `{$orders}` ADD COLUMN label varchar(16) NOT NULL DEFAULT '' AFTER stage" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			}
 			return $done = true;
 		}
 		$charset = $pdb->get_charset_collate();
@@ -132,6 +135,7 @@ class AJCore_RA_Purchases {
 			invoice_no varchar(80) NOT NULL DEFAULT '',
 			property_tag varchar(120) NOT NULL DEFAULT '',
 			property_name varchar(190) NOT NULL DEFAULT '',
+			label varchar(16) NOT NULL DEFAULT '',
 			order_date datetime DEFAULT NULL,
 			subtotal decimal(12,2) DEFAULT NULL,
 			tax decimal(12,2) DEFAULT NULL,
@@ -479,17 +483,9 @@ class AJCore_RA_Purchases {
 				$ph = implode( ', ', array_fill( 0, count( $ids ), '%s' ) );
 				// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$known = array_flip( (array) $pdb->get_col( $pdb->prepare( "SELECT message_id FROM `{$emails}` WHERE message_id IN ({$ph})", $ids ) ) );
-				if ( class_exists( 'AJCore_Marketing' ) ) {
-					$known = $known + AJCore_Marketing::known( $s['mailbox'], $ids ); // labelled marketing (or deleted): not read back in
-				}
 			}
 			foreach ( $rows as $row ) {
 				if ( isset( $known[ $row['message_id'] ] ) || ! $this->passes_terms( $row, $s ) ) {
-					continue;
-				}
-				$sender_txt = trim( $row['from_name'] . ' <' . $row['from_email'] . '>' );
-				if ( class_exists( 'AJCore_Marketing' ) && AJCore_Marketing::is_marketing_sender( $sender_txt ) ) { // a marked sender goes straight to the Marketing tab
-					AJCore_Marketing::label( array( 'pipeline' => 'purchases', 'mailbox' => $s['mailbox'], 'message_id' => $row['message_id'], 'subject' => $row['subject'], 'sender' => $sender_txt, 'summary' => $row['summary'], 'received_at' => $row['received_at'] ) );
 					continue;
 				}
 				if ( $summary['new'] >= $max_new ) {
@@ -502,6 +498,9 @@ class AJCore_RA_Purchases {
 				}
 				$summary['new']++;
 				$touched[ (int) $order_id ] = true;
+				if ( class_exists( 'AJCore_Marketing' ) && AJCore_Marketing::is_marketing_sender( trim( $row['from_name'] . ' <' . $row['from_email'] . '>' ) ) ) {
+					$pdb->query( $pdb->prepare( "UPDATE `{$this->table( 'aj_purchase_orders' )}` SET label = 'marketing' WHERE id = %d AND stage = 'new' AND label = ''", (int) $order_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				}
 			}
 			$all_known = true;
 			foreach ( $rows as $row ) {
@@ -594,30 +593,68 @@ class AJCore_RA_Purchases {
 		return array( 'reparsed' => $done, 'fetched' => $fetched, 'remaining' => $left );
 	}
 
-	/** Label whole orders as marketing: their emails move to the Marketing tab and the orders are removed. sender_rule: '' | 'address' | 'domain'. */
+	/** Set or clear the Marketing label on orders. Body: ids (order ids), label ('marketing' | '' to clear), sender_rule ('' | 'address' | 'domain'). */
 	public function rest_marketing( WP_REST_Request $request ) {
 		$ids = array_values( array_filter( array_map( 'absint', (array) $request->get_param( 'ids' ) ) ) );
-		if ( ! $ids || ! class_exists( 'AJCore_Marketing' ) || ! $this->ensure_tables() ) {
+		if ( ! $ids || ! $this->ensure_tables() ) {
 			return new WP_Error( 'bad_request', __( 'Select orders first.', 'ajcore-ra' ), array( 'status' => 400 ) );
 		}
-		$rule    = sanitize_key( (string) $request->get_param( 'sender_rule' ) );
-		$mailbox = $this->settings()['mailbox'];
-		$pdb     = $this->pdb();
-		$emails  = $this->table( 'aj_purchase_emails' );
-		$orders  = $this->table( 'aj_purchase_orders' );
-		$ph      = implode( ', ', array_fill( 0, count( $ids ), '%d' ) );
-		$rows    = (array) $pdb->get_results( $pdb->prepare( "SELECT * FROM `{$emails}` WHERE order_id IN ({$ph})", $ids ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-		$moved   = 0;
-		foreach ( $rows as $e ) {
-			AJCore_Marketing::label( array( 'pipeline' => 'purchases', 'mailbox' => $mailbox, 'message_id' => $e->message_id, 'subject' => $e->subject, 'sender' => $e->sender, 'summary' => '', 'received_at' => $e->received_at ) );
-			if ( in_array( $rule, array( 'address', 'domain' ), true ) ) {
-				AJCore_Marketing::add_sender( (string) $e->sender, 'domain' === $rule );
+		$label  = 'marketing' === sanitize_key( (string) $request->get_param( 'label' ) ) ? 'marketing' : '';
+		$rule   = sanitize_key( (string) $request->get_param( 'sender_rule' ) );
+		$pdb    = $this->pdb();
+		$orders = $this->table( 'aj_purchase_orders' );
+		$ph     = implode( ', ', array_fill( 0, count( $ids ), '%d' ) );
+		if ( 'marketing' === $label && in_array( $rule, array( 'address', 'domain' ), true ) && class_exists( 'AJCore_Marketing' ) ) {
+			foreach ( (array) $pdb->get_col( $pdb->prepare( "SELECT DISTINCT sender FROM `{$this->table( 'aj_purchase_emails' )}` WHERE order_id IN ({$ph})", $ids ) ) as $sender ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				AJCore_Marketing::add_sender( (string) $sender, 'domain' === $rule );
 			}
-			$moved++;
 		}
-		$pdb->query( $pdb->prepare( "DELETE FROM `{$emails}` WHERE order_id IN ({$ph})", $ids ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-		$pdb->query( $pdb->prepare( "DELETE FROM `{$orders}` WHERE id IN ({$ph})", $ids ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-		return rest_ensure_response( array( 'moved' => $moved, 'orders' => count( $ids ) ) );
+		$n = $pdb->query( $pdb->prepare( "UPDATE `{$orders}` SET label = %s, updated_at = %s WHERE label <> 'deleted' AND id IN ({$ph})", array_merge( array( $label, current_time( 'mysql' ) ), $ids ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		return rest_ensure_response( array( 'updated' => (int) $n, 'label' => $label ) );
+	}
+
+	/** Delete marketing orders: every email goes to the Zoho Trash (recoverable there); the orders stay as hidden records so the next read does not bring them back. */
+	public function rest_delete_marketing( WP_REST_Request $request ) {
+		$ids = array_values( array_filter( array_map( 'absint', (array) $request->get_param( 'ids' ) ) ) );
+		if ( ! $ids || ! $this->ensure_tables() ) {
+			return new WP_Error( 'bad_request', __( 'Select orders first.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$pdb     = $this->pdb();
+		$orders  = $this->table( 'aj_purchase_orders' );
+		$emails  = $this->table( 'aj_purchase_emails' );
+		$ph      = implode( ', ', array_fill( 0, count( $ids ), '%d' ) );
+		$oids    = array_map( 'intval', (array) $pdb->get_col( $pdb->prepare( "SELECT id FROM `{$orders}` WHERE label = 'marketing' AND id IN ({$ph})", $ids ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$zoho    = $this->zoho();
+		$mailbox = $this->settings()['mailbox'];
+		$errors  = array();
+		if ( $oids ) {
+			$ph2 = implode( ', ', array_fill( 0, count( $oids ), '%d' ) );
+			foreach ( (array) $pdb->get_col( $pdb->prepare( "SELECT message_id FROM `{$emails}` WHERE order_id IN ({$ph2})", $oids ) ) as $mid ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				if ( $zoho && '' !== $mailbox ) {
+					$res = $zoho->trash_message( (string) $mid, $mailbox );
+					if ( is_wp_error( $res ) ) {
+						$errors[] = $res->get_error_message();
+					}
+				}
+			}
+			$pdb->query( $pdb->prepare( "UPDATE `{$orders}` SET label = 'deleted', updated_at = %s WHERE id IN ({$ph2})", array_merge( array( current_time( 'mysql' ) ), $oids ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		}
+		return rest_ensure_response( array( 'deleted' => count( $oids ), 'zoho_errors' => array_values( array_unique( $errors ) ) ) );
+	}
+
+	public function rest_senders( WP_REST_Request $request ) {
+		if ( ! class_exists( 'AJCore_Marketing' ) ) {
+			return rest_ensure_response( array( 'senders' => array() ) );
+		}
+		$add = strtolower( trim( (string) $request->get_param( 'add' ) ) );
+		$rem = strtolower( trim( (string) $request->get_param( 'remove' ) ) );
+		if ( '' !== $add && preg_match( '/^[a-z0-9@._\-]+$/', $add ) ) {
+			AJCore_Marketing::add_sender( false === strpos( $add, '@' ) ? 'x@' . $add : $add, false === strpos( $add, '@' ) );
+		}
+		if ( '' !== $rem ) {
+			AJCore_Marketing::remove_sender( $rem );
+		}
+		return rest_ensure_response( array( 'senders' => AJCore_Marketing::senders() ) );
 	}
 
 	public function rest_reparse() {
@@ -893,6 +930,8 @@ class AJCore_RA_Purchases {
 		$ops = array( 'AJCore_Extensions', 'can_manage_ops' );
 		register_rest_route( $ns, '/ops/purchases', array( 'methods' => 'GET', 'callback' => array( $this, 'rest_list' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/marketing', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_marketing' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/purchases/marketing/delete', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_delete_marketing' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/purchases/senders', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_senders' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/reparse', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_reparse' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/process', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_process' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/stage', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_stage' ), 'permission_callback' => $ops ) );
@@ -940,14 +979,15 @@ class AJCore_RA_Purchases {
 		}
 		$pdb    = $this->pdb();
 		$orders = $this->table( 'aj_purchase_orders' );
-		$where  = array( '1=1' );
+		$view   = 'marketing' === sanitize_key( (string) $request->get_param( 'label' ) ) ? 'marketing' : '';
+		$where  = array( '' === $view ? "label = ''" : "label = 'marketing'" ); // the normal list hides marketing; the Marketing label shows only those
 		$params = array();
 		$stage  = sanitize_key( (string) $request->get_param( 'stage' ) );
-		if ( in_array( $stage, self::STAGES, true ) ) {
+		if ( '' === $view && in_array( $stage, self::STAGES, true ) ) {
 			$where[]  = 'stage = %s';
 			$params[] = $stage;
 		}
-		if ( 'verify' === $stage || '1' === (string) $request->get_param( 'needs_verification' ) ) {
+		if ( '' === $view && ( 'verify' === $stage || '1' === (string) $request->get_param( 'needs_verification' ) ) ) {
 			$where[] = "( stage = 'new' AND ( total IS NULL OR property_tag = '' ) )";
 		}
 		$property = sanitize_text_field( (string) $request->get_param( 'property' ) );
@@ -990,21 +1030,22 @@ class AJCore_RA_Purchases {
 
 		// Totals ignore ignored orders and orders without an amount; they respect the same filters except stage.
 		$sum_where  = array_filter( $where, static function ( $w ) {
-			return false === strpos( $w, 'stage = %s' ) && false === strpos( $w, "stage = 'new'" );
+			return false === strpos( $w, 'stage = %s' ) && false === strpos( $w, "stage = 'new'" ) && 0 !== strpos( $w, 'label =' );
 		} );
 		$sum_params = $params;
-		if ( in_array( $stage, self::STAGES, true ) ) {
+		if ( '' === $view && in_array( $stage, self::STAGES, true ) ) {
 			$sum_params = array_slice( $params, 1 );
 		}
-		$sum_sql   = implode( ' AND ', $sum_where ) . " AND stage <> 'ignored' AND total IS NOT NULL";
+		$sum_sql   = ( $sum_where ? implode( ' AND ', $sum_where ) . ' AND ' : '' ) . "label = '' AND stage <> 'ignored' AND total IS NOT NULL";
 		// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared
 		$by_property = (array) $pdb->get_results( $sum_params ? $pdb->prepare( "SELECT IF(property_name <> '', property_name, IF(property_tag <> '', property_tag, '(no property)')) AS property, COUNT(*) AS orders, SUM(total) AS total FROM `{$orders}` WHERE {$sum_sql} GROUP BY property ORDER BY total DESC", $sum_params ) : "SELECT IF(property_name <> '', property_name, IF(property_tag <> '', property_tag, '(no property)')) AS property, COUNT(*) AS orders, SUM(total) AS total FROM `{$orders}` WHERE {$sum_sql} GROUP BY property ORDER BY total DESC" );
 		$by_month    = (array) $pdb->get_results( $sum_params ? $pdb->prepare( "SELECT DATE_FORMAT(order_date, '%%Y-%%m') AS month, COUNT(*) AS orders, SUM(total) AS total FROM `{$orders}` WHERE {$sum_sql} GROUP BY month ORDER BY month DESC LIMIT 24", $sum_params ) : "SELECT DATE_FORMAT(order_date, '%Y-%m') AS month, COUNT(*) AS orders, SUM(total) AS total FROM `{$orders}` WHERE {$sum_sql} GROUP BY month ORDER BY month DESC LIMIT 24" );
 		$total_all   = (float) $pdb->get_var( $sum_params ? $pdb->prepare( "SELECT SUM(total) FROM `{$orders}` WHERE {$sum_sql}", $sum_params ) : "SELECT SUM(total) FROM `{$orders}` WHERE {$sum_sql}" );
-		$this_month  = (float) $pdb->get_var( "SELECT SUM(total) FROM `{$orders}` WHERE stage <> 'ignored' AND total IS NOT NULL AND order_date >= '" . gmdate( 'Y-m-01 00:00:00' ) . "'" );
-		$unassigned  = (int) $pdb->get_var( "SELECT COUNT(*) FROM `{$orders}` WHERE stage <> 'ignored' AND property_tag = ''" );
+		$this_month  = (float) $pdb->get_var( "SELECT SUM(total) FROM `{$orders}` WHERE label = '' AND stage <> 'ignored' AND total IS NOT NULL AND order_date >= '" . gmdate( 'Y-m-01 00:00:00' ) . "'" );
+		$unassigned  = (int) $pdb->get_var( "SELECT COUNT(*) FROM `{$orders}` WHERE label = '' AND stage <> 'ignored' AND property_tag = ''" );
 		$vendors     = (array) $pdb->get_col( "SELECT DISTINCT vendor FROM `{$orders}` ORDER BY vendor" );
-		$stage_counts = (array) $pdb->get_results( "SELECT stage, COUNT(*) AS n FROM `{$orders}` GROUP BY stage" );
+		$stage_counts = (array) $pdb->get_results( "SELECT stage, COUNT(*) AS n FROM `{$orders}` WHERE label = '' GROUP BY stage" );
+		$marketing    = (int) $pdb->get_var( "SELECT COUNT(*) FROM `{$orders}` WHERE label = 'marketing'" );
 		// phpcs:enable
 		$counts = array_fill_keys( self::STAGES, 0 );
 		foreach ( $stage_counts as $c ) {
@@ -1045,6 +1086,8 @@ class AJCore_RA_Purchases {
 			'vendors'     => array_values( $vendors ),
 			'mailbox'     => $s['mailbox'],
 			'last_run'    => $s['last_run'],
+			'marketing'   => $marketing,
+			'senders'     => class_exists( 'AJCore_Marketing' ) ? AJCore_Marketing::senders() : array(),
 			'rentec'      => array( 'count' => count( $this->rentec_properties() ), 'note' => self::$rentec_note ),
 		) );
 	}
@@ -1258,13 +1301,17 @@ class AJCore_RA_Purchases {
 				</form>
 			</div>
 
+			<div class="ajmr-panel" id="ajra-pu-senders-box" hidden><h3><?php esc_html_e( 'Marketing senders (their future mail is labelled automatically)', 'ajcore-ra' ); ?></h3><div id="ajra-pu-senders"></div><p><input type="text" id="ajra-pu-sender-in" class="regular-text" placeholder="sender@domain.com or domain.com"> <button type="button" class="button" id="ajra-pu-sender-add"><?php esc_html_e( 'Add', 'ajcore-ra' ); ?></button></p></div>
+
 			<div class="ajmr-bulk" id="ajra-pu-bulk" hidden>
 				<strong id="ajra-pu-bulk-n">0</strong> <?php esc_html_e( 'selected', 'ajcore-ra' ); ?>
 				<button type="button" class="button" data-stage="verified"><?php esc_html_e( 'Mark verified', 'ajcore-ra' ); ?></button>
 				<button type="button" class="button" data-stage="charged"><?php esc_html_e( 'Mark charged', 'ajcore-ra' ); ?></button>
 				<button type="button" class="button" data-stage="new"><?php esc_html_e( 'Back to new', 'ajcore-ra' ); ?></button>
 				<button type="button" class="button" data-stage="ignored"><?php esc_html_e( 'Ignore', 'ajcore-ra' ); ?></button>
-				<button type="button" class="button" id="ajra-pu-bulk-marketing" title="<?php echo esc_attr__( 'Move to the Marketing tab', 'ajcore-ra' ); ?>"><?php esc_html_e( 'Marketing', 'ajcore-ra' ); ?></button>
+				<button type="button" class="button" id="ajra-pu-bulk-marketing" title="<?php echo esc_attr__( 'Label as Marketing', 'ajcore-ra' ); ?>"><?php esc_html_e( 'Marketing', 'ajcore-ra' ); ?></button>
+				<button type="button" class="button button-primary" id="ajra-pu-bulk-delete" hidden><?php esc_html_e( 'Delete (to Zoho Trash)', 'ajcore-ra' ); ?></button>
+				<button type="button" class="button" id="ajra-pu-bulk-notmk" hidden><?php esc_html_e( 'Not marketing', 'ajcore-ra' ); ?></button>
 				<button type="button" class="button-link" id="ajra-pu-bulk-clear"><?php esc_html_e( 'Clear selection', 'ajcore-ra' ); ?></button>
 			</div>
 
@@ -1290,7 +1337,7 @@ class AJCore_RA_Purchases {
 		( function () {
 			var rest = <?php echo wp_json_encode( rest_url( 'ajcore/v1' ) ); ?>, nonce = <?php echo wp_json_encode( wp_create_nonce( 'wp_rest' ) ); ?>;
 			var STAGES = [ 'new', 'verified', 'charged', 'posted', 'ignored' ], LABEL = { 'new': 'New', verified: 'Verified', charged: 'Charged', posted: 'Posted', ignored: 'Ignored' };
-			var st = { stage: '', property: '', vendor: '', q: '' }, data = null, selected = {};
+			var st = { stage: '', property: '', vendor: '', q: '', label: '' }, data = null, selected = {};
 			function $( id ) { return document.getElementById( id ); }
 			function el( tag, cls, text ) { var e = document.createElement( tag ); if ( cls ) { e.className = cls; } if ( text != null ) { e.textContent = text; } return e; }
 			function money( v ) { return v == null ? '—' : '$' + Number( v ).toLocaleString( undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 } ); }
@@ -1300,7 +1347,7 @@ class AJCore_RA_Purchases {
 			function post( path, body ) { return api( path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( body ) } ); }
 
 			function load() {
-				var q = new URLSearchParams(); [ 'stage', 'property', 'vendor', 'q' ].forEach( function ( k ) { if ( st[ k ] ) { q.set( k === 'stage' && st.stage === 'verify' ? 'stage' : k, st[ k ] ); } } );
+				var q = new URLSearchParams(); [ 'stage', 'property', 'vendor', 'q', 'label' ].forEach( function ( k ) { if ( st[ k ] ) { q.set( k === 'stage' && st.stage === 'verify' ? 'stage' : k, st[ k ] ); } } );
 				api( '/ops/purchases?' + q.toString() ).then( function ( d ) { var first = ! data; data = d; render(); if ( first && d.mailbox && ! ( d.last_run && typeof d.last_run.at === 'string' ) ) { $( 'ajra-pu-run' ).click(); } } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; } );
 			}
 
@@ -1308,7 +1355,7 @@ class AJCore_RA_Purchases {
 				var t = el( 'a', 'ajmr-tile ajmr-stat ' + tint + ( st.stage === key ? ' is-on' : '' ) ); t.href = '#';
 				var ico = el( 'span', 'ajmr-tile-ico' ); ico.innerHTML = icon; t.appendChild( ico );
 				var tx = el( 'span', 'ajmr-tile-txt' ); tx.appendChild( el( 'small', null, label ) ); tx.appendChild( el( 'strong', null, String( count ) ) ); t.appendChild( tx );
-				t.addEventListener( 'click', function ( e ) { e.preventDefault(); st.stage = st.stage === key ? '' : key; load(); } );
+				t.addEventListener( 'click', function ( e ) { e.preventDefault(); st.label = ''; st.stage = st.stage === key ? '' : key; selected = {}; load(); } );
 				return t;
 			}
 			var ICON = { alert: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>', check: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>', list: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>', cog: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>' };
@@ -1320,6 +1367,13 @@ class AJCore_RA_Purchases {
 				tiles.appendChild( tile( 'new', 'New', c[ 'new' ] || 0, 'is-amber', ICON.list ) );
 				tiles.appendChild( tile( 'verified', 'Verified', c.verified || 0, 'is-green', ICON.check ) );
 				tiles.appendChild( tile( 'charged', 'Charged', c.charged || 0, 'is-green', ICON.check ) );
+				// The Marketing label: a filter on these orders (not a pipeline of its own).
+				var mt = el( 'a', 'ajmr-tile ajmr-stat is-amber' + ( st.label === 'marketing' ? ' is-on' : '' ) ); mt.href = '#'; mt.title = 'Orders labelled Marketing: see, preview and delete them';
+				var mtx = el( 'span', 'ajmr-tile-txt' ); mtx.appendChild( el( 'small', null, 'Marketing' ) ); mtx.appendChild( el( 'strong', null, String( data.marketing || 0 ) ) ); mt.appendChild( mtx );
+				mt.addEventListener( 'click', function ( e ) { e.preventDefault(); st.label = st.label === 'marketing' ? '' : 'marketing'; st.stage = ''; selected = {}; load(); } ); tiles.appendChild( mt );
+				var sb = $( 'ajra-pu-senders-box' ); sb.hidden = st.label !== 'marketing'; var sl = $( 'ajra-pu-senders' ); sl.innerHTML = '';
+				if ( ! ( data.senders || [] ).length ) { sl.appendChild( el( 'span', 'description', 'None yet.' ) ); }
+				( data.senders || [] ).forEach( function ( s ) { var b = el( 'button', 'button button-small', s + '  ×' ); b.type = 'button'; b.style.marginRight = '6px'; b.title = 'Remove'; b.addEventListener( 'click', function () { post( '/ops/purchases/senders', { remove: s } ).then( load ); } ); sl.appendChild( b ); } );
 				var side = el( 'div', 'ajmr-mailboxes' ), g = el( 'div', 'ajmr-tile ajmr-tile-sm' ), gb = el( 'button', 'ajmr-tile-main' ); gb.type = 'button';
 				var gi = el( 'span', 'ajmr-tile-ico' ); gi.innerHTML = ICON.cog; gb.appendChild( gi ); var gt = el( 'span', 'ajmr-tile-txt' ); gt.appendChild( el( 'small', null, 'Mailbox' ) ); gt.appendChild( el( 'strong', null, data.mailbox ? data.mailbox.split( '@' )[ 0 ] : 'Not set' ) ); gb.appendChild( gt );
 				gb.addEventListener( 'click', function () { var p = $( 'ajra-pu-settings' ); p.hidden = ! p.hidden; } ); g.appendChild( gb ); side.appendChild( g ); tiles.appendChild( side );
@@ -1383,6 +1437,9 @@ class AJCore_RA_Purchases {
 			}
 			function syncBulk() {
 				var n = Object.keys( selected ).length; $( 'ajra-pu-bulk' ).hidden = ! n; $( 'ajra-pu-bulk-n' ).textContent = n;
+				var inMk = st.label === 'marketing';
+				document.querySelectorAll( '#ajra-pu-bulk [data-stage], #ajra-pu-bulk-marketing' ).forEach( function ( b ) { b.hidden = inMk; } );
+				[ 'ajra-pu-bulk-delete', 'ajra-pu-bulk-notmk' ].forEach( function ( i ) { $( i ).hidden = ! inMk; } );
 				var all = $( 'ajra-pu-all' ); all.checked = n > 0 && data && n === data.orders.length; all.indeterminate = n > 0 && data && n < data.orders.length;
 			}
 
@@ -1405,6 +1462,8 @@ class AJCore_RA_Purchases {
 					}
 					var sv = el( 'button', 'button button-primary', 'Save' ); sv.type = 'button'; sv.addEventListener( 'click', function () { save( '' ); } ); bar.appendChild( sv );
 					[ [ 'verified', 'Save + verified' ], [ 'charged', 'Save + charged' ], [ 'ignored', 'Ignore' ], [ 'new', 'Back to new' ] ].forEach( function ( s ) { if ( o.stage === 'posted' || o.stage === s[ 0 ] ) { return; } var b = el( 'button', 'button', s[ 1 ] ); b.type = 'button'; b.style.marginLeft = '6px'; b.addEventListener( 'click', function () { save( s[ 0 ] ); } ); bar.appendChild( b ); } );
+					var mk2 = el( 'button', 'button', st.label === 'marketing' ? 'Not marketing' : 'Marketing' ); mk2.type = 'button'; mk2.addEventListener( 'click', function () { var on = st.label !== 'marketing'; var rule = on && confirm( 'Label as Marketing.\n\nAlso label future mail from this sender automatically?\nOK = yes   Cancel = only this order' ) ? 'address' : ''; post( '/ops/purchases/marketing', { ids: [ id ], label: on ? 'marketing' : '', sender_rule: rule } ).then( function () { $( 'ajra-pu-detail' ).hidden = true; load(); } ).catch( function ( e ) { alert( e.message ); } ); } ); bar.appendChild( mk2 );
+					if ( st.label === 'marketing' ) { var dl2 = el( 'button', 'button button-primary', 'Delete (to Zoho Trash)' ); dl2.type = 'button'; dl2.style.marginLeft = '6px'; dl2.addEventListener( 'click', function () { post( '/ops/purchases/marketing/delete', { ids: [ id ] } ).then( function () { $( 'ajra-pu-detail' ).hidden = true; load(); } ).catch( function ( e ) { alert( e.message ); } ); } ); bar.appendChild( dl2 ); }
 					var cl = el( 'button', 'button-link', 'Close' ); cl.type = 'button'; cl.style.marginLeft = '12px'; cl.addEventListener( 'click', function () { $( 'ajra-pu-detail' ).hidden = true; } ); bar.appendChild( cl ); box.appendChild( bar );
 					// Numbered tabs: 1, 2, 3 ... each previews that email of the order.
 					left.appendChild( el( 'h4', null, 'Emails (' + d.emails.length + ')' ) );
@@ -1429,14 +1488,20 @@ class AJCore_RA_Purchases {
 			var qt = null; $( 'ajra-pu-q' ).addEventListener( 'input', function ( e ) { clearTimeout( qt ); qt = setTimeout( function () { st.q = e.target.value.trim(); load(); }, 350 ); } );
 			$( 'ajra-pu-property' ).addEventListener( 'change', function ( e ) { st.property = e.target.value; load(); } );
 			$( 'ajra-pu-vendor' ).addEventListener( 'change', function ( e ) { st.vendor = e.target.value; load(); } );
-			$( 'ajra-pu-clear' ).addEventListener( 'click', function () { st = { stage: '', property: '', vendor: '', q: '' }; $( 'ajra-pu-q' ).value = ''; selected = {}; load(); } );
+			$( 'ajra-pu-clear' ).addEventListener( 'click', function () { st = { stage: '', property: '', vendor: '', q: '', label: '' }; $( 'ajra-pu-q' ).value = ''; selected = {}; load(); } );
 			$( 'ajra-pu-all' ).addEventListener( 'change', function ( e ) { selected = {}; if ( e.target.checked && data ) { data.orders.forEach( function ( o ) { selected[ o.id ] = true; } ); } render(); } );
 			$( 'ajra-pu-bulk-clear' ).addEventListener( 'click', function () { selected = {}; render(); } );
 			$( 'ajra-pu-bulk-marketing' ).addEventListener( 'click', function () {
 				var ids = Object.keys( selected ).map( Number ); if ( ! ids.length ) { return; }
-				var rule = confirm( 'Move ' + ids.length + ' order(s) to the Marketing tab.\n\nAlso label future mail from these senders as marketing automatically?\nOK = yes (by sender address)   Cancel = only these' ) ? 'address' : '';
-				post( '/ops/purchases/marketing', { ids: ids, sender_rule: rule } ).then( function () { selected = {}; load(); } ).catch( function ( e ) { alert( e.message ); } );
+				var rule = confirm( 'Label ' + ids.length + ' order(s) as Marketing.\n\nAlso label future mail from these senders automatically?\nOK = yes (by sender address)   Cancel = only these' ) ? 'address' : '';
+				post( '/ops/purchases/marketing', { ids: ids, label: 'marketing', sender_rule: rule } ).then( function () { selected = {}; load(); } ).catch( function ( e ) { alert( e.message ); } );
 			} );
+			$( 'ajra-pu-bulk-notmk' ).addEventListener( 'click', function () { var ids = Object.keys( selected ).map( Number ); if ( ids.length ) { post( '/ops/purchases/marketing', { ids: ids, label: '' } ).then( function () { selected = {}; load(); } ); } } );
+			$( 'ajra-pu-bulk-delete' ).addEventListener( 'click', function () {
+				var ids = Object.keys( selected ).map( Number ); if ( ! ids.length || ! confirm( 'Move the emails of ' + ids.length + ' order(s) to the Zoho Trash? They stay recoverable there.' ) ) { return; }
+				post( '/ops/purchases/marketing/delete', { ids: ids } ).then( function ( d ) { selected = {}; $( 'ajra-pu-status' ).textContent = d.deleted + ' deleted' + ( d.zoho_errors.length ? ' · Zoho: ' + d.zoho_errors.join( ' | ' ) : '' ); load(); } ).catch( function ( e ) { alert( e.message ); } );
+			} );
+			$( 'ajra-pu-sender-add' ).addEventListener( 'click', function () { var v = $( 'ajra-pu-sender-in' ).value.trim(); if ( v ) { post( '/ops/purchases/senders', { add: v } ).then( function () { $( 'ajra-pu-sender-in' ).value = ''; load(); } ); } } );
 			document.querySelectorAll( '#ajra-pu-bulk [data-stage]' ).forEach( function ( b ) { b.addEventListener( 'click', function () {
 				var ids = Object.keys( selected ).map( Number ); if ( ! ids.length || ! window.confirm( 'Move ' + ids.length + ' order(s) to "' + LABEL[ b.getAttribute( 'data-stage' ) ] + '"?' ) ) { return; }
 				post( '/ops/purchases/stage', { ids: ids, stage: b.getAttribute( 'data-stage' ) } ).then( function () { selected = {}; load(); } ).catch( function ( e ) { alert( e.message ); } );

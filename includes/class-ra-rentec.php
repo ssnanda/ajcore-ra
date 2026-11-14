@@ -2148,10 +2148,60 @@ class AJCore_RA_Rentec {
 		<div class="ajforms-settings-card" id="ajcore-rentec-settings">
 			<div class="ajcore-section-head">
 				<div>
-					<h2><?php esc_html_e( 'Rentec Direct API v3', 'ajcore-ra' ); ?></h2>
+					<h2><?php esc_html_e( 'Rentec Direct API v3', 'ajcore-ra' ); ?> <button type="button" id="ajcore-rentec-help-btn" title="<?php echo esc_attr__( 'Setup help: opens Rentec Direct and shows the name and permissions to use', 'ajcore-ra' ); ?>" style="display:inline-grid;place-items:center;width:22px;height:22px;margin-left:6px;border-radius:50%;border:1px solid #6366f1;background:#eef2ff;color:#4338ca;font-weight:800;font-size:13px;cursor:pointer;vertical-align:middle;">?</button></h2>
 					<p><?php esc_html_e( 'Connect the Client Portal and AJOps to Rentec Direct. This first phase only checks which operational resources are readable and shows aggregate metrics.', 'ajcore-ra' ); ?></p>
 				</div>
 			</div>
+			<?php
+			$key_name = class_exists( 'AJCore_Extensions' ) && method_exists( 'AJCore_Extensions', 'site_client_name' ) ? AJCore_Extensions::site_client_name() : 'AJCore';
+			$reads    = array( 'Properties', 'Tenants', 'Leases', 'Leads', 'Applications', 'Vendors', 'Owners', 'Work Orders', 'Transactions', 'Files', 'Messages', 'Accounts', 'Products', 'Banks' );
+			$writes   = array(
+				'Expenses'                       => __( 'posting purchases (Purchases → Rentec, later)', 'ajcore-ra' ),
+				'Work Orders (+ notes, attachments)' => __( 'creating work orders and adding notes/photos', 'ajcore-ra' ),
+				'Vendors'                        => __( 'adding vendors', 'ajcore-ra' ),
+				'Files'                          => __( 'uploading files to a record', 'ajcore-ra' ),
+				'Leads'                          => __( 'adding leads', 'ajcore-ra' ),
+				'Properties / Tenants / Leases'  => __( 'creating those records from AJOps', 'ajcore-ra' ),
+				'Messages'                       => __( 'sending messages', 'ajcore-ra' ),
+				'Sticky notes (properties, tenants)' => __( 'adding notes', 'ajcore-ra' ),
+			);
+			?>
+			<div id="ajcore-rentec-help" hidden style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 18px;margin:10px 0 14px;max-width:900px;">
+				<ol style="margin:0;padding-left:20px;line-height:1.9;">
+					<li><?php esc_html_e( 'Sign in to Rentec Direct (the button opened it), then go to Settings → Utilities → API Keys and click Add API Key. Do this in each Rentec account.', 'ajcore-ra' ); ?></li>
+					<li><?php esc_html_e( 'Fill in the form with these values (use the copy buttons):', 'ajcore-ra' ); ?>
+						<table style="border-collapse:collapse;margin:6px 0;">
+							<tr><th style="text-align:left;padding:4px 14px 4px 0;"><?php esc_html_e( 'Application', 'ajcore-ra' ); ?></th><td style="padding:4px 10px 4px 0;"><code>Rentec API V3</code></td><td><button type="button" class="button button-small ajcore-rentec-copy" data-copy="Rentec API V3"><?php esc_html_e( 'Copy', 'ajcore-ra' ); ?></button></td></tr>
+							<tr><th style="text-align:left;padding:4px 14px 4px 0;"><?php esc_html_e( 'Name', 'ajcore-ra' ); ?></th><td style="padding:4px 10px 4px 0;"><code><?php echo esc_html( $key_name ); ?></code></td><td><button type="button" class="button button-small ajcore-rentec-copy" data-copy="<?php echo esc_attr( $key_name ); ?>"><?php esc_html_e( 'Copy', 'ajcore-ra' ); ?></button></td></tr>
+						</table>
+						<span class="description"><?php esc_html_e( 'The same naming rule is used for the Zoho client, so every integration for this site is named alike (AJCore + site + environment).', 'ajcore-ra' ); ?></span>
+					</li>
+					<li><?php esc_html_e( 'Click Generate. New keys are read-only; after generating, open the key (pencil icon) and adjust its permissions:', 'ajcore-ra' ); ?>
+						<div style="margin:4px 0 4px 0;"><strong><?php esc_html_e( 'Read:', 'ajcore-ra' ); ?></strong> <?php echo esc_html( implode( ', ', $reads ) ); ?>.</div>
+						<div><strong><?php esc_html_e( 'Write (turn on only what you use):', 'ajcore-ra' ); ?></strong>
+							<ul style="margin:2px 0 0 18px;list-style:disc;line-height:1.6;">
+								<?php foreach ( $writes as $label => $why ) : ?>
+									<li><?php echo esc_html( $label ); ?> <span class="description">— <?php echo esc_html( $why ); ?></span></li>
+								<?php endforeach; ?>
+							</ul>
+						</div>
+					</li>
+					<li><?php esc_html_e( 'Copy the key, paste it below as the API v3 Key, give the account a clear Account Name, tick Enable, Save, then Test This Account.', 'ajcore-ra' ); ?></li>
+					<li><?php esc_html_e( 'For Purchases only reading Properties is needed (it matches delivery addresses to your properties); the Expenses write permission is only for posting purchases later.', 'ajcore-ra' ); ?></li>
+				</ol>
+			</div>
+			<script>
+			(function () {
+				var b = document.getElementById('ajcore-rentec-help-btn'), g = document.getElementById('ajcore-rentec-help');
+				if (b && g) { b.addEventListener('click', function () { var show = g.hasAttribute('hidden'); if (show) { g.removeAttribute('hidden'); window.open('https://secure.rentecdirect.com/', '_blank', 'noopener'); } else { g.setAttribute('hidden', ''); } }); }
+				document.querySelectorAll('.ajcore-rentec-copy').forEach(function (c) {
+					c.addEventListener('click', function () {
+						var v = c.getAttribute('data-copy'), done = function () { var o = c.textContent; c.textContent = 'Copied'; setTimeout(function () { c.textContent = o; }, 1200); };
+						if (navigator.clipboard) { navigator.clipboard.writeText(v).then(done); } else { var a = document.createElement('textarea'); a.value = v; document.body.appendChild(a); a.select(); document.execCommand('copy'); a.remove(); done(); }
+					});
+				});
+			})();
+			</script>
 			<?php if ( $read_only ) : ?>
 				<div class="notice notice-info inline"><p><?php esc_html_e( 'Rentec integration and API accounts are managed by the AJCore master site. This site automatically uses the shared master configuration.', 'ajcore-ra' ); ?></p></div>
 			<?php endif; ?>
