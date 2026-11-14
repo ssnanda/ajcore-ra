@@ -498,7 +498,7 @@ class AJCore_RA_Purchases {
 			$cls    = isset( $parsed['classify'] ) && is_array( $parsed['classify'] ) ? $parsed['classify'] : self::classify( (string) $e->sender, (string) $e->subject );
 			if ( ! in_array( $cls['kind'], array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) ) {
 				$body = '';
-			} elseif ( array_key_exists( 'body_debug', $parsed ) ) {
+			} elseif ( isset( $parsed['bv'] ) && empty( $parsed['body_debug'] ) ) {
 				$body = (string) ( $parsed['body'] ?? '' );
 			} elseif ( $fetched < $max_fetch && $zoho ) {
 				$m = $zoho->intake_message( (string) $e->message_id, $mailbox );
@@ -507,8 +507,9 @@ class AJCore_RA_Purchases {
 					continue;
 				}
 				$body                 = (string) $m['body_text'];
-				$parsed['body']       = mb_substr( $body, 0, 8000 );
+				$parsed['body']       = mb_substr( $body, 0, 20000 );
 				$parsed['body_debug'] = (string) ( $m['body_debug'] ?? '' );
+				$parsed['bv']         = 2;
 			} else {
 				$left++;
 				continue;
@@ -571,7 +572,7 @@ class AJCore_RA_Purchases {
 			'subject'     => mb_substr( (string) $row['subject'], 0, 500 ),
 			'sender'      => mb_substr( trim( $row['from_name'] . ' <' . $row['from_email'] . '>' ), 0, 255 ),
 			'received_at' => $when,
-			'parsed'      => wp_json_encode( array( 'classify' => $cls, 'fields' => $fields, 'body' => mb_substr( $body, 0, 8000 ), 'body_debug' => isset( $bdbg ) ? $bdbg : '' ) ),
+			'parsed'      => wp_json_encode( array( 'classify' => $cls, 'fields' => $fields, 'body' => mb_substr( $body, 0, 20000 ), 'body_debug' => isset( $bdbg ) ? $bdbg : '', 'bv' => 2 ) ),
 			'created_at'  => current_time( 'mysql' ),
 		) );
 		return $order_id;
@@ -824,15 +825,16 @@ class AJCore_RA_Purchases {
 		foreach ( $emails as $e ) {
 			$parsed = json_decode( (string) $e->parsed, true );
 			$parsed = is_array( $parsed ) ? $parsed : array();
-			if ( array_key_exists( 'body_debug', $parsed ) || ! $zoho || '' === $mailbox ) { // already fetched with the full-body code
+			if ( ( isset( $parsed['bv'] ) && empty( $parsed['body_debug'] ) ) || ! $zoho || '' === $mailbox ) { // full text already stored
 				continue;
 			}
 			$m = $zoho->intake_message( (string) $e->message_id, $mailbox );
 			if ( is_wp_error( $m ) ) {
 				continue;
 			}
-			$parsed['body']       = mb_substr( (string) $m['body_text'], 0, 8000 );
+			$parsed['body']       = mb_substr( (string) $m['body_text'], 0, 20000 );
 			$parsed['body_debug'] = (string) ( $m['body_debug'] ?? '' );
+			$parsed['bv']         = 2;
 			$e->parsed      = wp_json_encode( $parsed );
 			$pdb->update( $this->table( 'aj_purchase_emails' ), array( 'parsed' => $e->parsed ), array( 'id' => (int) $e->id ) );
 		}
