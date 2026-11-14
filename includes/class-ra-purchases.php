@@ -313,11 +313,15 @@ class AJCore_RA_Purchases {
 		$text = html_entity_decode( (string) $body, ENT_QUOTES, 'UTF-8' );
 		$text = str_replace( "\xc2\xa0", ' ', $text );
 		$text = preg_replace( '/[ \t]+/', ' ', $text );
-		$out  = array( 'order_no' => '', 'invoice_no' => '', 'property_tag' => '', 'subtotal' => null, 'tax' => null, 'total' => null );
+		$out  = array( 'order_no' => '', 'invoice_no' => '', 'property_src' => '', 'property_tag' => '', 'subtotal' => null, 'tax' => null, 'total' => null );
 
 		// Property: delivery address in the email first, the PO# tag as the fallback.
 		$addr = self::delivery_address( $body );
+		$out['property_src'] = '' !== $addr ? 'address' : '';
 		$out['property_tag'] = '' !== $addr ? $addr : self::property_tag( $subject, $text );
+		if ( '' === $addr && '' !== $out['property_tag'] ) {
+			$out['property_src'] = 'po';
+		}
 
 		foreach ( array( (string) $subject, $text ) as $hay ) {
 			if ( '' === $out['order_no'] && preg_match( '/\border\s*(?:number|no\.?|#)?\s*:?\s*#?\s*(\d{8,})/i', $hay, $m ) ) {
@@ -515,6 +519,13 @@ class AJCore_RA_Purchases {
 				continue;
 			}
 			$fields = self::extract( $cls['kind'], (string) $e->subject, $body );
+			if ( 'address' !== $fields['property_src'] ) {
+				$found = $this->property_from_text( $body );
+				if ( '' !== $found ) {
+					$fields['property_tag'] = $found;
+					$fields['property_src'] = 'text';
+				}
+			}
 			$parsed['classify'] = $cls;
 			$parsed['fields']   = $fields;
 			$row                = array( 'message_id' => (string) $e->message_id, 'subject' => (string) $e->subject, 'from_name' => '', 'from_email' => '', 'received_at' => (string) $e->received_at );
@@ -561,6 +572,13 @@ class AJCore_RA_Purchases {
 			$bhtml = (string) ( $m['body_html'] ?? '' );
 		}
 		$fields = self::extract( $cls['kind'], $row['subject'], $body );
+		if ( 'address' !== $fields['property_src'] ) {
+			$found = $this->property_from_text( $body );
+			if ( '' !== $found ) {
+				$fields['property_tag'] = $found;
+				$fields['property_src'] = 'text';
+			}
+		}
 		$when   = $ts ? gmdate( 'Y-m-d H:i:s', $ts ) : ( '' !== (string) $row['received_at'] ? $row['received_at'] : current_time( 'mysql', true ) );
 		$order_id = $this->upsert_order( $cls, $fields, $when, $row );
 		if ( ! $order_id ) {
@@ -602,6 +620,10 @@ class AJCore_RA_Purchases {
 			}
 			if ( $editable && null !== $f['tax'] && null === $existing->tax ) {
 				$new['tax'] = $f['tax'];
+			}
+			if ( $editable && '' !== $f['property_tag'] && in_array( $f['property_src'] ?? '', array( 'address', 'text' ), true ) && '' === (string) $existing->property_name && $f['property_tag'] !== $existing->property_tag ) {
+				$new['property_tag'] = $f['property_tag']; // a real address beats a PO# tag, while the order has no name yet
+				$existing->property_tag = $f['property_tag'];
 			}
 			if ( '' === $existing->property_tag && '' !== $f['property_tag'] ) {
 				$new['property_tag']  = $f['property_tag'];
@@ -645,6 +667,32 @@ class AJCore_RA_Purchases {
 		return (int) $pdb->insert_id;
 	}
 
+	/**
+	 * Property found anywhere in an email's text: an address with "Ardale" in it, else a Rentec property whose street address appears in
+	 * the text (exactly one). Needs no "Delivery Address" label. Returns the address to use as the tag, or ''.
+	 */
+	public function property_from_text( $body ) {
+		$body = (string) $body;
+		if ( '' === trim( $body ) ) {
+			return '';
+		}
+		foreach ( array_keys( $this->name_rules() ) as $needle ) {
+			if ( preg_match( '/\b\d{1,6}\s+(?:[A-Za-z0-9.\']+\s+){0,3}' . preg_quote( (string) $needle, '/' ) . '\b(?:\s+[A-Za-z.]+)?/i', $body, $m ) ) {
+				return trim( preg_replace( '/\s+/', ' ', $m[0] ) );
+			}
+		}
+		$hay  = ' ' . implode( ' ', self::addr_tokens( $body ) ) . ' ';
+		$hits = array();
+		foreach ( $this->rentec_properties() as $p ) {
+			$street = trim( explode( ',', $p['label'] )[0] ); // "6822 Trimbach Way"
+			$st     = ' ' . implode( ' ', self::addr_tokens( $street ) ) . ' ';
+			if ( strlen( $st ) > 8 && false !== strpos( $hay, $st ) ) {
+				$hits[ $p['id'] ] = $street;
+			}
+		}
+		return 1 === count( $hits ) ? array_values( $hits )[0] : '';
+	}
+
 	/** Fixed rules: a tag (delivery address / PO#) containing the key gets that property label. Filterable. */
 	private function name_rules() {
 		return (array) apply_filters( 'ajcore_ra_purchase_property_rules', array( 'ardale' => 'High Point Property' ) );
@@ -663,22 +711,29 @@ class AJCore_RA_Purchases {
 		return array_values( array_unique( $out ) );
 	}
 
+	/** Why the Rentec property list is empty (shown on the screen), '' when loaded. */
+	private static $rentec_note = '';
+
 	/** Rentec properties (top level, not their units) with the words of their address, from AJCore-RA's own cached Rentec list. Empty when Rentec is off. */
 	private function rentec_properties() {
 		static $cache = null;
 		if ( null !== $cache ) {
 			return $cache;
 		}
-		$cache = array();
+		$cache             = array();
+		self::$rentec_note = '';
 		if ( ! class_exists( 'AJCore_RA_Rentec' ) ) {
+			self::$rentec_note = 'Rentec is not available';
 			return $cache;
 		}
 		try {
 			$res = AJCore_RA_Rentec::rows_for_sync( 'properties' );
 		} catch ( \Throwable $e ) {
+			self::$rentec_note = 'Rentec: ' . $e->getMessage();
 			return $cache;
 		}
 		if ( is_wp_error( $res ) ) {
+			self::$rentec_note = 'Rentec: ' . $res->get_error_message();
 			return $cache;
 		}
 		foreach ( (array) $res as $account ) {
@@ -894,6 +949,7 @@ class AJCore_RA_Purchases {
 			'vendors'     => array_values( $vendors ),
 			'mailbox'     => $s['mailbox'],
 			'last_run'    => $s['last_run'],
+			'rentec'      => array( 'count' => count( $this->rentec_properties() ), 'note' => self::$rentec_note ),
 		) );
 	}
 
@@ -1175,6 +1231,7 @@ class AJCore_RA_Purchases {
 				[ [ 'Total spent', money( s.total_spent ) ], [ 'This month', money( s.this_month ) ], [ 'Orders', String( total ) ], [ 'No property', String( s.unassigned ) ] ].forEach( function ( x ) {
 					var chip = el( 'span', 'ajmr-fchip' ); chip.appendChild( el( 'b', null, x[ 0 ] ) ); chip.appendChild( document.createTextNode( ' ' + x[ 1 ] ) ); chips.appendChild( chip );
 				} );
+				if ( data.rentec ) { chips.appendChild( el( 'span', 'ajmr-fnote', data.rentec.count ? 'Rentec: ' + data.rentec.count + ' properties loaded' : 'Rentec: no properties (' + ( data.rentec.note || 'none returned' ) + ')' ) ); }
 				if ( data.last_run && typeof data.last_run.at === 'string' ) { chips.appendChild( el( 'span', 'ajmr-fnote', 'Last pass ' + data.last_run.at + ' · ' + data.last_run.scanned + ' scanned · ' + data.last_run[ 'new' ] + ' new' + ( data.last_run.errors && data.last_run.errors.length ? ' · ERROR: ' + data.last_run.errors.join( ' | ' ) : '' ) ) ); }
 
 				fillSelect( 'ajra-pu-property', data.by_property.map( function ( p ) { return p.property; } ).filter( function ( p ) { return p !== '(no property)'; } ), st.property, 'All properties' );
@@ -1188,7 +1245,7 @@ class AJCore_RA_Purchases {
 				days.sort().reverse();
 				days.forEach( function ( k ) {
 					var list = byDay[ k ], sum = list.reduce( function ( a, o ) { return a + ( Number( o.total ) || 0 ); }, 0 );
-					var hr = el( 'tr', 'ajra-pu-day' ), hc = el( 'td', null, day( k + ' 00:00:00' ) + '  ·  ' + list.length + ( list.length === 1 ? ' order' : ' orders' ) + '  ·  ' + list.reduce( function ( a, o ) { return a + ( o.emails || [] ).length; }, 0 ) + '  ·  ' + money( sum ) ); hc.colSpan = 7; hr.appendChild( hc ); tb.appendChild( hr );
+					var hr = el( 'tr', 'ajra-pu-day' ), hc = el( 'td', null, day( k + ' 00:00:00' ) + '  ·  ' + list.length + ( list.length === 1 ? ' order' : ' orders' ) + '  ·  ' + money( sum ) ); hc.colSpan = 7; hr.appendChild( hc ); tb.appendChild( hr );
 					list.forEach( function ( o ) {
 						var tr = el( 'tr' ); tr.style.cursor = 'pointer';
 						var td = el( 'td' ); td.addEventListener( 'click', function ( e ) { e.stopPropagation(); } );
