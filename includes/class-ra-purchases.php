@@ -235,6 +235,30 @@ class AJCore_RA_Purchases {
 		return strtolower( trim( (string) $sender ) );
 	}
 
+	/** What a non-purchase email is, by its subject: shown as the order text in the Notices label ('' = not a known notice). */
+	public static function notice_type( $subject ) {
+		$s = (string) $subject;
+		if ( preg_match( '/earned points|points/i', $s ) ) {
+			return "Lowe's points";
+		}
+		if ( preg_match( '/verify your account|almost done|verification code/i', $s ) ) {
+			return 'Account verification';
+		}
+		if ( preg_match( '/appointment/i', $s ) ) {
+			return 'Measurement appointment';
+		}
+		if ( preg_match( '/\bquote\b/i', $s ) ) {
+			return 'Quote';
+		}
+		if ( preg_match( '/survey|feedback/i', $s ) ) {
+			return 'Survey';
+		}
+		if ( preg_match( '/rewards|offer|perk|deals|savings|sale\b/i', $s ) ) {
+			return 'Offer';
+		}
+		return 'Notice';
+	}
+
 	/**
 	 * Vendor and kind of an email from its sender and subject: kind = receipt | confirmation | status | statement | payment |
 	 * reminder | other. Only receipt / confirmation / statement / payment carry amounts.
@@ -251,6 +275,9 @@ class AJCore_RA_Purchases {
 				$kind = 'confirmation';
 			} elseif ( preg_match( '/receipt/i', $subject ) ) {
 				$kind = 'receipt';
+			}
+			if ( preg_match( '/appointment|verify your account|almost done/i', $subject ) && ! preg_match( '/receipt|order\s*#|#\s*\d{8,}/i', $subject ) ) {
+				$kind = 'noise';
 			}
 			if ( preg_match( '/earned points|rewards|\bquote\b|survey|feedback/i', $subject ) && ! preg_match( '/receipt|order\s*#|#\s*\d{8,}/i', $subject ) ) {
 				$kind = 'noise';
@@ -407,8 +434,8 @@ class AJCore_RA_Purchases {
 		if ( '' === $out['order_no'] ) {
 			if ( preg_match( '/\b(?:receipt|order)\s+(?:for\s+)?#\s*([A-Z]\d{3,5}-\d{4,})/i', $subject . ' ' . $text, $m ) ) {
 				$out['order_no'] = strtoupper( $m[1] ); // Home Depot: "receipt for # H3603-366250"
-			} elseif ( preg_match( '/\([^;()]{3,60};\s*(\d{10,})\)/', $text, $m ) ) {
-				$out['order_no'] = $m[1]; // Floor & Decor: "(958 Plaza Walk; 1017905613017483)"
+			} elseif ( preg_match( '/requesting\s+payment\s+for\s+an\s+order\s*\((?:[^;()]{2,60};\s*)?(\d{10,})\)/i', $text, $m ) || preg_match( '/\([^;()]{3,60};\s*(\d{10,})\)/', $text, $m ) ) {
+				$out['order_no'] = $m[1]; // Floor & Decor: "(958 Plaza Walk; 1017905613017483)" or just "(1017906613046059)"
 			} elseif ( preg_match( '/\border\s+([A-Z]{2}\d{10,})\b/i', $text, $m ) ) {
 				$out['order_no'] = $m[1]; // Floor & Decor pickup mails: "order SB017905613168667 for 958 plaza wall"
 			}
@@ -594,7 +621,7 @@ class AJCore_RA_Purchases {
 		$pdb     = $this->pdb();
 		$emails  = $this->table( 'aj_purchase_emails' );
 		$orders  = $this->table( 'aj_purchase_orders' );
-		$rows    = (array) $pdb->get_results( "SELECT e.* FROM `{$emails}` e JOIN `{$orders}` o ON o.id = e.order_id WHERE o.stage = 'new' ORDER BY e.id ASC" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$rows    = (array) $pdb->get_results( "SELECT e.* FROM `{$emails}` e JOIN `{$orders}` o ON o.id = e.order_id WHERE o.stage = 'new' ORDER BY e.received_at ASC, e.id ASC" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$zoho    = $this->zoho();
 		$mailbox = $this->settings()['mailbox'];
 		$done    = 0;
@@ -637,11 +664,13 @@ class AJCore_RA_Purchases {
 			if ( $oid ) {
 				$pdb->update( $emails, array( 'order_id' => $oid, 'parsed' => wp_json_encode( $parsed ) ), array( 'id' => (int) $e->id ) );
 				if ( 'noise' === $cls['kind'] ) { // surveys / marketing: not purchases
-					$pdb->query( $pdb->prepare( "UPDATE `{$orders}` SET stage = 'ignored' WHERE id = %d AND stage = 'new' AND order_no LIKE %s", $oid, 'msg:%' ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+					$pdb->query( $pdb->prepare( "UPDATE `{$orders}` SET stage = 'ignored', label = IF(label = '', 'notice', label) WHERE id = %d AND stage = 'new' AND order_no LIKE %s", $oid, 'msg:%' ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				}
 				$done++;
 			}
 		}
+		// Notices set aside by an earlier read (ignored, no real order) get the Notices label too.
+		$pdb->query( "UPDATE `{$orders}` SET label = 'notice' WHERE stage = 'ignored' AND label = '' AND order_no LIKE 'msg:%'" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		// Orders in "new" that no longer have an email (merged into another order).
 		$pdb->query( "DELETE o FROM `{$orders}` o LEFT JOIN `{$emails}` e ON e.order_id = o.id WHERE o.stage = 'new' AND e.id IS NULL" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		return array( 'reparsed' => $done, 'fetched' => $fetched, 'remaining' => $left );
@@ -774,9 +803,9 @@ class AJCore_RA_Purchases {
 		$pdb    = $this->pdb();
 		$orders = $this->table( 'aj_purchase_orders' );
 		$vendor = $cls['vendor'];
-		// A receipt that is only an image has no order number: join it to the quote it paid (same vendor, quote in the 3 days before).
+		// A receipt that is only an image has no order number: join it to the quote it paid (same vendor, quote in the day before).
 		if ( 'paid' === ( $f['doc'] ?? '' ) && '' === $f['order_no'] && '' === $f['invoice_no'] ) {
-			$q = $pdb->get_row( $pdb->prepare( "SELECT order_no, property_tag FROM `{$orders}` WHERE vendor = %s AND doc = 'quote' AND order_no NOT LIKE 'msg:%%' AND order_no NOT LIKE 'inv:%%' AND order_date <= %s AND order_date >= %s ORDER BY order_date DESC LIMIT 1", $vendor, $when, gmdate( 'Y-m-d H:i:s', strtotime( $when . ' UTC' ) - 3 * DAY_IN_SECONDS ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$q = $pdb->get_row( $pdb->prepare( "SELECT order_no, property_tag FROM `{$orders}` WHERE vendor = %s AND doc IN ('quote', 'paid') AND order_no NOT LIKE 'msg:%%' AND order_no NOT LIKE 'inv:%%' AND order_date <= %s AND order_date >= %s ORDER BY order_date DESC LIMIT 1", $vendor, $when, gmdate( 'Y-m-d H:i:s', strtotime( $when . ' UTC' ) - DAY_IN_SECONDS ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 			if ( $q ) {
 				$f['order_no'] = (string) $q->order_no;
 			}
@@ -852,6 +881,7 @@ class AJCore_RA_Purchases {
 			'total'         => $f['total'],
 			'total_src'     => null === $f['total'] ? 0 : (int) ( $f['total_src'] ?? 1 ),
 			'stage'         => 'noise' === $cls['kind'] ? 'ignored' : 'new',
+			'label'         => 'noise' === $cls['kind'] && 0 === strpos( $key, 'msg:' ) ? 'notice' : '',
 			'confidence'    => $conf,
 			'created_at'    => current_time( 'mysql' ),
 			'updated_at'    => current_time( 'mysql' ),
@@ -1067,6 +1097,7 @@ class AJCore_RA_Purchases {
 			'order_no'      => 0 === strpos( (string) $r->order_no, 'msg:' ) || 0 === strpos( (string) $r->order_no, 'inv:' ) ? '' : (string) $r->order_no,
 			'invoice_no'    => (string) $r->invoice_no,
 			'doc'           => isset( $r->doc ) ? (string) $r->doc : '',
+			'label'         => isset( $r->label ) ? (string) $r->label : '',
 			'property_tag'  => (string) $r->property_tag,
 			'property_name' => (string) $r->property_name,
 			'order_date'    => (string) $r->order_date,
@@ -1087,8 +1118,9 @@ class AJCore_RA_Purchases {
 		}
 		$pdb    = $this->pdb();
 		$orders = $this->table( 'aj_purchase_orders' );
-		$view   = 'marketing' === sanitize_key( (string) $request->get_param( 'label' ) ) ? 'marketing' : '';
-		$where  = array( '' === $view ? "label = ''" : "label = 'marketing'" ); // the normal list hides marketing; the Marketing label shows only those
+		$lab    = sanitize_key( (string) $request->get_param( 'label' ) );
+		$view   = in_array( $lab, array( 'marketing', 'notice' ), true ) ? $lab : '';
+		$where  = array( '' === $view ? "label = ''" : "label = '{$view}'" ); // the normal list hides labelled orders; a label shows only its own
 		$params = array();
 		// Orders with bad data: issue = no_property | no_name (address not mapped to a named property) | no_total | no_order (no real order number).
 		$issue_sql = array(
@@ -1168,6 +1200,7 @@ class AJCore_RA_Purchases {
 		$vendors     = (array) $pdb->get_col( "SELECT DISTINCT vendor FROM `{$orders}` ORDER BY vendor" );
 		$stage_counts = (array) $pdb->get_results( "SELECT stage, COUNT(*) AS n FROM `{$orders}` WHERE label = '' GROUP BY stage" );
 		$marketing    = (int) $pdb->get_var( "SELECT COUNT(*) FROM `{$orders}` WHERE label = 'marketing'" );
+		$notices      = (int) $pdb->get_var( "SELECT COUNT(*) FROM `{$orders}` WHERE label = 'notice'" );
 		$ic           = $pdb->get_row( "SELECT SUM(property_tag = '') AS no_property, SUM(property_tag <> '' AND property_name = '') AS no_name, SUM(total IS NULL) AS no_total, SUM(order_no LIKE 'msg:%' OR order_no LIKE 'inv:%') AS no_order FROM `{$orders}` WHERE label = '' AND stage <> 'ignored'" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		// phpcs:enable
 		$counts = array_fill_keys( self::STAGES, 0 );
@@ -1188,6 +1221,7 @@ class AJCore_RA_Purchases {
 			}
 			foreach ( $orders_out as &$o ) {
 				$o['emails'] = isset( $by_order[ $o['id'] ] ) ? $by_order[ $o['id'] ] : array();
+				$o['notice'] = 'notice' === ( $o['label'] ?? '' ) && $o['emails'] ? self::notice_type( $o['emails'][0]['subject'] ) : '';
 			}
 			unset( $o );
 		}
@@ -1210,6 +1244,7 @@ class AJCore_RA_Purchases {
 			'mailbox'     => $s['mailbox'],
 			'last_run'    => $s['last_run'],
 			'marketing'   => $marketing,
+			'notices'     => $notices,
 			'issues'      => array( 'no_property' => (int) ( $ic->no_property ?? 0 ), 'no_name' => (int) ( $ic->no_name ?? 0 ), 'no_total' => (int) ( $ic->no_total ?? 0 ), 'no_order' => (int) ( $ic->no_order ?? 0 ) ),
 			'senders'     => class_exists( 'AJCore_Marketing' ) ? AJCore_Marketing::senders() : array(),
 			'rentec'      => array( 'count' => count( $this->rentec_properties() ), 'note' => self::$rentec_note ),
@@ -1512,6 +1547,9 @@ class AJCore_RA_Purchases {
 				var mt = el( 'a', 'ajra-seg-btn is-mk' + ( st.label === 'marketing' ? ' is-on' : '' ) + ( data.marketing ? '' : ' is-zero' ) ); mt.href = '#'; mt.title = 'Orders labelled Marketing: see, preview and delete them';
 				mt.appendChild( document.createTextNode( 'Marketing' ) ); mt.appendChild( el( 'b', null, String( data.marketing || 0 ) ) );
 				mt.addEventListener( 'click', function ( e ) { e.preventDefault(); st.label = st.label === 'marketing' ? '' : 'marketing'; st.stage = ''; st.issue = ''; selected = {}; load(); } ); tiles.appendChild( mt );
+				var nt = el( 'a', 'ajra-seg-btn is-mk' + ( st.label === 'notice' ? ' is-on' : '' ) + ( data.notices ? '' : ' is-zero' ) ); nt.href = '#'; nt.title = 'Not purchases: points, account verification, measurement appointments, quotes, surveys';
+				nt.appendChild( document.createTextNode( 'Notices' ) ); nt.appendChild( el( 'b', null, String( data.notices || 0 ) ) );
+				nt.addEventListener( 'click', function ( e ) { e.preventDefault(); st.label = st.label === 'notice' ? '' : 'notice'; st.stage = ''; st.issue = ''; selected = {}; load(); } ); tiles.appendChild( nt );
 				var sb = $( 'ajra-pu-senders-box' ); sb.hidden = st.label !== 'marketing'; var sl = $( 'ajra-pu-senders' ); sl.innerHTML = '';
 				if ( ! ( data.senders || [] ).length ) { sl.appendChild( el( 'span', 'description', 'None yet.' ) ); }
 				( data.senders || [] ).forEach( function ( s ) { var b = el( 'button', 'button button-small', s + '  ×' ); b.type = 'button'; b.style.marginRight = '6px'; b.title = 'Remove'; b.addEventListener( 'click', function () { post( '/ops/purchases/senders', { remove: s } ).then( load ); } ); sl.appendChild( b ); } );
@@ -1547,7 +1585,7 @@ class AJCore_RA_Purchases {
 						var td = el( 'td' ); td.addEventListener( 'click', function ( e ) { e.stopPropagation(); } );
 						var cb = el( 'input' ); cb.type = 'checkbox'; cb.checked = !! selected[ o.id ]; cb.addEventListener( 'change', function () { if ( cb.checked ) { selected[ o.id ] = true; } else { delete selected[ o.id ]; } syncBulk(); } ); td.appendChild( cb ); tr.appendChild( td );
 						tr.appendChild( el( 'td', 'ajra-pu-when', fmtDT( when( o ) ) ) ); tr.appendChild( el( 'td', 'ajra-pu-when', fmtDT( o.order_date, placedNoTime( o.order_date ) ) ) ); tr.appendChild( el( 'td', null, o.vendor ) );
-						var ord = el( 'td', 'ajra-pu-ord' ); ord.appendChild( el( 'strong', null, o.order_no || o.invoice_no || '—' ) );
+						var ord = el( 'td', 'ajra-pu-ord' ); ord.appendChild( o.notice && ! o.order_no && ! o.invoice_no ? el( 'span', 'ajra-notice', o.notice ) : el( 'strong', null, o.order_no || o.invoice_no || '—' ) );
 						if ( o.doc === 'quote' ) { ord.appendChild( el( 'span', 'ajra-quote', 'QUOTE' ) ); } else if ( o.doc === 'paid' ) { ord.appendChild( el( 'span', 'ajra-paid', 'PAID' ) ); }
 						var nb = el( 'span', 'ajra-pu-nums' ); ( o.emails || [] ).forEach( function ( m, mi ) { var c = el( 'button', 'ajra-pu-num k-' + ( m.kind || 'other' ), String( mi + 1 ) ); c.type = 'button'; c.title = m.kind + ' · ' + m.subject; c.addEventListener( 'click', function ( ev ) { ev.stopPropagation(); openDetail( o.id, mi ); } ); nb.appendChild( c ); } ); ord.appendChild( nb );
 						if ( o.order_no && o.invoice_no ) { ord.appendChild( el( 'div', 'description', 'Invoice ' + o.invoice_no ) ); }
@@ -1582,7 +1620,7 @@ class AJCore_RA_Purchases {
 			}
 			function syncBulk() {
 				var n = Object.keys( selected ).length; $( 'ajra-pu-bulk' ).hidden = ! n; $( 'ajra-pu-bulk-n' ).textContent = n;
-				var inMk = st.label === 'marketing';
+				var inMk = st.label === 'marketing' || st.label === 'notice';
 				document.querySelectorAll( '#ajra-pu-bulk [data-stage], #ajra-pu-bulk-marketing' ).forEach( function ( b ) { b.hidden = inMk; } );
 				[ 'ajra-pu-bulk-delete', 'ajra-pu-bulk-notmk' ].forEach( function ( i ) { $( i ).hidden = ! inMk; } );
 				var all = $( 'ajra-pu-all' ); all.checked = n > 0 && data && n === data.orders.length; all.indeterminate = n > 0 && data && n < data.orders.length;
