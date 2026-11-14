@@ -989,14 +989,25 @@ class AJCore_RA_Purchases {
 			self::$rentec_note = 'Rentec: ' . $res->get_error_message();
 			return $cache;
 		}
+		$n_acct = 0;
+		$n_rows = 0;
+		$keys   = '';
 		foreach ( (array) $res as $account ) {
+			$n_acct++;
 			foreach ( (array) ( isset( $account['rows'] ) ? $account['rows'] : array() ) as $p ) {
+				$n_rows++;
+				if ( is_array( $p ) && '' === $keys ) {
+					$keys = implode( ',', array_slice( array_keys( $p ), 0, 8 ) );
+				}
 				if ( ! is_array( $p ) || empty( $p['address'] ) || empty( $p['property_id'] ) ) {
 					continue;
 				}
 				$label   = trim( preg_replace( '/\s+/', ' ', $p['address'] . ( ! empty( $p['city'] ) ? ', ' . $p['city'] : '' ) . ( ! empty( $p['state'] ) ? ', ' . $p['state'] : '' ) . ( ! empty( $p['zip'] ) ? ' ' . $p['zip'] : '' ) ) );
 				$cache[] = array( 'id' => (string) $p['property_id'], 'label' => $label, 'tokens' => self::addr_tokens( $label . ' ' . ( isset( $p['nickname'] ) ? $p['nickname'] : '' ) ) );
 			}
+		}
+		if ( ! $cache ) {
+			self::$rentec_note = 0 === $n_acct ? 'no Rentec account has an API key on this site' : sprintf( '%d account(s), %d row(s), none with address + property_id; fields: %s', $n_acct, $n_rows, '' !== $keys ? $keys : 'n/a' );
 		}
 		return $cache;
 	}
@@ -1697,14 +1708,22 @@ class AJCore_RA_Purchases {
 				if ( ! data || ! data.mailbox ) { stx.textContent = 'Mailbox not saved yet: enter shop@… in the gear panel and click Save, then Sync.'; $( 'ajra-pu-settings' ).hidden = false; return; }
 				b.disabled = true; stx.textContent = 'Syncing: reading the mailbox…';
 				var msg = '';
-				post( '/ops/purchases/process', {} ).then( function ( d ) {
-					msg = d.new + ' new, ' + d.scanned + ' scanned' + ( d.complete ? '' : ' (more to read: Sync again)' ) + ( d.errors && d.errors.length ? ' · ' + d.errors.join( ' | ' ) : '' );
+				var nNew = 0, nScan = 0, errs = [], rd = 0;
+				function readAll() {
+					stx.textContent = 'Syncing: reading the mailbox… ' + nNew + ' new';
+					return post( '/ops/purchases/process', {} ).then( function ( d ) {
+						nNew += d.new || 0; nScan += d.scanned || 0; if ( d.errors && d.errors.length ) { errs = errs.concat( d.errors ); }
+						if ( ! d.complete && ! ( d.errors && d.errors.length ) && ++rd < 25 ) { return readAll(); }
+						return d.complete;
+					} );
+				}
+				readAll().then( function ( complete ) {
+					msg = nNew + ' new, ' + nScan + ' scanned' + ( complete ? '' : ' (more to read: Sync again)' ) + ( errs.length ? ' · ' + errs.join( ' | ' ) : '' );
 					var n = 0, fixed = 0;
 					function again() {
-						stx.textContent = 'Syncing: re-parsing… ' + fixed + ' done';
-						return post( '/ops/purchases/reparse', {} ).then( function ( r ) { fixed += r.reparsed || 0; if ( r.remaining && ++n < 12 ) { return again(); } return r.remaining || 0; } );
+						return post( '/ops/purchases/reparse', {} ).then( function ( r ) { fixed += r.reparsed || 0; stx.textContent = 'Syncing: re-parsing… ' + ( r.remaining ? r.remaining + ' emails to fetch' : 'finishing' ); if ( r.remaining && ++n < 80 ) { return again(); } return r.remaining || 0; } );
 					}
-					return again().then( function ( left ) { stx.textContent = msg + ' · ' + fixed + ' re-parsed' + ( left ? ', ' + left + ' left: Sync again' : '' ); } );
+					return again().then( function ( left ) { stx.textContent = msg + ' · re-parsed' + ( left ? ', ' + left + ' left: Sync again' : ': all done' ); } );
 				} ).catch( function ( e ) { stx.textContent = e.message; } ).then( function () { b.disabled = false; load(); } );
 			} );
 			$( 'ajra-pu-mbx' ).addEventListener( 'click', function () { var pn = $( 'ajra-pu-settings' ); pn.hidden = ! pn.hidden; if ( ! pn.hidden ) { pn.scrollIntoView( { behavior: 'smooth', block: 'nearest' } ); } } );
