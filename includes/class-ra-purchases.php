@@ -18,6 +18,7 @@ class AJCore_RA_Purchases {
 
 	const OPTION = 'ajcore_ra_purchases';
 	const CRON   = 'ajcore_ra_purchases_pass';
+	const LOG    = 'ajcore_ra_purchases_log'; // last 200 sync entries (manual passes and the hourly job)
 	const STAGES = array( 'new', 'verified', 'charged', 'posted', 'ignored' );
 
 	/** @var self|null */
@@ -197,6 +198,7 @@ class AJCore_RA_Purchases {
 			'sender'   => '',
 			'match'    => 'all',              // all|any across labels? no: labels narrow; subject/sender follow this
 			'enabled'  => '1',
+			'since'    => '2026-01-01',       // mail received before this date is not read (and Purge removes it)
 			'cursor'   => 0,                  // first page offset that may still hold unseen mail
 			'last_run' => array(),
 		), $opt );
@@ -550,7 +552,9 @@ class AJCore_RA_Purchases {
 		$pages   = array_unique( array( 0, $cursor ) );
 		$guard   = 0;
 
-		while ( $pages && $summary['new'] < $max_new && $guard++ < 40 ) {
+		$t0      = microtime( true );
+		$stopped = false;
+		while ( $pages && $summary['new'] < $max_new && $guard++ < 40 && microtime( true ) - $t0 <= 25 ) {
 			$start = (int) array_shift( $pages );
 			$rows  = $this->list_page( $s, $start );
 			if ( is_wp_error( $rows ) ) {
@@ -565,11 +569,17 @@ class AJCore_RA_Purchases {
 				// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$known = array_flip( (array) $pdb->get_col( $pdb->prepare( "SELECT message_id FROM `{$emails}` WHERE message_id IN ({$ph})", $ids ) ) );
 			}
+			$older = 0;
 			foreach ( $rows as $row ) {
+				if ( '' !== (string) $row['received_at'] && (string) $row['received_at'] < $s['since'] . ' 00:00:00' ) {
+					$older++;
+					continue; // before the window (2026 by default)
+				}
 				if ( isset( $known[ $row['message_id'] ] ) || ! $this->passes_terms( $row, $s ) ) {
 					continue;
 				}
-				if ( $summary['new'] >= $max_new ) {
+				if ( $summary['new'] >= $max_new || microtime( true ) - $t0 > 25 ) { // each request stays short: the browser asks again
+					$stopped = true;
 					break;
 				}
 				$order_id = $this->process_message( $row, $s['mailbox'] );
@@ -583,14 +593,19 @@ class AJCore_RA_Purchases {
 					$pdb->query( $pdb->prepare( "UPDATE `{$this->table( 'aj_purchase_orders' )}` SET label = 'marketing' WHERE id = %d AND stage = 'new' AND label = ''", (int) $order_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				}
 			}
+			if ( $rows && $older === count( $rows ) && ! $stopped ) { // a whole page older than the window: nothing newer is left to read
+				$summary['complete'] = true;
+				$cursor              = 0;
+				break;
+			}
 			$all_known = true;
 			foreach ( $rows as $row ) {
-				if ( ! isset( $known[ $row['message_id'] ] ) && $this->passes_terms( $row, $s ) ) {
+				if ( ( '' === (string) $row['received_at'] || (string) $row['received_at'] >= $s['since'] . ' 00:00:00' ) && ! isset( $known[ $row['message_id'] ] ) && $this->passes_terms( $row, $s ) ) {
 					$all_known = false;
 					break;
 				}
 			}
-			if ( count( $rows ) < 50 ) {
+			if ( count( $rows ) < 50 && ! $stopped ) {
 				$summary['complete'] = $start >= $cursor; // reached the end of the mailbox
 				if ( $start >= $cursor ) {
 					$cursor = 0;
@@ -627,6 +642,7 @@ class AJCore_RA_Purchases {
 		$done    = 0;
 		$fetched = 0;
 		$left    = 0;
+		$t0      = microtime( true );
 		foreach ( $rows as $e ) {
 			$parsed = json_decode( (string) $e->parsed, true );
 			$parsed = is_array( $parsed ) ? $parsed : array();
@@ -637,7 +653,7 @@ class AJCore_RA_Purchases {
 			$tries   = (int) ( $parsed['tries'] ?? 0 );
 			if ( isset( $parsed['bv'] ) && (int) $parsed['bv'] >= 3 && empty( $parsed['body_debug'] ) && ( strlen( trim( $stored ) ) >= 20 || $tries >= 3 ) ) {
 				$body = $stored;
-			} elseif ( $fetched < $max_fetch && $zoho ) {
+			} elseif ( $fetched < $max_fetch && $zoho && microtime( true ) - $t0 <= 25 ) {
 				$m = $zoho->intake_message( (string) $e->message_id, $mailbox );
 				$fetched++;
 				if ( is_wp_error( $m ) ) {
@@ -746,15 +762,107 @@ class AJCore_RA_Purchases {
 
 	public function rest_reparse() {
 		$r = $this->reparse();
-		return is_wp_error( $r ) ? $r : rest_ensure_response( $r );
+		if ( is_wp_error( $r ) ) {
+			$this->log_event( 'manual', 'reparse', 'ERROR: ' . $r->get_error_message() );
+			return $r;
+		}
+		$this->log_event( 'manual', 'reparse', sprintf( '%d re-parsed, %d fetched, %d left', $r['reparsed'], $r['fetched'], $r['remaining'] ), $r );
+		return rest_ensure_response( $r );
 	}
 
+	/** Hourly: the same as the Sync button (read the whole mailbox, then re-parse), within a time budget. */
 	public static function cron_pass() {
 		$self = self::instance();
 		$s    = $self->settings();
 		if ( '1' === $s['enabled'] && '' !== $s['mailbox'] ) {
-			$self->run_pass( 40 );
+			$self->sync_job( 'auto', 240 );
 		}
+	}
+
+	/** Removes stored mail older than the window and the orders left with no email (verified / charged orders are kept). */
+	public function purge_old() {
+		if ( ! $this->ensure_tables() ) {
+			return new WP_Error( 'no_table', __( 'Purchases tables could not be created.', 'ajcore-ra' ) );
+		}
+		$s      = $this->settings();
+		$pdb    = $this->pdb();
+		$emails = $this->table( 'aj_purchase_emails' );
+		$orders = $this->table( 'aj_purchase_orders' );
+		$cut    = $s['since'] . ' 00:00:00';
+		$n_mail = (int) $pdb->query( $pdb->prepare( "DELETE FROM `{$emails}` WHERE received_at < %s", $cut ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$n_ord  = (int) $pdb->query( "DELETE o FROM `{$orders}` o LEFT JOIN `{$emails}` e ON e.order_id = o.id WHERE e.id IS NULL AND o.stage IN ('new', 'ignored')" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$s['cursor'] = 0;
+		$this->save_settings( $s );
+		$out = array( 'since' => $s['since'], 'emails_removed' => $n_mail, 'orders_removed' => $n_ord );
+		$this->log_event( 'manual', 'purge', sprintf( 'Purged before %s: %d emails, %d orders removed', $s['since'], $n_mail, $n_ord ), $out );
+		return $out;
+	}
+
+	public function rest_purge() {
+		$r = $this->purge_old();
+		return is_wp_error( $r ) ? $r : rest_ensure_response( $r );
+	}
+
+	/** Appends one line to the sync log (newest first, capped). */
+	public function log_event( $src, $event, $msg, array $data = array() ) {
+		$log = get_option( self::LOG, array() );
+		$log = is_array( $log ) ? $log : array();
+		array_unshift( $log, array( 't' => current_time( 'mysql' ), 'src' => (string) $src, 'ev' => (string) $event, 'msg' => mb_substr( (string) $msg, 0, 400 ), 'd' => $data ) );
+		update_option( self::LOG, array_slice( $log, 0, 200 ), false );
+	}
+
+	/** Read passes until the mailbox is done (or the budget runs out), then re-parse batches; one log entry with the totals. */
+	public function sync_job( $src, $budget = 240 ) {
+		if ( get_transient( 'ajcore_ra_purchases_lock' ) ) {
+			$this->log_event( $src, 'skipped', 'Another sync is still running.' );
+			return array( 'skipped' => true );
+		}
+		set_transient( 'ajcore_ra_purchases_lock', 1, 10 * MINUTE_IN_SECONDS );
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( $budget + 60 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		}
+		$t0    = microtime( true );
+		$tot   = array( 'new' => 0, 'scanned' => 0, 'reparsed' => 0, 'left' => 0, 'passes' => 0, 'complete' => false );
+		$errs  = array();
+		$bad   = 0;
+		for ( $i = 0; $i < 40 && microtime( true ) - $t0 < $budget; $i++ ) {
+			$r = $this->run_pass( 30 );
+			$tot['passes']++;
+			if ( is_wp_error( $r ) ) {
+				$errs[] = $r->get_error_message();
+				break;
+			}
+			$tot['new']     += (int) $r['new'];
+			$tot['scanned'] += (int) $r['scanned'];
+			if ( ! empty( $r['errors'] ) ) {
+				$errs = array_merge( $errs, (array) $r['errors'] );
+				if ( ++$bad >= 3 ) {
+					break;
+				}
+			} else {
+				$bad = 0;
+			}
+			if ( ! empty( $r['complete'] ) ) {
+				$tot['complete'] = true;
+				break;
+			}
+		}
+		for ( $i = 0; $i < 80 && microtime( true ) - $t0 < $budget; $i++ ) {
+			$r = $this->reparse();
+			if ( is_wp_error( $r ) ) {
+				$errs[] = $r->get_error_message();
+				break;
+			}
+			$tot['reparsed'] += (int) $r['reparsed'];
+			$tot['left']      = (int) $r['remaining'];
+			if ( ! $r['remaining'] ) {
+				break;
+			}
+		}
+		delete_transient( 'ajcore_ra_purchases_lock' );
+		$tot['secs'] = (int) round( microtime( true ) - $t0 );
+		$this->log_event( $src, 'sync', sprintf( '%d new, %d scanned%s; %d re-parsed%s; %ds%s', $tot['new'], $tot['scanned'], $tot['complete'] ? '' : ' (mailbox not finished)', $tot['reparsed'], $tot['left'] ? ', ' . $tot['left'] . ' left' : '', $tot['secs'], $errs ? '; ERRORS: ' . implode( ' | ', array_unique( $errs ) ) : '' ), $tot );
+		return $tot;
 	}
 
 	/** Reads one message, classifies it, and records the email and its order. Returns the order id or WP_Error. */
@@ -1083,6 +1191,8 @@ class AJCore_RA_Purchases {
 		register_rest_route( $ns, '/ops/purchases/marketing', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_marketing' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/marketing/delete', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_delete_marketing' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/senders', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_senders' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/purchases/purge', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_purge' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/purchases/log', array( 'methods' => 'GET', 'callback' => array( $this, 'rest_log' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/reparse', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_reparse' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/process', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_process' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/stage', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_stage' ), 'permission_callback' => $ops ) );
@@ -1257,6 +1367,7 @@ class AJCore_RA_Purchases {
 			}, $by_month ),
 			'vendors'     => array_values( $vendors ),
 			'mailbox'     => $s['mailbox'],
+			'since'       => $s['since'],
 			'last_run'    => $s['last_run'],
 			'marketing'   => $marketing,
 			'notices'     => $notices,
@@ -1363,9 +1474,20 @@ class AJCore_RA_Purchases {
 		return rest_ensure_response( array( 'updated' => (int) $n, 'stage' => $stage ) );
 	}
 
+	/** The sync log (newest first) and when the hourly job runs next. */
+	public function rest_log() {
+		$log = get_option( self::LOG, array() );
+		return rest_ensure_response( array( 'entries' => is_array( $log ) ? array_slice( $log, 0, 100 ) : array(), 'next_auto' => (int) wp_next_scheduled( self::CRON ), 'locked' => (bool) get_transient( 'ajcore_ra_purchases_lock' ) ) );
+	}
+
 	public function rest_process( WP_REST_Request $request ) {
 		$result = $this->run_pass( 30 );
-		return is_wp_error( $result ) ? $result : rest_ensure_response( array_merge( array( 'success' => true ), $result ) );
+		if ( is_wp_error( $result ) ) {
+			$this->log_event( 'manual', 'read', 'ERROR: ' . $result->get_error_message() );
+			return $result;
+		}
+		$this->log_event( 'manual', 'read', sprintf( '%d new, %d scanned%s%s', $result['new'], $result['scanned'], $result['complete'] ? ', mailbox finished' : '', $result['errors'] ? '; ERRORS: ' . implode( ' | ', array_unique( (array) $result['errors'] ) ) : '' ), $result );
+		return rest_ensure_response( array_merge( array( 'success' => true ), $result ) );
 	}
 
 	public function rest_properties( WP_REST_Request $request ) {
@@ -1445,6 +1567,8 @@ class AJCore_RA_Purchases {
 				<details class="ajra-menu" id="ajra-pu-menu">
 					<summary><?php esc_html_e( 'Actions', 'ajcore-ra' ); ?> &#9662;</summary>
 					<div class="ajra-menu-list">
+						<button type="button" id="ajra-pu-purge"><?php esc_html_e( 'Purge old data', 'ajcore-ra' ); ?></button>
+						<button type="button" id="ajra-pu-log"><?php esc_html_e( 'Sync log', 'ajcore-ra' ); ?></button>
 						<button type="button" id="ajra-pu-csv"><?php esc_html_e( 'Export CSV', 'ajcore-ra' ); ?></button>
 						<button type="button" id="ajra-pu-clear"><?php esc_html_e( 'Clear filters', 'ajcore-ra' ); ?></button>
 						<hr>
@@ -1459,6 +1583,7 @@ class AJCore_RA_Purchases {
 			</div>
 			<div class="ajra-pu-status" id="ajra-pu-status"></div>
 			<div class="ajra-pu-warn" id="ajra-pu-warn"></div>
+			<div class="ajmr-panel" id="ajra-pu-logbox" hidden style="margin-top:14px"><h3><?php esc_html_e( 'Sync log', 'ajcore-ra' ); ?> <small id="ajra-pu-lognext" style="font-weight:400;color:#64748b"></small></h3><table class="widefat striped"><thead><tr><th style="width:150px"><?php esc_html_e( 'Time', 'ajcore-ra' ); ?></th><th style="width:70px"><?php esc_html_e( 'By', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Result', 'ajcore-ra' ); ?></th></tr></thead><tbody id="ajra-pu-logrows"></tbody></table></div>
 			<div class="ajmr-panel" id="ajra-pu-settings" hidden style="margin-top:14px">
 				<h3><?php esc_html_e( 'Mailbox and selection', 'ajcore-ra' ); ?></h3>
 				<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
@@ -1731,6 +1856,21 @@ class AJCore_RA_Purchases {
 					}
 					return again().then( function ( left ) { stx.textContent = msg + ' · re-parsed' + ( left ? ', ' + left + ' left: Sync again' : ': all done' ); } );
 				} ).catch( function ( e ) { stx.textContent = e.message; } ).then( function () { b.disabled = false; load(); } );
+			} );
+			$( 'ajra-pu-purge' ).addEventListener( 'click', function () {
+				var since = ( data && data.since ) || '2026-01-01';
+				if ( ! window.confirm( 'Remove every stored purchase email received before ' + since + ', and the orders left empty?\n\n(Verified / charged orders are kept. The mailbox itself is not touched.)' ) ) { return; }
+				$( 'ajra-pu-status' ).textContent = 'Purging…';
+				post( '/ops/purchases/purge', {} ).then( function ( d ) { $( 'ajra-pu-status' ).textContent = 'Purged before ' + d.since + ': ' + d.emails_removed + ' emails, ' + d.orders_removed + ' orders removed'; selected = {}; load(); } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; } );
+			} );
+			$( 'ajra-pu-log' ).addEventListener( 'click', function () {
+				var bx = $( 'ajra-pu-logbox' ); bx.hidden = ! bx.hidden; if ( bx.hidden ) { return; }
+				api( '/ops/purchases/log' ).then( function ( d ) {
+					var tb = $( 'ajra-pu-logrows' ); tb.innerHTML = '';
+					$( 'ajra-pu-lognext' ).textContent = d.locked ? '· a sync is running now' : ( d.next_auto ? '· next automatic sync ' + new Date( d.next_auto * 1000 ).toLocaleString() : '· automatic sync not scheduled' );
+					if ( ! d.entries.length ) { var e0 = el( 'tr' ), c0 = el( 'td', null, 'Nothing logged yet.' ); c0.colSpan = 3; e0.appendChild( c0 ); tb.appendChild( e0 ); }
+					d.entries.forEach( function ( x ) { var r = el( 'tr' ); r.appendChild( el( 'td', null, x.t ) ); r.appendChild( el( 'td', null, x.src ) ); var c = el( 'td', null, x.msg ); if ( /ERROR/.test( x.msg ) ) { c.style.color = '#b91c1c'; } r.appendChild( c ); tb.appendChild( r ); } );
+				} ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; } );
 			} );
 			$( 'ajra-pu-mbx' ).addEventListener( 'click', function () { var pn = $( 'ajra-pu-settings' ); pn.hidden = ! pn.hidden; if ( ! pn.hidden ) { pn.scrollIntoView( { behavior: 'smooth', block: 'nearest' } ); } } );
 			document.querySelectorAll( '#ajra-pu-menu .ajra-menu-list button' ).forEach( function ( b ) { b.addEventListener( 'click', function () { $( 'ajra-pu-menu' ).removeAttribute( 'open' ); } ); } );
