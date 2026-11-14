@@ -1708,12 +1708,13 @@ class AJCore_RA_Purchases {
 				if ( ! data || ! data.mailbox ) { stx.textContent = 'Mailbox not saved yet: enter shop@… in the gear panel and click Save, then Sync.'; $( 'ajra-pu-settings' ).hidden = false; return; }
 				b.disabled = true; stx.textContent = 'Syncing: reading the mailbox…';
 				var msg = '';
-				var nNew = 0, nScan = 0, errs = [], rd = 0;
+				var nNew = 0, nScan = 0, errs = [], rd = 0, bad = 0;
 				function readAll() {
 					stx.textContent = 'Syncing: reading the mailbox… ' + nNew + ' new';
 					return post( '/ops/purchases/process', {} ).then( function ( d ) {
-						nNew += d.new || 0; nScan += d.scanned || 0; if ( d.errors && d.errors.length ) { errs = errs.concat( d.errors ); }
-						if ( ! d.complete && ! ( d.errors && d.errors.length ) && ++rd < 25 ) { return readAll(); }
+						nNew += d.new || 0; nScan += d.scanned || 0;
+						if ( d.errors && d.errors.length ) { bad++; errs = d.errors; } else { bad = 0; errs = []; }
+						if ( ! d.complete && bad < 3 && ++rd < 25 ) { return readAll(); } // a timeout is retried (up to 3 in a row)
 						return d.complete;
 					} );
 				}
