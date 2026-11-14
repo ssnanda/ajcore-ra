@@ -498,7 +498,7 @@ class AJCore_RA_Purchases {
 			$cls    = isset( $parsed['classify'] ) && is_array( $parsed['classify'] ) ? $parsed['classify'] : self::classify( (string) $e->sender, (string) $e->subject );
 			if ( ! in_array( $cls['kind'], array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) ) {
 				$body = '';
-			} elseif ( isset( $parsed['bv'] ) && empty( $parsed['body_debug'] ) ) {
+			} elseif ( isset( $parsed['bv'] ) && (int) $parsed['bv'] >= 3 && empty( $parsed['body_debug'] ) ) {
 				$body = (string) ( $parsed['body'] ?? '' );
 			} elseif ( $fetched < $max_fetch && $zoho ) {
 				$m = $zoho->intake_message( (string) $e->message_id, $mailbox );
@@ -509,7 +509,8 @@ class AJCore_RA_Purchases {
 				$body                 = (string) $m['body_text'];
 				$parsed['body']       = mb_substr( $body, 0, 20000 );
 				$parsed['body_debug'] = (string) ( $m['body_debug'] ?? '' );
-				$parsed['bv']         = 2;
+				$parsed['html']       = (string) ( $m['body_html'] ?? '' );
+				$parsed['bv']         = 3;
 			} else {
 				$left++;
 				continue;
@@ -549,6 +550,7 @@ class AJCore_RA_Purchases {
 		$body = '';
 		$ts   = null;
 		$bdbg = '';
+		$bhtml = '';
 		if ( in_array( $cls['kind'], array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) ) {
 			$m = $zoho->intake_message( $row['message_id'], $mailbox );
 			if ( is_wp_error( $m ) ) {
@@ -557,6 +559,7 @@ class AJCore_RA_Purchases {
 			$body = (string) $m['body_text'];
 			$ts   = $m['date_ts'];
 			$bdbg = (string) ( $m['body_debug'] ?? '' );
+			$bhtml = (string) ( $m['body_html'] ?? '' );
 		}
 		$fields = self::extract( $cls['kind'], $row['subject'], $body );
 		$when   = $ts ? gmdate( 'Y-m-d H:i:s', $ts ) : ( '' !== (string) $row['received_at'] ? $row['received_at'] : current_time( 'mysql', true ) );
@@ -572,7 +575,7 @@ class AJCore_RA_Purchases {
 			'subject'     => mb_substr( (string) $row['subject'], 0, 500 ),
 			'sender'      => mb_substr( trim( $row['from_name'] . ' <' . $row['from_email'] . '>' ), 0, 255 ),
 			'received_at' => $when,
-			'parsed'      => wp_json_encode( array( 'classify' => $cls, 'fields' => $fields, 'body' => mb_substr( $body, 0, 20000 ), 'body_debug' => isset( $bdbg ) ? $bdbg : '', 'bv' => 2 ) ),
+			'parsed'      => wp_json_encode( array( 'classify' => $cls, 'fields' => $fields, 'body' => mb_substr( $body, 0, 20000 ), 'body_debug' => isset( $bdbg ) ? $bdbg : '', 'bv' => 3, 'html' => $bhtml ) ),
 			'created_at'  => current_time( 'mysql' ),
 		) );
 		return $order_id;
@@ -825,7 +828,7 @@ class AJCore_RA_Purchases {
 		foreach ( $emails as $e ) {
 			$parsed = json_decode( (string) $e->parsed, true );
 			$parsed = is_array( $parsed ) ? $parsed : array();
-			if ( ( isset( $parsed['bv'] ) && empty( $parsed['body_debug'] ) ) || ! $zoho || '' === $mailbox ) { // full text already stored
+			if ( ( isset( $parsed['bv'] ) && (int) $parsed['bv'] >= 3 && empty( $parsed['body_debug'] ) ) || ! $zoho || '' === $mailbox ) { // full text + rich HTML already stored
 				continue;
 			}
 			$m = $zoho->intake_message( (string) $e->message_id, $mailbox );
@@ -834,7 +837,8 @@ class AJCore_RA_Purchases {
 			}
 			$parsed['body']       = mb_substr( (string) $m['body_text'], 0, 20000 );
 			$parsed['body_debug'] = (string) ( $m['body_debug'] ?? '' );
-			$parsed['bv']         = 2;
+			$parsed['html']       = (string) ( $m['body_html'] ?? '' );
+			$parsed['bv']         = 3;
 			$e->parsed      = wp_json_encode( $parsed );
 			$pdb->update( $this->table( 'aj_purchase_emails' ), array( 'parsed' => $e->parsed ), array( 'id' => (int) $e->id ) );
 		}
@@ -1053,6 +1057,7 @@ class AJCore_RA_Purchases {
 			function el( tag, cls, text ) { var e = document.createElement( tag ); if ( cls ) { e.className = cls; } if ( text != null ) { e.textContent = text; } return e; }
 			function money( v ) { return v == null ? '—' : '$' + Number( v ).toLocaleString( undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 } ); }
 			function day( s ) { if ( ! s ) { return '—'; } var d = new Date( s.replace( ' ', 'T' ) + 'Z' ); return isNaN( d ) ? s : d.toLocaleDateString( undefined, { month: 'short', day: 'numeric', year: 'numeric' } ); }
+			function emailFrame( html ) { var f = document.createElement( 'iframe' ); f.setAttribute( 'sandbox', 'allow-popups' ); f.setAttribute( 'referrerpolicy', 'no-referrer' ); f.srcdoc = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src https: data:; style-src \'unsafe-inline\'; font-src https: data:"><base target="_blank"><style>body{margin:10px;font:14px/1.45 -apple-system,Segoe UI,Arial,sans-serif;color:#111;word-wrap:break-word}img{max-width:100%;height:auto}</style>' + html; f.style.cssText = 'width:100%;height:520px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;resize:vertical;'; return f; }
 			function api( path, opts ) { opts = opts || {}; opts.headers = Object.assign( { 'X-WP-Nonce': nonce }, opts.headers || {} ); return fetch( rest + path, opts ).then( function ( r ) { return r.json().then( function ( d ) { if ( ! r.ok ) { throw new Error( d.message || 'Request failed' ); } return d; } ); } ); }
 			function post( path, body ) { return api( path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( body ) } ); }
 
@@ -1162,7 +1167,7 @@ class AJCore_RA_Purchases {
 					var cl = el( 'button', 'button-link', 'Close' ); cl.type = 'button'; cl.style.marginLeft = '12px'; cl.addEventListener( 'click', function () { $( 'ajra-pu-detail' ).hidden = true; } ); bar.appendChild( cl ); box.appendChild( bar );
 					box.appendChild( el( 'h4', null, 'Emails (' + d.emails.length + ')' ) );
 					var ul = el( 'ul' ); ul.style.cssText = 'margin:0;padding-left:16px;list-style:disc;font-size:12px;';
-					d.emails.forEach( function ( e ) { var li = el( 'li', null, day( e.received_at ) + ' · ' + e.kind + ' · ' + e.subject ); var tx = e.parsed && e.parsed.body ? e.parsed.body : ''; if ( e.parsed && e.parsed.body_debug ) { var wn = el( 'div', null, 'Only the preview could be read: ' + e.parsed.body_debug ); wn.style.cssText = 'color:#b45309;font-size:11px;margin:4px 0;'; li.appendChild( wn ); } if ( tx ) { var dt = el( 'details' ); dt.open = true; dt.appendChild( el( 'summary', null, 'Email' ) ); var pre = el( 'pre', null, tx ); pre.style.cssText = 'max-height:360px;overflow:auto;white-space:pre-wrap;font-size:11px;background:#f8fafc;padding:8px;border-radius:6px;'; dt.appendChild( pre ); li.appendChild( dt ); } ul.appendChild( li ); } ); box.appendChild( ul );
+					d.emails.forEach( function ( e ) { var li = el( 'li', null, day( e.received_at ) + ' · ' + e.kind + ' · ' + e.subject ); var tx = e.parsed && e.parsed.body ? e.parsed.body : ''; if ( e.parsed && e.parsed.html ) { li.appendChild( emailFrame( e.parsed.html ) ); } if ( e.parsed && e.parsed.body_debug ) { var wn = el( 'div', null, 'Only the preview could be read: ' + e.parsed.body_debug ); wn.style.cssText = 'color:#b45309;font-size:11px;margin:4px 0;'; li.appendChild( wn ); } if ( tx ) { var dt = el( 'details' ); dt.open = !( e.parsed && e.parsed.html ); dt.appendChild( el( 'summary', null, 'Plain text' ) ); var pre = el( 'pre', null, tx ); pre.style.cssText = 'max-height:360px;overflow:auto;white-space:pre-wrap;font-size:11px;background:#f8fafc;padding:8px;border-radius:6px;'; dt.appendChild( pre ); li.appendChild( dt ); } ul.appendChild( li ); } ); box.appendChild( ul );
 					$( 'ajra-pu-detail' ).hidden = false;
 				} ).catch( function ( e ) { alert( e.message ); } );
 			}
