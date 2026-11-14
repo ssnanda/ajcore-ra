@@ -240,11 +240,23 @@ class AJCore_RA_Purchases {
 			} elseif ( preg_match( '/receipt/i', $subject ) ) {
 				$kind = 'receipt';
 			}
+			if ( preg_match( '/earned points|rewards|\bquote\b|survey|feedback/i', $subject ) && ! preg_match( '/receipt|order\s*#|#\s*\d{8,}/i', $subject ) ) {
+				$kind = 'noise';
+			}
 			return array( 'vendor' => "Lowe's", 'kind' => $kind );
 		}
 		if ( false !== strpos( $domain, 'homedepot.com' ) ) {
-			$kind = preg_match( '/statement/i', $subject ) ? 'statement' : ( preg_match( '/receipt|invoice|order/i', $subject ) ? 'receipt' : 'status' );
+			if ( preg_match( '/feedback|survey|would love|perk|offer|reward|unlocked|savings|deals|sale\b/i', $subject ) && ! preg_match( '/receipt|statement|order\s*#/i', $subject ) ) {
+				return array( 'vendor' => 'Home Depot', 'kind' => 'noise' ); // surveys and marketing: not purchases
+			}
+			$kind = preg_match( '/statement/i', $subject ) ? 'noise' : ( preg_match( '/receipt|invoice|order/i', $subject ) ? 'receipt' : 'status' ); // the Pro Xtra statement mail only links to the statement
 			return array( 'vendor' => 'Home Depot', 'kind' => $kind );
+		}
+		if ( false !== strpos( $domain, 'flooranddecor.com' ) ) {
+			return array( 'vendor' => 'Floor & Decor', 'kind' => preg_match( '/purchase|order|receipt|invoice/i', $subject ) ? 'confirmation' : 'noise' );
+		}
+		if ( false !== strpos( $domain, 'terminix' ) ) {
+			return array( 'vendor' => 'Terminix', 'kind' => 'status' );
 		}
 		if ( false !== strpos( $domain, 'invoicecloud.net' ) ) {
 			$vendor = preg_match( '/^\s*(?:re:\s*)?(.+?)\s+Invoice#/i', $subject, $m ) ? trim( $m[1] ) : 'Invoice Cloud';
@@ -256,6 +268,10 @@ class AJCore_RA_Purchases {
 
 	/** The property tag from "PO#Ardale - ..." / "PO # 215 Orchard: ..." in the subject, else from the body. */
 	public static function property_tag( $subject, $body = '' ) {
+		// Lowe's receipts: "Customer PO #" / "Customer Code" followed by the value (often on the next line).
+		if ( preg_match( '/Customer\s+(?:PO\s*#|Code)\s*:?\s*([^\r\n]{2,60})/i', (string) $body, $cm ) && preg_match( '/[A-Za-z0-9]/', $cm[1] ) ) {
+			return trim( preg_replace( '/\s+/', ' ', $cm[1] ) );
+		}
 		foreach ( array( (string) $subject, (string) $body ) as $text ) {
 			if ( preg_match( '/\bPO\s*#\s*([^\r\n\-–—:|]{1,80}?)\s*(?:[\-–—:|]|\r|\n|$)/u', $text, $m ) ) {
 				$tag = trim( preg_replace( '/\s+/', ' ', $m[1] ) );
@@ -298,8 +314,10 @@ class AJCore_RA_Purchases {
 	/** First amount that follows one of the labels (in priority order), or null. */
 	private static function amount_after( $text, array $labels ) {
 		foreach ( $labels as $label ) {
-			if ( preg_match( '/\b' . $label . '\b[^\d$\r\n]{0,24}\$?\s*(-?[\d,]+\.\d{2})/i', $text, $m ) ) {
-				return self::parse_money( $m[1] );
+			// The label must be followed straight by the amount (spaces, a colon or a line break in between), so "Total Tax" or
+			// "Total Savings" never count as "Total". The last match wins: item lines ("Subtotal: $19.34") come before the real totals.
+			if ( preg_match_all( '/(?<![\\w])' . $label . '(?![\\w])\\s*:?\\s*\\$\\s*(-?[\\d,]+\\.\\d{2})/i', $text, $m ) && ! empty( $m[1] ) ) {
+				return self::parse_money( end( $m[1] ) );
 			}
 		}
 		return null;
@@ -312,6 +330,7 @@ class AJCore_RA_Purchases {
 	public static function extract( $kind, $subject, $body ) {
 		$text = html_entity_decode( (string) $body, ENT_QUOTES, 'UTF-8' );
 		$text = str_replace( "\xc2\xa0", ' ', $text );
+		$text = preg_replace( '/[\x{034F}\x{200B}-\x{200F}\x{2060}\x{FEFF}\x{00AD}]/u', '', (string) $text );
 		$text = preg_replace( '/[ \t]+/', ' ', $text );
 		$out  = array( 'order_no' => '', 'invoice_no' => '', 'property_src' => '', 'property_tag' => '', 'subtotal' => null, 'tax' => null, 'total' => null );
 
@@ -331,10 +350,34 @@ class AJCore_RA_Purchases {
 				$out['invoice_no'] = $m[1];
 			}
 		}
+		if ( '' === $out['order_no'] ) {
+			if ( preg_match( '/\b(?:receipt|order)\s+(?:for\s+)?#\s*([A-Z]\d{3,5}-\d{4,})/i', $subject . ' ' . $text, $m ) ) {
+				$out['order_no'] = strtoupper( $m[1] ); // Home Depot: "receipt for # H3603-366250"
+			} elseif ( preg_match( '/\([^;()]{3,60};\s*(\d{10,})\)/', $text, $m ) ) {
+				$out['order_no'] = $m[1]; // Floor & Decor: "(958 Plaza Walk; 1017905613017483)"
+			} elseif ( preg_match( '/\border\s+([A-Z]{2}\d{10,})\b/i', $text, $m ) ) {
+				$out['order_no'] = $m[1]; // Floor & Decor pickup mails: "order SB017905613168667 for 958 plaza wall"
+			}
+		}
+		if ( '' === $out['property_tag'] && preg_match( '/\border\s+[A-Z]{2}\d{10,}\s+for\s+(\d{1,6}\s+[A-Za-z][A-Za-z .\']{2,30}?)(?=\s+(?:have|has|is|are)\b|[.,\n]|$)/i', $text, $m ) ) {
+			$out['property_tag'] = trim( $m[1] );
+			$out['property_src'] = 'address';
+		}
+		if ( '' === $out['property_tag'] && preg_match( '/\(\s*(\d{1,6}\s+[A-Za-z][A-Za-z0-9 .\']{2,40}?);\s*\d{8,}\)/', $text, $m ) ) {
+			$out['property_tag'] = trim( $m[1] );
+			$out['property_src'] = 'address';
+		}
+		if ( '' === $out['property_tag'] && preg_match( '/\binvoice\s*(?:#|number|no\.?)\s*:?\s*(\d{6,8})-\d{4,}/i', $subject . ' ' . $text, $m ) ) {
+			$out['property_tag'] = 'City account ' . $m[1]; // utility bills carry no address: name this tag once and every bill of the account follows
+			$out['property_src'] = 'account';
+		}
 		if ( in_array( $kind, array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) ) {
 			$out['total']    = self::amount_after( $text, array( 'Order\s+Total', 'Grand\s+Total', 'Total\s+Amount', 'Amount\s+Paid', 'Payment\s+Amount', 'Total\s+Paid', 'Total' ) );
 			$out['subtotal'] = self::amount_after( $text, array( 'Sub\s*total', 'Merchandise' ) );
-			$out['tax']      = self::amount_after( $text, array( 'Sales\s+Tax', 'Tax' ) );
+			$out['tax']      = self::amount_after( $text, array( 'Total\s+Tax', 'Sales\s+Tax', 'Tax' ) );
+			if ( null === $out['total'] && preg_match( '/\b(?:purchase|payment|charge[d]?)\s+(?:of|for)\s+\$\s*([\d,]+\.\d{2})/i', $text, $m ) ) {
+				$out['total'] = self::parse_money( $m[1] ); // Floor & Decor: "for a purchase of $380.90"
+			}
 			if ( null === $out['total'] && 'payment' === $kind && preg_match( '/payment[^$\r\n]{0,60}\$\s*([\d,]+\.\d{2})/i', $text, $m ) ) {
 				$out['total'] = self::parse_money( $m[1] );
 			}
@@ -436,9 +479,17 @@ class AJCore_RA_Purchases {
 				$ph = implode( ', ', array_fill( 0, count( $ids ), '%s' ) );
 				// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$known = array_flip( (array) $pdb->get_col( $pdb->prepare( "SELECT message_id FROM `{$emails}` WHERE message_id IN ({$ph})", $ids ) ) );
+				if ( class_exists( 'AJCore_Marketing' ) ) {
+					$known = $known + AJCore_Marketing::known( $s['mailbox'], $ids ); // labelled marketing (or deleted): not read back in
+				}
 			}
 			foreach ( $rows as $row ) {
 				if ( isset( $known[ $row['message_id'] ] ) || ! $this->passes_terms( $row, $s ) ) {
+					continue;
+				}
+				$sender_txt = trim( $row['from_name'] . ' <' . $row['from_email'] . '>' );
+				if ( class_exists( 'AJCore_Marketing' ) && AJCore_Marketing::is_marketing_sender( $sender_txt ) ) { // a marked sender goes straight to the Marketing tab
+					AJCore_Marketing::label( array( 'pipeline' => 'purchases', 'mailbox' => $s['mailbox'], 'message_id' => $row['message_id'], 'subject' => $row['subject'], 'sender' => $sender_txt, 'summary' => $row['summary'], 'received_at' => $row['received_at'] ) );
 					continue;
 				}
 				if ( $summary['new'] >= $max_new ) {
@@ -532,12 +583,41 @@ class AJCore_RA_Purchases {
 			$oid                = $this->upsert_order( $cls, $fields, (string) $e->received_at, $row );
 			if ( $oid ) {
 				$pdb->update( $emails, array( 'order_id' => $oid, 'parsed' => wp_json_encode( $parsed ) ), array( 'id' => (int) $e->id ) );
+				if ( 'noise' === $cls['kind'] ) { // surveys / marketing: not purchases
+					$pdb->query( $pdb->prepare( "UPDATE `{$orders}` SET stage = 'ignored' WHERE id = %d AND stage = 'new' AND order_no LIKE %s", $oid, 'msg:%' ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				}
 				$done++;
 			}
 		}
 		// Orders in "new" that no longer have an email (merged into another order).
 		$pdb->query( "DELETE o FROM `{$orders}` o LEFT JOIN `{$emails}` e ON e.order_id = o.id WHERE o.stage = 'new' AND e.id IS NULL" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		return array( 'reparsed' => $done, 'fetched' => $fetched, 'remaining' => $left );
+	}
+
+	/** Label whole orders as marketing: their emails move to the Marketing tab and the orders are removed. sender_rule: '' | 'address' | 'domain'. */
+	public function rest_marketing( WP_REST_Request $request ) {
+		$ids = array_values( array_filter( array_map( 'absint', (array) $request->get_param( 'ids' ) ) ) );
+		if ( ! $ids || ! class_exists( 'AJCore_Marketing' ) || ! $this->ensure_tables() ) {
+			return new WP_Error( 'bad_request', __( 'Select orders first.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		}
+		$rule    = sanitize_key( (string) $request->get_param( 'sender_rule' ) );
+		$mailbox = $this->settings()['mailbox'];
+		$pdb     = $this->pdb();
+		$emails  = $this->table( 'aj_purchase_emails' );
+		$orders  = $this->table( 'aj_purchase_orders' );
+		$ph      = implode( ', ', array_fill( 0, count( $ids ), '%d' ) );
+		$rows    = (array) $pdb->get_results( $pdb->prepare( "SELECT * FROM `{$emails}` WHERE order_id IN ({$ph})", $ids ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$moved   = 0;
+		foreach ( $rows as $e ) {
+			AJCore_Marketing::label( array( 'pipeline' => 'purchases', 'mailbox' => $mailbox, 'message_id' => $e->message_id, 'subject' => $e->subject, 'sender' => $e->sender, 'summary' => '', 'received_at' => $e->received_at ) );
+			if ( in_array( $rule, array( 'address', 'domain' ), true ) ) {
+				AJCore_Marketing::add_sender( (string) $e->sender, 'domain' === $rule );
+			}
+			$moved++;
+		}
+		$pdb->query( $pdb->prepare( "DELETE FROM `{$emails}` WHERE order_id IN ({$ph})", $ids ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$pdb->query( $pdb->prepare( "DELETE FROM `{$orders}` WHERE id IN ({$ph})", $ids ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		return rest_ensure_response( array( 'moved' => $moved, 'orders' => count( $ids ) ) );
 	}
 
 	public function rest_reparse() {
@@ -659,7 +739,7 @@ class AJCore_RA_Purchases {
 			'subtotal'      => $f['subtotal'],
 			'tax'           => $f['tax'],
 			'total'         => $f['total'],
-			'stage'         => 'new',
+			'stage'         => 'noise' === $cls['kind'] ? 'ignored' : 'new',
 			'confidence'    => $conf,
 			'created_at'    => current_time( 'mysql' ),
 			'updated_at'    => current_time( 'mysql' ),
@@ -760,7 +840,22 @@ class AJCore_RA_Purchases {
 				$hits[] = $p;
 			}
 		}
-		return 1 === count( $hits ) ? $hits[0] : null;
+		if ( 1 === count( $hits ) ) {
+			return $hits[0];
+		}
+		// A street number that only one Rentec property starts with is enough ("6822 Trim batch" -> 6822 Trimbach Way).
+		if ( ctype_digit( (string) $want[0] ) && strlen( $want[0] ) >= 3 ) {
+			$by_no = array();
+			foreach ( $this->rentec_properties() as $p ) {
+				if ( isset( $p['tokens'][0] ) && $p['tokens'][0] === $want[0] ) {
+					$by_no[] = $p;
+				}
+			}
+			if ( 1 === count( $by_no ) ) {
+				return $by_no[0];
+			}
+		}
+		return null;
 	}
 
 	/** Property label for a tag: a saved name, else a fixed rule (Ardale), else the matching Rentec property (remembered for next time). */
@@ -797,6 +892,7 @@ class AJCore_RA_Purchases {
 		$ns  = AJCore_Extensions::rest_namespace();
 		$ops = array( 'AJCore_Extensions', 'can_manage_ops' );
 		register_rest_route( $ns, '/ops/purchases', array( 'methods' => 'GET', 'callback' => array( $this, 'rest_list' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/purchases/marketing', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_marketing' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/reparse', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_reparse' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/process', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_process' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/stage', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_stage' ), 'permission_callback' => $ops ) );
@@ -1168,6 +1264,7 @@ class AJCore_RA_Purchases {
 				<button type="button" class="button" data-stage="charged"><?php esc_html_e( 'Mark charged', 'ajcore-ra' ); ?></button>
 				<button type="button" class="button" data-stage="new"><?php esc_html_e( 'Back to new', 'ajcore-ra' ); ?></button>
 				<button type="button" class="button" data-stage="ignored"><?php esc_html_e( 'Ignore', 'ajcore-ra' ); ?></button>
+				<button type="button" class="button" id="ajra-pu-bulk-marketing" title="<?php echo esc_attr__( 'Move to the Marketing tab', 'ajcore-ra' ); ?>"><?php esc_html_e( 'Marketing', 'ajcore-ra' ); ?></button>
 				<button type="button" class="button-link" id="ajra-pu-bulk-clear"><?php esc_html_e( 'Clear selection', 'ajcore-ra' ); ?></button>
 			</div>
 
@@ -1335,6 +1432,11 @@ class AJCore_RA_Purchases {
 			$( 'ajra-pu-clear' ).addEventListener( 'click', function () { st = { stage: '', property: '', vendor: '', q: '' }; $( 'ajra-pu-q' ).value = ''; selected = {}; load(); } );
 			$( 'ajra-pu-all' ).addEventListener( 'change', function ( e ) { selected = {}; if ( e.target.checked && data ) { data.orders.forEach( function ( o ) { selected[ o.id ] = true; } ); } render(); } );
 			$( 'ajra-pu-bulk-clear' ).addEventListener( 'click', function () { selected = {}; render(); } );
+			$( 'ajra-pu-bulk-marketing' ).addEventListener( 'click', function () {
+				var ids = Object.keys( selected ).map( Number ); if ( ! ids.length ) { return; }
+				var rule = confirm( 'Move ' + ids.length + ' order(s) to the Marketing tab.\n\nAlso label future mail from these senders as marketing automatically?\nOK = yes (by sender address)   Cancel = only these' ) ? 'address' : '';
+				post( '/ops/purchases/marketing', { ids: ids, sender_rule: rule } ).then( function () { selected = {}; load(); } ).catch( function ( e ) { alert( e.message ); } );
+			} );
 			document.querySelectorAll( '#ajra-pu-bulk [data-stage]' ).forEach( function ( b ) { b.addEventListener( 'click', function () {
 				var ids = Object.keys( selected ).map( Number ); if ( ! ids.length || ! window.confirm( 'Move ' + ids.length + ' order(s) to "' + LABEL[ b.getAttribute( 'data-stage' ) ] + '"?' ) ) { return; }
 				post( '/ops/purchases/stage', { ids: ids, stage: b.getAttribute( 'data-stage' ) } ).then( function () { selected = {}; load(); } ).catch( function ( e ) { alert( e.message ); } );
