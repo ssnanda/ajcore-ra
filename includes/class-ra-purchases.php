@@ -122,6 +122,9 @@ class AJCore_RA_Purchases {
 		$emails  = $this->table( 'aj_purchase_emails' );
 		$props   = $this->table( 'aj_purchase_properties' );
 		if ( $kit['table_exists']( $pdb, $orders ) && $kit['table_exists']( $pdb, $emails ) && $kit['table_exists']( $pdb, $props ) ) {
+			if ( ! $pdb->get_var( "SHOW COLUMNS FROM `{$orders}` LIKE 'total_src'" ) ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$pdb->query( "ALTER TABLE `{$orders}` ADD COLUMN total_src tinyint(1) NOT NULL DEFAULT 0 AFTER total" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			}
 			if ( ! $pdb->get_var( "SHOW COLUMNS FROM `{$orders}` LIKE 'label'" ) ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				$pdb->query( "ALTER TABLE `{$orders}` ADD COLUMN label varchar(16) NOT NULL DEFAULT '' AFTER stage" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 			}
@@ -136,6 +139,7 @@ class AJCore_RA_Purchases {
 			property_tag varchar(120) NOT NULL DEFAULT '',
 			property_name varchar(190) NOT NULL DEFAULT '',
 			label varchar(16) NOT NULL DEFAULT '',
+			total_src tinyint(1) NOT NULL DEFAULT 0,
 			order_date datetime DEFAULT NULL,
 			subtotal decimal(12,2) DEFAULT NULL,
 			tax decimal(12,2) DEFAULT NULL,
@@ -310,6 +314,40 @@ class AJCore_RA_Purchases {
 		return '';
 	}
 
+	/**
+	 * When the order was placed, from the email text ("Placed November 5, 2026 - 14:00:35", "Order Date: 10/23/2026, 09:58:12",
+	 * "Order Date 11/13/26 14:00:35"), as a UTC MySQL datetime; '' when not found. Times in the mail are US Eastern; a date without a
+	 * time becomes noon UTC so it never slides to another day in the US.
+	 */
+	public static function placed_at( $text ) {
+		$date = '';
+		$time = '';
+		if ( preg_match( '/\bPlaced\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})(?:\s*[-–—,]?\s*(\d{1,2}:\d{2}(?::\d{2})?))?/i', $text, $m ) ) {
+			$date = $m[1];
+			$time = isset( $m[2] ) ? $m[2] : '';
+		} elseif ( preg_match( '/\b(?:Order\s+Date|Placed)\s*#?\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})(?:[,\s]+(\d{1,2}:\d{2}(?::\d{2})?))?/i', $text, $m ) ) {
+			$date = $m[1];
+			$time = isset( $m[2] ) ? $m[2] : '';
+			if ( preg_match( '#^(\d{1,2})/(\d{1,2})/(\d{2})$#', $date, $y ) ) {
+				$date = $y[1] . '/' . $y[2] . '/20' . $y[3];
+			}
+		}
+		if ( '' === $date ) {
+			return '';
+		}
+		try {
+			if ( '' !== $time ) {
+				$dt = new DateTime( $date . ' ' . $time, new DateTimeZone( 'America/New_York' ) );
+				$dt->setTimezone( new DateTimeZone( 'UTC' ) );
+				return $dt->format( 'Y-m-d H:i:s' );
+			}
+			$dt = new DateTime( $date . ' 12:00:00', new DateTimeZone( 'UTC' ) );
+			return $dt->format( 'Y-m-d H:i:s' );
+		} catch ( \Exception $e ) {
+			return '';
+		}
+	}
+
 	public static function parse_money( $s ) {
 		$s = str_replace( array( ',', '$', ' ' ), '', (string) $s );
 		return is_numeric( $s ) ? round( (float) $s, 2 ) : null;
@@ -336,7 +374,7 @@ class AJCore_RA_Purchases {
 		$text = str_replace( "\xc2\xa0", ' ', $text );
 		$text = preg_replace( '/[\x{034F}\x{200B}-\x{200F}\x{2060}\x{FEFF}\x{00AD}]/u', '', (string) $text );
 		$text = preg_replace( '/[ \t]+/', ' ', $text );
-		$out  = array( 'order_no' => '', 'invoice_no' => '', 'property_src' => '', 'property_tag' => '', 'subtotal' => null, 'tax' => null, 'total' => null );
+		$out  = array( 'order_no' => '', 'invoice_no' => '', 'total_src' => 0, 'placed_at' => '', 'property_src' => '', 'property_tag' => '', 'subtotal' => null, 'tax' => null, 'total' => null );
 
 		// Property: delivery address in the email first, the PO# tag as the fallback.
 		$addr = self::delivery_address( $body );
@@ -345,6 +383,8 @@ class AJCore_RA_Purchases {
 		if ( '' === $addr && '' !== $out['property_tag'] ) {
 			$out['property_src'] = 'po';
 		}
+
+		$out['placed_at'] = self::placed_at( $text );
 
 		foreach ( array( (string) $subject, $text ) as $hay ) {
 			if ( '' === $out['order_no'] && preg_match( '/\border\s*(?:number|no\.?|#)?\s*:?\s*#?\s*(\d{8,})/i', $hay, $m ) ) {
@@ -375,10 +415,14 @@ class AJCore_RA_Purchases {
 			$out['property_tag'] = 'City account ' . $m[1]; // utility bills carry no address: name this tag once and every bill of the account follows
 			$out['property_src'] = 'account';
 		}
-		if ( in_array( $kind, array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) ) {
+		// Order-level emails carry a "Payment Summary" (Lowe's order confirmed / on the way / arrived): their Total is the order total.
+		$has_summary = false !== stripos( $text, 'Payment Summary' );
+		if ( $has_summary || in_array( $kind, array( 'receipt', 'confirmation', 'statement', 'payment' ), true ) ) {
 			$out['total']    = self::amount_after( $text, array( 'Order\s+Total', 'Grand\s+Total', 'Total\s+Amount', 'Amount\s+Paid', 'Payment\s+Amount', 'Total\s+Paid', 'Total' ) );
 			$out['subtotal'] = self::amount_after( $text, array( 'Sub\s*total', 'Merchandise' ) );
 			$out['tax']      = self::amount_after( $text, array( 'Total\s+Tax', 'Sales\s+Tax', 'Tax' ) );
+			// Which total wins when an order has several: the order total (3) beats a confirmation (2) beats a receipt for one delivery (1).
+			$out['total_src'] = $has_summary ? 3 : ( 'confirmation' === $kind ? 2 : 1 );
 			if ( null === $out['total'] && preg_match( '/\b(?:purchase|payment|charge[d]?)\s+(?:of|for)\s+\$\s*([\d,]+\.\d{2})/i', $text, $m ) ) {
 				$out['total'] = self::parse_money( $m[1] ); // Floor & Decor: "for a purchase of $380.90"
 			}
@@ -729,14 +773,16 @@ class AJCore_RA_Purchases {
 		if ( $existing ) {
 			$new = array( 'updated_at' => current_time( 'mysql' ) );
 			$editable = 'new' === $existing->stage; // verified/charged/posted orders keep the figures you confirmed
-			if ( $editable && null !== $f['total'] && null === $existing->total ) {
-				$new['total'] = $f['total'];
-			}
-			if ( $editable && null !== $f['subtotal'] && null === $existing->subtotal ) {
-				$new['subtotal'] = $f['subtotal'];
-			}
-			if ( $editable && null !== $f['tax'] && null === $existing->tax ) {
-				$new['tax'] = $f['tax'];
+			if ( $editable && null !== $f['total'] ) {
+				$cur_src = isset( $existing->total_src ) ? (int) $existing->total_src : 0;
+				$new_src = (int) ( $f['total_src'] ?? 1 );
+				// Replace when empty, or when this email is a better source (order total over a partial receipt), or an equal source with a larger amount.
+				if ( null === $existing->total || $new_src > $cur_src || ( $new_src === $cur_src && (float) $f['total'] > (float) $existing->total ) ) {
+					$new['total']     = $f['total'];
+					$new['total_src'] = $new_src;
+					$new['subtotal']  = $f['subtotal'];
+					$new['tax']       = $f['tax'];
+				}
 			}
 			if ( $editable && '' !== $f['property_tag'] && in_array( $f['property_src'] ?? '', array( 'address', 'text' ), true ) && '' === (string) $existing->property_name && $f['property_tag'] !== $existing->property_tag ) {
 				$new['property_tag'] = $f['property_tag']; // a real address beats a PO# tag, while the order has no name yet
@@ -757,8 +803,13 @@ class AJCore_RA_Purchases {
 			if ( '' === $existing->invoice_no && '' !== $f['invoice_no'] ) {
 				$new['invoice_no'] = $f['invoice_no'];
 			}
-			if ( empty( $existing->order_date ) || strtotime( $when . ' UTC' ) < strtotime( $existing->order_date . ' UTC' ) ) {
-				$new['order_date'] = $when; // the order date is the earliest email
+			// The order date: when it was placed (from the email text) or, failing that, the earliest email; never later than either.
+			$cand = self::order_when( $f, $when );
+			$cur  = (string) $existing->order_date;
+			$cand_real = ' 12:00:00' !== substr( $cand, -9 ); // a real time, not a date-only placeholder
+			if ( empty( $cur ) || strtotime( $cand . ' UTC' ) < strtotime( $cur . ' UTC' )
+				|| ( ' 12:00:00' === substr( $cur, -9 ) && $cand_real && self::et_day( $cur ) === self::et_day( $cand ) ) ) { // a date-only order date gains its time
+				$new['order_date'] = $cand;
 			}
 			$merged = array_merge( (array) $existing, $new );
 			$new['confidence'] = ( '' !== $merged['order_no'] && 0 !== strpos( $merged['order_no'], 'msg:' ) ? 1 : 0 ) + ( null !== $merged['total'] ? 1 : 0 ) + ( '' !== $merged['property_tag'] ? 1 : 0 );
@@ -772,10 +823,11 @@ class AJCore_RA_Purchases {
 			'invoice_no'    => $f['invoice_no'],
 			'property_tag'  => $f['property_tag'],
 			'property_name' => $name,
-			'order_date'    => $when,
+			'order_date'    => self::order_when( $f, $when ),
 			'subtotal'      => $f['subtotal'],
 			'tax'           => $f['tax'],
 			'total'         => $f['total'],
+			'total_src'     => null === $f['total'] ? 0 : (int) ( $f['total_src'] ?? 1 ),
 			'stage'         => 'noise' === $cls['kind'] ? 'ignored' : 'new',
 			'confidence'    => $conf,
 			'created_at'    => current_time( 'mysql' ),
@@ -835,6 +887,31 @@ class AJCore_RA_Purchases {
 	private static function tag_tokens( $tag ) {
 		$drop = array( 'apt', 'apartment', 'unit', 'ste', 'suite', 'bldg', 'building', 'no', 'number', 'us', 'nc', 'north', 'carolina', 'charlotte', 'concord', 'salisbury' );
 		return array_values( array_diff( self::addr_tokens( $tag ), $drop ) );
+	}
+
+	private static function et_day( $utc ) {
+		try {
+			$d = new DateTime( $utc, new DateTimeZone( 'UTC' ) );
+			$d->setTimezone( new DateTimeZone( 'America/New_York' ) );
+			return $d->format( 'Y-m-d' );
+		} catch ( \Exception $e ) {
+			return '';
+		}
+	}
+
+	/**
+	 * The order date with its time: the placed date from the email text; when that is date-only ("Placed November 5, 2026", stored as noon UTC)
+	 * and the email itself arrived the same day, the email's time is used (order mails arrive within minutes of placing). Never later than the email.
+	 */
+	private static function order_when( array $f, $when ) {
+		$placed = (string) ( $f['placed_at'] ?? '' );
+		if ( '' === $placed || strtotime( $placed . ' UTC' ) >= strtotime( $when . ' UTC' ) ) {
+			return $when;
+		}
+		if ( ' 12:00:00' === substr( $placed, -9 ) && self::et_day( $placed ) === self::et_day( $when ) ) {
+			return $when;
+		}
+		return $placed;
 	}
 
 	/** Rentec properties (top level, not their units) with the words of their address, from AJCore-RA's own cached Rentec list. Empty when Rentec is off. */
@@ -969,6 +1046,7 @@ class AJCore_RA_Purchases {
 			'property_tag'  => (string) $r->property_tag,
 			'property_name' => (string) $r->property_name,
 			'order_date'    => (string) $r->order_date,
+			'last_email_at' => isset( $r->last_email_at ) && '' !== (string) $r->last_email_at ? (string) $r->last_email_at : (string) $r->order_date,
 			'subtotal'      => null === $r->subtotal ? null : (float) $r->subtotal,
 			'tax'           => null === $r->tax ? null : (float) $r->tax,
 			'total'         => null === $r->total ? null : (float) $r->total,
@@ -1031,7 +1109,10 @@ class AJCore_RA_Purchases {
 		}
 		$where_sql = implode( ' AND ', $where );
 		$limit     = min( 1000, max( 1, absint( $request->get_param( 'per_page' ) ?: 300 ) ) );
-		$sql       = "SELECT * FROM `{$orders}` WHERE {$where_sql} ORDER BY order_date DESC, id DESC LIMIT %d";
+		// Newest activity first by default (an order keeps getting emails: delivery, pickup ...): sort=activity | date (order date).
+		$by_date   = 'date' === sanitize_key( (string) $request->get_param( 'sort' ) );
+		$emails_t  = $this->table( 'aj_purchase_emails' );
+		$sql       = "SELECT `{$orders}`.*, ( SELECT MAX(e.received_at) FROM `{$emails_t}` e WHERE e.order_id = `{$orders}`.id ) AS last_email_at FROM `{$orders}` WHERE {$where_sql} ORDER BY " . ( $by_date ? 'order_date' : 'COALESCE(last_email_at, order_date)' ) . ' DESC, id DESC LIMIT %d';
 		$rows      = (array) $pdb->get_results( $pdb->prepare( $sql, array_merge( $params, array( $limit ) ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 
 		// Totals ignore ignored orders and orders without an amount; they respect the same filters except stage.
@@ -1325,7 +1406,7 @@ class AJCore_RA_Purchases {
 				<table class="widefat striped" id="ajra-pu-table">
 					<thead><tr>
 						<th style="width:28px"><input type="checkbox" id="ajra-pu-all" aria-label="<?php esc_attr_e( 'Select all', 'ajcore-ra' ); ?>"></th>
-						<th><?php esc_html_e( 'Time', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Vendor', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Order / invoice', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Property', 'ajcore-ra' ); ?></th><th style="text-align:right"><?php esc_html_e( 'Total', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Stage', 'ajcore-ra' ); ?></th>
+						<th><?php esc_html_e( 'Last update', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Order date', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Vendor', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Order / invoice', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Property', 'ajcore-ra' ); ?></th><th style="text-align:right"><?php esc_html_e( 'Total', 'ajcore-ra' ); ?></th><th><?php esc_html_e( 'Stage', 'ajcore-ra' ); ?></th>
 					</tr></thead>
 					<tbody></tbody>
 				</table>
@@ -1344,6 +1425,14 @@ class AJCore_RA_Purchases {
 			var rest = <?php echo wp_json_encode( rest_url( 'ajcore/v1' ) ); ?>, nonce = <?php echo wp_json_encode( wp_create_nonce( 'wp_rest' ) ); ?>;
 			var STAGES = [ 'new', 'verified', 'charged', 'posted', 'ignored' ], LABEL = { 'new': 'New', verified: 'Verified', charged: 'Charged', posted: 'Posted', ignored: 'Ignored' };
 			var st = { stage: '', property: '', vendor: '', q: '', label: '' }, data = null, selected = {};
+			// Times are stored in UTC; show them in the viewer's own time zone. "Last update" = the order's latest email; "Order date" = when it was placed.
+			function dayLabel( k ) { var d = new Date( k + 'T12:00:00' ); return isNaN( d ) ? k : d.toLocaleDateString( undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' } ); }
+			function ld( s ) { if ( ! s ) { return null; } var d = new Date( s.replace( ' ', 'T' ) + 'Z' ); return isNaN( d ) ? null : d; }
+			function pad2( n ) { return ( n < 10 ? '0' : '' ) + n; }
+			function localKey( s ) { var d = ld( s ); return d ? d.getFullYear() + '-' + pad2( d.getMonth() + 1 ) + '-' + pad2( d.getDate() ) : '—'; }
+			function fmtDT( s, noTime ) { var d = ld( s ); if ( ! d ) { return '—'; } var o = { month: 'short', day: 'numeric' }; if ( d.getFullYear() !== new Date().getFullYear() ) { o.year = 'numeric'; } if ( ! noTime ) { o.hour = 'numeric'; o.minute = '2-digit'; } return d.toLocaleString( undefined, o ); }
+			function when( o ) { return o.last_email_at || o.order_date; }
+			function placedNoTime( s ) { return /12:00:00$/.test( s || '' ); } // a date-only "Placed November 5, 2026" is stored as noon UTC
 			function $( id ) { return document.getElementById( id ); }
 			function el( tag, cls, text ) { var e = document.createElement( tag ); if ( cls ) { e.className = cls; } if ( text != null ) { e.textContent = text; } return e; }
 			function money( v ) { return v == null ? '—' : '$' + Number( v ).toLocaleString( undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 } ); }
@@ -1353,7 +1442,7 @@ class AJCore_RA_Purchases {
 			function post( path, body ) { return api( path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( body ) } ); }
 
 			function load() {
-				var q = new URLSearchParams(); [ 'stage', 'property', 'vendor', 'q', 'label' ].forEach( function ( k ) { if ( st[ k ] ) { q.set( k === 'stage' && st.stage === 'verify' ? 'stage' : k, st[ k ] ); } } );
+				var q = new URLSearchParams(); [ 'stage', 'property', 'vendor', 'q', 'label', 'sort' ].forEach( function ( k ) { if ( st[ k ] ) { q.set( k === 'stage' && st.stage === 'verify' ? 'stage' : k, st[ k ] ); } } );
 				api( '/ops/purchases?' + q.toString() ).then( function ( d ) { var first = ! data; data = d; render(); if ( first && d.mailbox && ! ( d.last_run && typeof d.last_run.at === 'string' ) ) { $( 'ajra-pu-run' ).click(); } } ).catch( function ( e ) { $( 'ajra-pu-status' ).textContent = e.message; } );
 			}
 
@@ -1395,19 +1484,19 @@ class AJCore_RA_Purchases {
 				fillSelect( 'ajra-pu-vendor', data.vendors, st.vendor, 'All vendors' );
 
 				var tb = $( 'ajra-pu-table' ).querySelector( 'tbody' ); tb.innerHTML = '';
-				if ( ! data.orders.length ) { var r0 = el( 'tr' ), c0 = el( 'td', null, 'No orders match.' ); c0.colSpan = 7; r0.appendChild( c0 ); tb.appendChild( r0 ); }
+				if ( ! data.orders.length ) { var r0 = el( 'tr' ), c0 = el( 'td', null, 'No orders match.' ); c0.colSpan = 8; r0.appendChild( c0 ); tb.appendChild( r0 ); }
 				// Date first (newest day on top), then each order of that day with all of its emails nested under it.
 				var days = [], byDay = {};
-				data.orders.forEach( function ( o ) { var k = ( o.order_date || '' ).slice( 0, 10 ) || '—'; if ( ! byDay[ k ] ) { byDay[ k ] = []; days.push( k ); } byDay[ k ].push( o ); } );
+				data.orders.forEach( function ( o ) { var k = localKey( when( o ) ); if ( ! byDay[ k ] ) { byDay[ k ] = []; days.push( k ); } byDay[ k ].push( o ); } );
 				days.sort().reverse();
 				days.forEach( function ( k ) {
 					var list = byDay[ k ], sum = list.reduce( function ( a, o ) { return a + ( Number( o.total ) || 0 ); }, 0 );
-					var hr = el( 'tr', 'ajra-pu-day' ), hc = el( 'td', null, day( k + ' 00:00:00' ) + '  ·  ' + list.length + ( list.length === 1 ? ' order' : ' orders' ) + '  ·  ' + money( sum ) ); hc.colSpan = 7; hr.appendChild( hc ); tb.appendChild( hr );
+					var hr = el( 'tr', 'ajra-pu-day' ), hc = el( 'td', null, dayLabel( k ) + '  ·  ' + list.length + ( list.length === 1 ? ' order' : ' orders' ) + '  ·  ' + money( sum ) ); hc.colSpan = 8; hr.appendChild( hc ); tb.appendChild( hr );
 					list.forEach( function ( o ) {
 						var tr = el( 'tr' ); tr.style.cursor = 'pointer';
 						var td = el( 'td' ); td.addEventListener( 'click', function ( e ) { e.stopPropagation(); } );
 						var cb = el( 'input' ); cb.type = 'checkbox'; cb.checked = !! selected[ o.id ]; cb.addEventListener( 'change', function () { if ( cb.checked ) { selected[ o.id ] = true; } else { delete selected[ o.id ]; } syncBulk(); } ); td.appendChild( cb ); tr.appendChild( td );
-						tr.appendChild( el( 'td', null, ( o.order_date || '' ).slice( 11, 16 ) ) ); tr.appendChild( el( 'td', null, o.vendor ) );
+						tr.appendChild( el( 'td', 'ajra-pu-when', fmtDT( when( o ) ) ) ); tr.appendChild( el( 'td', 'ajra-pu-when', fmtDT( o.order_date, placedNoTime( o.order_date ) ) ) ); tr.appendChild( el( 'td', null, o.vendor ) );
 						var ord = el( 'td', 'ajra-pu-ord' ); ord.appendChild( el( 'strong', null, o.order_no || o.invoice_no || '—' ) );
 						var nb = el( 'span', 'ajra-pu-nums' ); ( o.emails || [] ).forEach( function ( m, mi ) { var c = el( 'button', 'ajra-pu-num k-' + ( m.kind || 'other' ), String( mi + 1 ) ); c.type = 'button'; c.title = m.kind + ' · ' + m.subject; c.addEventListener( 'click', function ( ev ) { ev.stopPropagation(); openDetail( o.id, mi ); } ); nb.appendChild( c ); } ); ord.appendChild( nb );
 						if ( o.order_no && o.invoice_no ) { ord.appendChild( el( 'div', 'description', 'Invoice ' + o.invoice_no ) ); }
