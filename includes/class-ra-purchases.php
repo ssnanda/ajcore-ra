@@ -646,7 +646,8 @@ class AJCore_RA_Purchases {
 		foreach ( $rows as $e ) {
 			$parsed = json_decode( (string) $e->parsed, true );
 			$parsed = is_array( $parsed ) ? $parsed : array();
-			$cls    = isset( $parsed['classify'] ) && is_array( $parsed['classify'] ) ? $parsed['classify'] : self::classify( (string) $e->sender, (string) $e->subject );
+			// Classified again every time (not the stored result), so improved rules reach mail that was read earlier.
+			$cls    = self::classify( (string) $e->sender, (string) $e->subject );
 			// Every email's text is read (status mails like "delivery scheduled" carry the order and invoice number too).
 			// An email stored with an empty body (Zoho answered with nothing at read time) is fetched again, up to 3 tries.
 			$stored  = (string) ( $parsed['body'] ?? '' );
