@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       AJ Core RA
  * Description:       Registered Agent (NC LLC Agents) extension for AJ Core. Requires the AJ Core plugin.
- * Version:           0.5.7
+ * Version:           0.5.8
  * Requires PHP:      7.4
  * Author:            IT Spector LLC
  * Author URI:        https://itspector.com
@@ -15,7 +15,7 @@ if ( ! defined( 'WPINC' ) ) {
 	die;
 }
 
-define( 'AJCORE_RA_VERSION', '0.5.7' );
+define( 'AJCORE_RA_VERSION', '0.5.8' );
 define( 'AJCORE_RA_MIN_EXTENSION_API', 27 );
 define( 'AJCORE_RA_BASENAME', plugin_basename( __FILE__ ) );
 
@@ -46,6 +46,10 @@ require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-suite-sync.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-reception.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-pipeline-rules.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-flyers.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-property-match.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-mail-util.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-mail-insurance.php';
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-mail-hoa.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-ra-purchases.php';
 AJCore_RA_Compliance_Schema::init();
 register_activation_hook( __FILE__, array( 'AJCore_RA_Compliance_Schema', 'activate' ) );
@@ -87,9 +91,9 @@ function ajcore_ra_boot() {
 	AJCore_RA_Purchases::init();
 	// Mailbox sub-pipelines under Pipeline (engine in AJCore): Insurance and HOA are separate.
 	add_filter( 'ajcore_mail_pipelines', static function ( $p ) {
-		$p['invoices']  = array( 'label' => __( 'Invoices', 'ajcore-ra' ), 'module' => 'invoices', 'stages' => array( 'new' => 'New', 'approved' => 'Approved', 'paid' => 'Paid', 'ignored' => 'Ignored' ) );
-		$p['insurance'] = array( 'label' => __( 'Insurance', 'ajcore-ra' ), 'module' => 'insurance', 'stages' => array( 'new' => 'New', 'reviewed' => 'Reviewed', 'done' => 'Done', 'ignored' => 'Ignored' ) );
-		$p['hoa']       = array( 'label' => __( 'HOA', 'ajcore-ra' ), 'module' => 'hoa', 'stages' => array( 'new' => 'New', 'reviewed' => 'Reviewed', 'done' => 'Done', 'ignored' => 'Ignored' ) );
+		$p['invoices']  = array( 'label' => __( 'Invoices', 'ajcore-ra' ), 'module' => 'invoices', 'stages' => array( 'new' => 'New', 'verified' => 'Verified', 'paid' => 'Paid', 'ignored' => 'Ignored' ), 'label_stages' => array( 'PAID' => 'paid' ) );
+		$p['insurance'] = array( 'label' => __( 'Insurance', 'ajcore-ra' ), 'module' => 'insurance', 'stages' => array( 'new' => 'New', 'reviewed' => 'Reviewed', 'done' => 'Done', 'ignored' => 'Ignored' ), 'parser' => array( 'AJCore_RA_Mail_Insurance', 'parse' ), 'parser_v' => AJCore_RA_Mail_Insurance::VERSION );
+		$p['hoa']       = array( 'label' => __( 'HOA', 'ajcore-ra' ), 'module' => 'hoa', 'stages' => array( 'new' => 'New', 'reviewed' => 'Reviewed', 'done' => 'Done', 'ignored' => 'Ignored' ), 'parser' => array( 'AJCore_RA_Mail_HOA', 'parse' ), 'parser_v' => AJCore_RA_Mail_HOA::VERSION );
 		return $p;
 	} );
 	add_filter( 'ajcore_endpoint_catalog', 'ajcore_ra_endpoint_catalog' );
