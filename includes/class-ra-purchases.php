@@ -636,7 +636,7 @@ class AJCore_RA_Purchases {
 		$pdb     = $this->pdb();
 		$emails  = $this->table( 'aj_purchase_emails' );
 		$orders  = $this->table( 'aj_purchase_orders' );
-		$rows    = (array) $pdb->get_results( "SELECT e.* FROM `{$emails}` e JOIN `{$orders}` o ON o.id = e.order_id WHERE o.stage = 'new' ORDER BY e.received_at ASC, e.id ASC" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$rows    = (array) $pdb->get_results( "SELECT e.* FROM `{$emails}` e JOIN `{$orders}` o ON o.id = e.order_id WHERE o.stage = 'new' AND e.kind <> 'trashed' ORDER BY e.received_at ASC, e.id ASC" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$zoho    = $this->zoho();
 		$mailbox = $this->settings()['mailbox'];
 		$done    = 0;
@@ -718,31 +718,75 @@ class AJCore_RA_Purchases {
 
 	/** Delete marketing orders: every email goes to the Zoho Trash (recoverable there); the orders stay as hidden records so the next read does not bring them back. */
 	public function rest_delete_marketing( WP_REST_Request $request ) {
-		$ids = array_values( array_filter( array_map( 'absint', (array) $request->get_param( 'ids' ) ) ) );
-		if ( ! $ids || ! $this->ensure_tables() ) {
-			return new WP_Error( 'bad_request', __( 'Select orders first.', 'ajcore-ra' ), array( 'status' => 400 ) );
+		return $this->rest_delete( $request );
+	}
+
+	/**
+	 * Deletes mail: whole orders (ids) and/or single emails (message_ids). Every email goes to the Zoho Trash of the mailbox (recoverable
+	 * there, never permanently deleted). An order is hidden (label "deleted") only when all of its emails were trashed; a failed trash
+	 * leaves that email/order in place and is reported.
+	 */
+	public function rest_delete( WP_REST_Request $request ) {
+		$ids  = array_values( array_filter( array_map( 'absint', (array) $request->get_param( 'ids' ) ) ) );
+		$mids = array_values( array_filter( array_map( 'sanitize_text_field', (array) $request->get_param( 'message_ids' ) ) ) );
+		if ( ( ! $ids && ! $mids ) || ! $this->ensure_tables() ) {
+			return new WP_Error( 'bad_request', __( 'Select something to delete first.', 'ajcore-ra' ), array( 'status' => 400 ) );
 		}
 		$pdb     = $this->pdb();
 		$orders  = $this->table( 'aj_purchase_orders' );
 		$emails  = $this->table( 'aj_purchase_emails' );
-		$ph      = implode( ', ', array_fill( 0, count( $ids ), '%d' ) );
-		$oids    = array_map( 'intval', (array) $pdb->get_col( $pdb->prepare( "SELECT id FROM `{$orders}` WHERE label = 'marketing' AND id IN ({$ph})", $ids ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$zoho    = $this->zoho();
 		$mailbox = $this->settings()['mailbox'];
-		$errors  = array();
-		if ( $oids ) {
-			$ph2 = implode( ', ', array_fill( 0, count( $oids ), '%d' ) );
-			foreach ( (array) $pdb->get_col( $pdb->prepare( "SELECT message_id FROM `{$emails}` WHERE order_id IN ({$ph2})", $oids ) ) as $mid ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-				if ( $zoho && '' !== $mailbox ) {
-					$res = $zoho->trash_message( (string) $mid, $mailbox );
-					if ( is_wp_error( $res ) ) {
-						$errors[] = $res->get_error_message();
-					}
-				}
-			}
-			$pdb->query( $pdb->prepare( "UPDATE `{$orders}` SET label = 'deleted', updated_at = %s WHERE id IN ({$ph2})", array_merge( array( current_time( 'mysql' ) ), $oids ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! $zoho || '' === $mailbox ) {
+			return new WP_Error( 'no_mailbox', __( 'The mailbox is not set up, so nothing can be moved to the Zoho Trash.', 'ajcore-ra' ), array( 'status' => 409 ) );
 		}
-		return rest_ensure_response( array( 'deleted' => count( $oids ), 'zoho_errors' => array_values( array_unique( $errors ) ) ) );
+		$errors  = array();
+		$deleted = 0;
+		$trashed = 0;
+		$touch   = array();
+		// Single emails.
+		foreach ( $mids as $mid ) {
+			$row = $pdb->get_row( $pdb->prepare( "SELECT id, order_id FROM `{$emails}` WHERE message_id = %s AND kind <> 'trashed'", $mid ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			if ( ! $row ) {
+				continue;
+			}
+			$res = $zoho->trash_message( $mid, $mailbox );
+			if ( is_wp_error( $res ) ) {
+				$errors[] = $res->get_error_message();
+				continue;
+			}
+			$pdb->update( $emails, array( 'kind' => 'trashed' ), array( 'id' => (int) $row->id ) );
+			$trashed++;
+			$touch[ (int) $row->order_id ] = true;
+		}
+		// Whole orders.
+		foreach ( $ids as $oid ) {
+			$all_ok = true;
+			foreach ( (array) $pdb->get_results( $pdb->prepare( "SELECT id, message_id FROM `{$emails}` WHERE order_id = %d AND kind <> 'trashed'", $oid ) ) as $e ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$res = $zoho->trash_message( (string) $e->message_id, $mailbox );
+				if ( is_wp_error( $res ) ) {
+					$errors[] = $res->get_error_message();
+					$all_ok   = false;
+					continue;
+				}
+				$pdb->update( $emails, array( 'kind' => 'trashed' ), array( 'id' => (int) $e->id ) );
+				$trashed++;
+			}
+			if ( $all_ok ) {
+				$touch[ $oid ] = true;
+			}
+		}
+		// Orders with no live email left disappear from every list.
+		foreach ( array_keys( $touch ) as $oid ) {
+			$live = (int) $pdb->get_var( $pdb->prepare( "SELECT COUNT(*) FROM `{$emails}` WHERE order_id = %d AND kind <> 'trashed'", $oid ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			if ( 0 === $live ) {
+				$pdb->update( $orders, array( 'label' => 'deleted', 'updated_at' => current_time( 'mysql' ) ), array( 'id' => (int) $oid ) );
+				$deleted++;
+			}
+		}
+		$errors = array_values( array_unique( $errors ) );
+		$this->log_event( 'manual', 'delete', sprintf( '%d emails moved to the Zoho Trash, %d orders hidden%s', $trashed, $deleted, $errors ? '; ERRORS: ' . implode( ' | ', $errors ) : '' ), array( 'trashed' => $trashed, 'deleted' => $deleted ) );
+		return rest_ensure_response( array( 'deleted' => $deleted, 'emails_trashed' => $trashed, 'zoho_errors' => $errors ) );
 	}
 
 	public function rest_senders( WP_REST_Request $request ) {
@@ -1189,6 +1233,7 @@ class AJCore_RA_Purchases {
 		$ops = array( 'AJCore_Extensions', 'can_manage_ops' );
 		register_rest_route( $ns, '/ops/purchases', array( 'methods' => 'GET', 'callback' => array( $this, 'rest_list' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/marketing', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_marketing' ), 'permission_callback' => $ops ) );
+		register_rest_route( $ns, '/ops/purchases/delete', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_delete' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/marketing/delete', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_delete_marketing' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/senders', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_senders' ), 'permission_callback' => $ops ) );
 		register_rest_route( $ns, '/ops/purchases/purge', array( 'methods' => 'POST', 'callback' => array( $this, 'rest_purge' ), 'permission_callback' => $ops ) );
@@ -1339,7 +1384,7 @@ class AJCore_RA_Purchases {
 			$order_ids = wp_list_pluck( $orders_out, 'id' );
 			$ph        = implode( ', ', array_fill( 0, count( $order_ids ), '%d' ) );
 			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-			$mail_rows = (array) $pdb->get_results( $pdb->prepare( "SELECT order_id, message_id, kind, subject, sender, received_at FROM `{$this->table( 'aj_purchase_emails' )}` WHERE order_id IN ({$ph}) ORDER BY received_at ASC, id ASC", $order_ids ) );
+			$mail_rows = (array) $pdb->get_results( $pdb->prepare( "SELECT order_id, message_id, kind, subject, sender, received_at FROM `{$this->table( 'aj_purchase_emails' )}` WHERE order_id IN ({$ph}) AND kind <> 'trashed' ORDER BY received_at ASC, id ASC", $order_ids ) );
 			$by_order  = array();
 			foreach ( $mail_rows as $e ) {
 				$by_order[ (int) $e->order_id ][] = array( 'message_id' => (string) $e->message_id, 'kind' => (string) $e->kind, 'subject' => (string) $e->subject, 'sender' => (string) $e->sender, 'received_at' => (string) $e->received_at );
@@ -1386,7 +1431,7 @@ class AJCore_RA_Purchases {
 		if ( ! $row ) {
 			return new WP_Error( 'not_found', __( 'Order not found.', 'ajcore-ra' ), array( 'status' => 404 ) );
 		}
-		$emails = (array) $pdb->get_results( $pdb->prepare( "SELECT id, message_id, kind, subject, sender, received_at, parsed FROM `{$this->table( 'aj_purchase_emails' )}` WHERE order_id = %d ORDER BY received_at ASC", (int) $row->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$emails = (array) $pdb->get_results( $pdb->prepare( "SELECT id, message_id, kind, subject, sender, received_at, parsed FROM `{$this->table( 'aj_purchase_emails' )}` WHERE order_id = %d AND kind <> 'trashed' ORDER BY received_at ASC", (int) $row->id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		// Opening an order shows its emails: fetch (and keep) the text of any email whose body was not stored yet.
 		$zoho    = $this->zoho();
 		$mailbox = $this->settings()['mailbox'];
@@ -1763,7 +1808,8 @@ class AJCore_RA_Purchases {
 				var n = Object.keys( selected ).length; $( 'ajra-pu-bulk' ).hidden = ! n; $( 'ajra-pu-bulk-n' ).textContent = n;
 				var inMk = st.label === 'marketing' || st.label === 'notice';
 				document.querySelectorAll( '#ajra-pu-bulk [data-stage], #ajra-pu-bulk-marketing' ).forEach( function ( b ) { b.hidden = inMk; } );
-				[ 'ajra-pu-bulk-delete', 'ajra-pu-bulk-notmk' ].forEach( function ( i ) { $( i ).hidden = ! inMk; } );
+				$( 'ajra-pu-bulk-delete' ).hidden = false; // deleting (to the Zoho Trash) works in every view
+				$( 'ajra-pu-bulk-notmk' ).hidden = st.label !== 'marketing';
 				var all = $( 'ajra-pu-all' ); all.checked = n > 0 && data && n === data.orders.length; all.indeterminate = n > 0 && data && n < data.orders.length;
 			}
 
@@ -1788,7 +1834,7 @@ class AJCore_RA_Purchases {
 					var sv = el( 'button', 'button button-primary', 'Save' ); sv.type = 'button'; sv.addEventListener( 'click', function () { save( '' ); } ); bar.appendChild( sv );
 					[ [ 'verified', 'Save + verified' ], [ 'charged', 'Save + charged' ], [ 'ignored', 'Ignore' ], [ 'new', 'Back to new' ] ].forEach( function ( s ) { if ( o.stage === 'posted' || o.stage === s[ 0 ] ) { return; } var b = el( 'button', 'button', s[ 1 ] ); b.type = 'button'; b.style.marginLeft = '6px'; b.addEventListener( 'click', function () { save( s[ 0 ] ); } ); bar.appendChild( b ); } );
 					var mk2 = el( 'button', 'button', st.label === 'marketing' ? 'Not marketing' : 'Marketing' ); mk2.type = 'button'; mk2.addEventListener( 'click', function () { var on = st.label !== 'marketing'; var rule = on && confirm( 'Label as Marketing.\n\nAlso label future mail from this sender automatically?\nOK = yes   Cancel = only this order' ) ? 'address' : ''; post( '/ops/purchases/marketing', { ids: [ id ], label: on ? 'marketing' : '', sender_rule: rule } ).then( function () { $( 'ajra-pu-detail' ).hidden = true; load(); } ).catch( function ( e ) { alert( e.message ); } ); } ); bar.appendChild( mk2 );
-					if ( st.label === 'marketing' ) { var dl2 = el( 'button', 'button button-primary', 'Delete (to Zoho Trash)' ); dl2.type = 'button'; dl2.style.marginLeft = '6px'; dl2.addEventListener( 'click', function () { post( '/ops/purchases/marketing/delete', { ids: [ id ] } ).then( function () { $( 'ajra-pu-detail' ).hidden = true; load(); } ).catch( function ( e ) { alert( e.message ); } ); } ); bar.appendChild( dl2 ); }
+					var dl2 = el( 'button', 'button', 'Delete order (to Zoho Trash)' ); dl2.type = 'button'; dl2.style.cssText = 'margin-left:6px;color:#b91c1c;border-color:#b91c1c;'; dl2.addEventListener( 'click', function () { if ( ! confirm( 'Move all ' + d.emails.length + ' email(s) of this order to the Zoho Trash? They stay recoverable there.' ) ) { return; } post( '/ops/purchases/delete', { ids: [ id ] } ).then( function ( r ) { if ( r.zoho_errors && r.zoho_errors.length ) { alert( 'Zoho: ' + r.zoho_errors.join( ' | ' ) ); } $( 'ajra-pu-detail' ).hidden = true; load(); } ).catch( function ( e ) { alert( e.message ); } ); } ); bar.appendChild( dl2 );
 					var cl = el( 'button', 'button-link', 'Close' ); cl.type = 'button'; cl.style.marginLeft = '12px'; cl.addEventListener( 'click', function () { $( 'ajra-pu-detail' ).hidden = true; } ); bar.appendChild( cl ); box.appendChild( bar );
 					// Numbered tabs: 1, 2, 3 ... each previews that email of the order.
 					left.appendChild( el( 'h4', null, 'Emails (' + d.emails.length + ')' ) );
@@ -1799,6 +1845,9 @@ class AJCore_RA_Purchases {
 						pane.innerHTML = ''; var e = d.emails[ n ]; if ( ! e ) { pane.appendChild( el( 'p', null, 'No emails.' ) ); return; }
 						pane.appendChild( el( 'strong', null, day( e.received_at ) + ' ' + ( e.received_at || '' ).slice( 11, 16 ) + ' · ' + e.kind + ' · ' + e.subject ) );
 						var sd = el( 'div', 'description', e.sender ); sd.style.margin = '2px 0 8px'; pane.appendChild( sd );
+						var de = el( 'button', 'button-link', 'Delete this email (to Zoho Trash)' ); de.type = 'button'; de.style.cssText = 'color:#b91c1c;margin:0 0 8px;display:block;';
+						de.addEventListener( 'click', function () { if ( ! confirm( 'Move this email to the Zoho Trash? It stays recoverable there.' ) ) { return; } post( '/ops/purchases/delete', { message_ids: [ e.message_id ] } ).then( function ( r ) { if ( r.zoho_errors && r.zoho_errors.length ) { alert( 'Zoho: ' + r.zoho_errors.join( ' | ' ) ); } $( 'ajra-pu-detail' ).hidden = true; load(); } ).catch( function ( x ) { alert( x.message ); } ); } );
+						pane.appendChild( de );
 						var tx = e.parsed && e.parsed.body ? e.parsed.body : '';
 						if ( e.parsed && e.parsed.body_debug ) { var wn = el( 'div', null, 'Only the preview could be read: ' + e.parsed.body_debug ); wn.style.cssText = 'color:#b45309;font-size:12px;margin:4px 0;'; pane.appendChild( wn ); }
 						if ( e.parsed && e.parsed.html ) { pane.appendChild( emailFrame( e.parsed.html ) ); }
@@ -1825,7 +1874,7 @@ class AJCore_RA_Purchases {
 			$( 'ajra-pu-bulk-notmk' ).addEventListener( 'click', function () { var ids = Object.keys( selected ).map( Number ); if ( ids.length ) { post( '/ops/purchases/marketing', { ids: ids, label: '' } ).then( function () { selected = {}; load(); } ); } } );
 			$( 'ajra-pu-bulk-delete' ).addEventListener( 'click', function () {
 				var ids = Object.keys( selected ).map( Number ); if ( ! ids.length || ! confirm( 'Move the emails of ' + ids.length + ' order(s) to the Zoho Trash? They stay recoverable there.' ) ) { return; }
-				post( '/ops/purchases/marketing/delete', { ids: ids } ).then( function ( d ) { selected = {}; $( 'ajra-pu-status' ).textContent = d.deleted + ' deleted' + ( d.zoho_errors.length ? ' · Zoho: ' + d.zoho_errors.join( ' | ' ) : '' ); load(); } ).catch( function ( e ) { alert( e.message ); } );
+				post( '/ops/purchases/delete', { ids: ids } ).then( function ( d ) { selected = {}; $( 'ajra-pu-status' ).textContent = d.emails_trashed + ' email(s) moved to the Zoho Trash, ' + d.deleted + ' order(s) removed' + ( d.zoho_errors.length ? ' · Zoho: ' + d.zoho_errors.join( ' | ' ) : '' ); load(); } ).catch( function ( e ) { alert( e.message ); } );
 			} );
 			$( 'ajra-pu-sender-add' ).addEventListener( 'click', function () { var v = $( 'ajra-pu-sender-in' ).value.trim(); if ( v ) { post( '/ops/purchases/senders', { add: v } ).then( function () { $( 'ajra-pu-sender-in' ).value = ''; load(); } ); } } );
 			document.querySelectorAll( '#ajra-pu-bulk [data-stage]' ).forEach( function ( b ) { b.addEventListener( 'click', function () {
