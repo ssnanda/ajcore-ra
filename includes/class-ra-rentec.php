@@ -850,6 +850,7 @@ class AJCore_RA_Rentec {
 			}
 		}
 		update_option( 'ajcore_ra_rentec_last_sync', time(), false );
+		do_action( 'ajcore_ra_rentec_resource_synced', $resource ); // e.g. Suite Clients re-track leases from the fresh copy
 		return $records;
 	}
 

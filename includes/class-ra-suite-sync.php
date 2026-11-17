@@ -26,6 +26,9 @@ class AJCore_RA_Suite_Sync {
 	public static function init() {
 		add_action( 'rest_api_init', array( __CLASS__, 'register_routes' ) );
 		add_filter( 'ajcore_ops_counts', array( __CLASS__, 'filter_counts' ) );
+		// Rentec Sync (10-min job or Sync now) just stored fresh leases: re-track linked Suite Clients' leases so the
+		// Leases screen never waits for a manual Refresh Suite Clients.
+		add_action( 'ajcore_ra_rentec_resource_synced', array( __CLASS__, 'on_rentec_synced' ) );
 	}
 
 	public static function register_routes() {
@@ -44,6 +47,49 @@ class AJCore_RA_Suite_Sync {
 	private static function digits( $p ) {
 		$d = preg_replace( '/\D+/', '', (string) $p );
 		return ( 11 === strlen( $d ) && '1' === $d[0] ) ? substr( $d, 1 ) : $d;
+	}
+
+	/** A Rentec move-out date that has already passed ("" / 0000-00-00 / future = still in the suite). */
+	private static function moved_out( $date ) {
+		$d = substr( (string) $date, 0, 10 );
+		return '' !== $d && '0000-00-00' !== $d && $d < gmdate( 'Y-m-d' );
+	}
+
+	/**
+	 * Move status for a lease, normalized to Moving in / Moved in / Moving out / Moved out. Rentec's v3 field name for
+	 * the tenant status is not documented, so the usual names are checked on the lease, the tenant's unit entry and
+	 * the tenant; failing that, the move-in / move-out dates decide.
+	 */
+	private static function lease_status( $lease, $unit_entry, $tenant ) {
+		$keys = array( 'tenant_status', 'move_status', 'occupancy_status', 'lease_status', 'status' );
+		foreach ( array( $lease, $unit_entry, $tenant ) as $src ) {
+			if ( ! is_array( $src ) ) {
+				continue;
+			}
+			foreach ( $keys as $k ) {
+				$v = isset( $src[ $k ] ) && is_scalar( $src[ $k ] ) ? strtolower( trim( (string) $src[ $k ] ) ) : '';
+				if ( preg_match( '/notice|moving[\s_-]*out/', $v ) ) {
+					return 'Moving out';
+				}
+				if ( preg_match( '/moved[\s_-]*out|^past|former/', $v ) ) {
+					return 'Moved out';
+				}
+				if ( preg_match( '/moving[\s_-]*in|future|pending/', $v ) ) {
+					return 'Moving in';
+				}
+				if ( preg_match( '/moved[\s_-]*in|current/', $v ) ) {
+					return 'Moved in';
+				}
+			}
+		}
+		foreach ( array( $lease, $unit_entry ) as $src ) {
+			$out = is_array( $src ) ? substr( (string) ( $src['move_out'] ?? '' ), 0, 10 ) : '';
+			if ( '' !== $out && '0000-00-00' !== $out ) {
+				return self::moved_out( $out ) ? 'Moved out' : 'Moving out';
+			}
+		}
+		$in = is_array( $lease ) ? substr( (string) ( $lease['move_in'] ?? '' ), 0, 10 ) : '';
+		return ( '' !== $in && $in > gmdate( 'Y-m-d' ) ) ? 'Moving in' : 'Moved in';
 	}
 
 	/** Walks Rentec's nested property list: every property at or under the one named $target gets id => unit label. */
@@ -106,11 +152,14 @@ class AJCore_RA_Suite_Sync {
 				if ( ! is_array( $t ) || empty( $t['renter_id'] ) || ! empty( $t['archived'] ) || ! empty( $t['subtenant'] ) ) {
 					continue;
 				}
-				$units = array();
+				$units      = array();
+				$unit_entry = array(); // the tenant's entry per property id, for the move status
 				foreach ( (array) ( $t['properties'] ?? array() ) as $pr ) {
 					$pid = absint( $pr['property_id'] ?? 0 );
-					if ( $pid && isset( $ids[ $pid ] ) && empty( $pr['move_out'] ) ) {
-						$units[] = '' !== $ids[ $pid ] ? $ids[ $pid ] : trim( (string) ( $pr['nickname'] ?? '' ) );
+					// A future move-out (tenant marked Moving Out) is still in the suite.
+					if ( $pid && isset( $ids[ $pid ] ) && ! self::moved_out( $pr['move_out'] ?? '' ) ) {
+						$units[]            = '' !== $ids[ $pid ] ? $ids[ $pid ] : trim( (string) ( $pr['nickname'] ?? '' ) );
+						$unit_entry[ $pid ] = $pr;
 					}
 				}
 				if ( ! $units ) {
@@ -119,7 +168,7 @@ class AJCore_RA_Suite_Sync {
 				// The current lease on a UPOS unit: no move-out, latest lease start.
 				$lease = null;
 				foreach ( (array) ( $leases_by_acct[ $acct ]['rows'] ?? array() ) as $l ) {
-					if ( ! is_array( $l ) || absint( $l['renter_id'] ?? 0 ) !== (int) $t['renter_id'] || ! isset( $ids[ absint( $l['property_id'] ?? 0 ) ] ) || ! empty( $l['move_out'] ) ) {
+					if ( ! is_array( $l ) || absint( $l['renter_id'] ?? 0 ) !== (int) $t['renter_id'] || ! isset( $ids[ absint( $l['property_id'] ?? 0 ) ] ) || self::moved_out( $l['move_out'] ?? '' ) ) {
 						continue;
 					}
 					if ( ! $lease || strcmp( substr( (string) ( $l['lease_begin'] ?? '' ), 0, 10 ), (string) $lease['begin'] ) > 0 ) {
@@ -132,6 +181,7 @@ class AJCore_RA_Suite_Sync {
 							'end'      => substr( (string) ( $l['lease_end'] ?? '' ), 0, 10 ),
 							'rent'     => round( (float) ( $l['recurring_rent'] ?? 0 ) + (float) ( $l['recurring_other'] ?? 0 ), 2 ),
 							'deposit'  => round( (float) ( $l['deposit_balance'] ?? 0 ), 2 ),
+							'status'   => self::lease_status( $l, $unit_entry[ absint( $l['property_id'] ) ] ?? null, $t ),
 						);
 					}
 				}
@@ -194,7 +244,7 @@ class AJCore_RA_Suite_Sync {
 		$kit             = AJCore_Extensions::rest_toolkit();
 		$svc_table       = $kit['portal_table']( 'aj_portal_local_services' );
 		if ( $kit['table_exists']( $local['db'], $svc_table ) ) {
-			foreach ( (array) $local['db']->get_results( "SELECT local_customer_id, local_service_id, contract_start_date, contract_end_date, move_in_date, service_name FROM `{$svc_table}` WHERE local_service_id LIKE 'rentec_lease_%'", ARRAY_A ) as $sv ) { // phpcs:ignore WordPress.DB.PreparedSQL
+			foreach ( (array) $local['db']->get_results( "SELECT local_customer_id, local_service_id, contract_start_date, contract_end_date, move_in_date, service_name, features, status FROM `{$svc_table}` WHERE local_service_id LIKE 'rentec_lease_%'", ARRAY_A ) as $sv ) { // phpcs:ignore WordPress.DB.PreparedSQL
 				$existing_leases[ $sv['local_customer_id'] . '|' . $sv['local_service_id'] ] = $sv;
 			}
 		}
@@ -221,12 +271,12 @@ class AJCore_RA_Suite_Sync {
 			}
 			$sid = 'rentec_lease_' . $t['account'] . '_' . $l['lease_id'];
 			$ex  = $cust_id ? ( $existing_leases[ $cust_id . '|' . $sid ] ?? null ) : null;
-			$same = $ex && (string) $ex['contract_start_date'] === ( $l['begin'] ?: $l['move_in'] ) && (string) ( $ex['contract_end_date'] ?? '' ) === $l['end'] && (string) $ex['move_in_date'] === ( $l['move_in'] ?: $l['begin'] );
+			$same = $ex && (string) $ex['contract_start_date'] === ( $l['begin'] ?: $l['move_in'] ) && (string) ( $ex['contract_end_date'] ?? '' ) === $l['end'] && (string) $ex['move_in_date'] === ( $l['move_in'] ?: $l['begin'] ) && (string) $ex['features'] === self::lease_features( $l );
 			if ( $same ) {
 				return;
 			}
 			$sum[ $ex ? 'leases_updated' : 'leases_new' ]++;
-			$changes[] = array( 'unit' => $l['unit'], 'kind' => 'lease', 'detail' => 'Suite ' . $l['unit'] . ' lease ' . ( $l['begin'] ?: $l['move_in'] ) . ' → ' . ( $l['end'] ?: 'ongoing' ) . ( ( $l['rent'] ?? 0 ) > 0 ? ', rent $' . number_format( (float) $l['rent'], 2 ) : '' ) . ( $ex ? ' (updated)' : ' (tracked)' ) );
+			$changes[] = array( 'unit' => $l['unit'], 'kind' => 'lease', 'detail' => 'Suite ' . $l['unit'] . ' lease ' . ( $l['begin'] ?: $l['move_in'] ) . ' → ' . ( $l['end'] ?: 'ongoing' ) . ( ( $l['rent'] ?? 0 ) > 0 ? ', rent $' . number_format( (float) $l['rent'], 2 ) : '' ) . ', ' . $l['status'] . ( $ex ? ' (updated)' : ' (tracked)' ) );
 		};
 		foreach ( $tenants as $key => $t ) {
 			$unit = implode( ', ', $t['units'] );
@@ -279,6 +329,15 @@ class AJCore_RA_Suite_Sync {
 		return array( 'summary' => $sum, 'changes' => $changes, 'ops' => $ops, 'diag' => $read['diag'] );
 	}
 
+	/** Lease terms + move status as display text (the rate column stays 0 so nothing is ever billed). */
+	private static function lease_features( $l ) {
+		return wp_json_encode( array_values( array_filter( array(
+			( $l['rent'] ?? 0 ) > 0 ? 'Rent $' . number_format( (float) $l['rent'], 2 ) . '/mo' : '',
+			( $l['deposit'] ?? 0 ) > 0 ? 'Deposit $' . number_format( (float) $l['deposit'], 2 ) : '',
+			! empty( $l['status'] ) ? 'Status: ' . $l['status'] : '',
+		) ) ) );
+	}
+
 	/** Tracks the Rentec lease as a $0 Local Service: no rate, no charge dates, so AJ Core never bills or posts it. */
 	private static function upsert_lease_service( $local, $customer_id, $t ) {
 		$l = $t['lease'] ?? null;
@@ -310,11 +369,7 @@ class AJCore_RA_Suite_Sync {
 			'monthly_rate'        => 0,
 			'currency'            => 'usd',
 			'billing_interval'    => 'month',
-			// Lease terms for renewal decisions, as display text (the rate column stays 0 so nothing is ever billed).
-			'features'            => wp_json_encode( array_values( array_filter( array(
-				( $l['rent'] ?? 0 ) > 0 ? 'Rent $' . number_format( (float) $l['rent'], 2 ) . '/mo' : '',
-				( $l['deposit'] ?? 0 ) > 0 ? 'Deposit $' . number_format( (float) $l['deposit'], 2 ) : '',
-			) ) ) ),
+			'features'            => self::lease_features( $l ),
 			'variable_charges'    => wp_json_encode( array() ),
 			'status'              => $status,
 			'notes'               => 'Lease tracked from Rentec. Payments are handled in Rentec; nothing is billed here.',
@@ -326,6 +381,8 @@ class AJCore_RA_Suite_Sync {
 		} else {
 			$db->insert( $table, $data );
 		}
+		// Only the tenant's current lease is tracked: an older one (renewed as a new Rentec lease) stops showing.
+		$db->query( $db->prepare( "UPDATE `{$table}` SET status = 'cancelled' WHERE local_customer_id = %s AND local_service_id LIKE %s AND local_service_id <> %s AND status <> 'cancelled'", $customer_id, $db->esc_like( 'rentec_lease_' . $t['account'] . '_' ) . '%', $sid ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 	}
 
 	private static function apply_ops( $local, $ops, $property ) {
@@ -403,6 +460,36 @@ class AJCore_RA_Suite_Sync {
 		return rest_ensure_response( array( 'success' => true, 'property' => $property, 'summary' => $plan['summary'] ) );
 	}
 
+	/**
+	 * After Rentec Sync stores a leases list: refresh the tracked lease of every already-linked Suite Client from the
+	 * local copy (no extra Rentec calls). New tenants and contact changes still wait for Refresh Suite Clients.
+	 */
+	public static function on_rentec_synced( $resource ) {
+		if ( 'leases' === $resource ) {
+			self::refresh_leases();
+		}
+	}
+
+	/** @return int|WP_Error leases re-tracked */
+	public static function refresh_leases() {
+		$plan = self::plan( self::property_name() );
+		if ( is_wp_error( $plan ) ) {
+			return $plan;
+		}
+		$local = self::local_customers();
+		if ( is_wp_error( $local ) ) {
+			return $local;
+		}
+		$n = 0;
+		foreach ( $plan['ops'] as $op ) {
+			if ( 'update' === $op['type'] ) {
+				self::upsert_lease_service( $local, $op['id'], $op['tenant'] );
+				$n++;
+			}
+		}
+		return $n;
+	}
+
 	// ------------------------------------------------------------------ lease tracking (renewals)
 
 	/** @return array<int,array<string,mixed>> Tracked Suite Client leases, soonest lease end first (ongoing last). */
@@ -422,10 +509,13 @@ class AJCore_RA_Suite_Sync {
 		$out   = array();
 		foreach ( $rows as $r ) {
 			$feat = json_decode( (string) $r['features'], true );
-			$rent = null;
-			$dep  = null;
+			$rent   = null;
+			$dep    = null;
+			$status = '';
 			foreach ( (array) $feat as $f ) {
-				if ( preg_match( '/^Rent \$([\d,\.]+)/', (string) $f, $m ) ) {
+				if ( 0 === strpos( (string) $f, 'Status: ' ) ) {
+					$status = substr( (string) $f, 8 );
+				} elseif ( preg_match( '/^Rent \$([\d,\.]+)/', (string) $f, $m ) ) {
 					$rent = (float) str_replace( ',', '', $m[1] );
 				} elseif ( preg_match( '/^Deposit \$([\d,\.]+)/', (string) $f, $m ) ) {
 					$dep = (float) str_replace( ',', '', $m[1] );
@@ -443,6 +533,7 @@ class AJCore_RA_Suite_Sync {
 				'days_left'     => $days,
 				'rent'          => $rent,
 				'deposit'       => $dep,
+				'status'        => $status,
 			);
 		}
 		return $out;

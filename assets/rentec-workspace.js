@@ -104,7 +104,7 @@
 		(function next() {
 			if (i >= steps.length) {
 				state.syncProgress = null;
-				state.syncError = failed.length ? 'Could not sync: ' + failed.join('; ') : '';
+				state.syncError = failed.length ? 'Rentec Sync failed: ' + failed.join('; ') : '';
 				loadSyncStatus().then(function () { load(); loadCounts(); });
 				return;
 			}
@@ -118,8 +118,8 @@
 	function syncBar() {
 		if (!state.sync) { return ''; }
 		var age = state.sync.last_synced ? Math.max(0, state.sync.now - state.sync.last_synced) : null;
-		return '<div class="ajra-sync"><span>' + (age === null ? 'Not synced yet' : 'Local copy synced ' + ago(age)) + ' · auto every ' + state.sync.interval_minutes + ' min</span> ' +
-			'<button type="button" class="button" id="ajra-sync-now"' + (state.syncProgress ? ' disabled' : '') + '>' + (state.syncProgress ? 'Syncing ' + state.syncProgress.done + '/' + state.syncProgress.total + '…' : 'Sync now') + '</button>' +
+		return '<div class="ajra-sync"><span>' + 'Rentec Sync: ' + (age === null ? 'not run yet' : 'last ' + ago(age)) + ' · auto every ' + state.sync.interval_minutes + ' min</span> ' +
+			'<button type="button" class="button" id="ajra-sync-now"' + (state.syncProgress ? ' disabled' : '') + '>' + (state.syncProgress ? 'Syncing ' + state.syncProgress.done + '/' + state.syncProgress.total + '…' : 'Rentec Sync now') + '</button>' +
 			(state.syncError ? ' <span style="color:#b32d2e">' + esc(state.syncError) + '</span>' : '') + '</div>';
 	}
 	function loadCounts() {
