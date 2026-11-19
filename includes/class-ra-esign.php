@@ -1482,7 +1482,7 @@ class AJCore_RA_Esign {
 			'zip'                    => 'Agreement — %zip%',
 			'lease_begin_date'       => 'Agreement — start date (%lease_begin_date%; subscription start, or typed when sending)',
 			'lease_end_date'         => 'Agreement — %lease_end_date% (period end; override when sending)',
-			'rent_amount'            => 'Agreement — monthly fee (%rent_amount%; subscription amount, or typed when sending)',
+			'rent_amount'            => 'Agreement — service fee (%rent_amount%; subscription amount, or typed when sending)',
 		);
 		if ( class_exists( 'AJCore_RA_Business_Profile' ) ) {
 			foreach ( AJCore_RA_Business_Profile::fields() as $k => $def ) {
@@ -1723,7 +1723,7 @@ class AJCore_RA_Esign {
 		$v['city']             = (string) $v['customer.address.city'];
 		$v['tenant_state']     = (string) $v['customer.address.state'];
 		$v['zip']              = (string) $v['customer.address.zip'];
-		// Start date and monthly fee: a value typed on the send screen wins, else the subscription.
+		// Start date and service fee: a value typed on the send screen wins, else the subscription.
 		$v['lease_begin_date'] = (string) ( ( $v['ask.lease_begin_date'] ?? '' ) ?: $v['subscription.start_date'] );
 		// End of the current (initially prorated) term; the sender can override it on the send screen.
 		$v['lease_end_date']   = (string) ( ( $v['ask.lease_end_date'] ?? '' ) ?: $v['subscription.end_date'] );
@@ -1855,35 +1855,84 @@ class AJCore_RA_Esign {
 		}
 		$products = $this->kit['portal_table']( 'aj_portal_stripe_products' );
 		$has_prod = $this->kit['table_exists']( $pdb, $products );
+		$txns     = $this->kit['portal_table']( 'aj_portal_stripe_transactions' );
+		$has_txn  = $this->kit['table_exists']( $pdb, $txns );
 		$rows     = array();
 		foreach ( $by_invoice as $inv => $x ) {
 			$meta     = $x['meta'];
+			$e        = $x['entry'];
 			$sub_id   = (string) ( $meta['subscription_id'] ?? $meta['stripe_subscription_id'] ?? '' );
 			$price_id = (string) ( $meta['price_id'] ?? $meta['stripe_price_id'] ?? '' );
+			$interval = '';
+			$line_amt = '';
+			$p_start  = (string) ( $meta['service_period_start'] ?? '' );
+			$p_end    = (string) ( $meta['service_period_end'] ?? '' );
+			$line_nm  = '';
+			$sub_make = false;
+			// The cached Stripe invoice: subscription / price / period live in different places
+			// before and after Stripe's Basil API (2025-03-31), so read both shapes.
+			$raw = $has_txn ? $pdb->get_var( $pdb->prepare( "SELECT raw_data FROM `{$txns}` WHERE stripe_object_id = %s LIMIT 1", $inv ) ) : null; // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$raw = is_string( $raw ) ? json_decode( $raw, true ) : null;
+			if ( is_array( $raw ) ) {
+				$sub_make = 'subscription_create' === ( $raw['billing_reason'] ?? '' ) || 'subscription_cycle' === ( $raw['billing_reason'] ?? '' );
+				if ( '' === $sub_id ) {
+					$sub     = $raw['parent']['subscription_details']['subscription'] ?? ( $raw['subscription'] ?? '' );
+					$sub_id  = (string) ( is_array( $sub ) ? ( $sub['id'] ?? '' ) : $sub );
+				}
+				foreach ( (array) ( $raw['lines']['data'] ?? array() ) as $line ) {
+					if ( ! is_array( $line ) ) {
+						continue;
+					}
+					$lp   = $line['pricing']['price_details']['price'] ?? ( $line['price'] ?? ( $line['plan'] ?? '' ) );
+					$lpid = (string) ( is_array( $lp ) ? ( $lp['id'] ?? '' ) : $lp );
+					$lint = (string) ( $line['price']['recurring']['interval'] ?? ( $line['plan']['interval'] ?? '' ) );
+					$lsub = $line['parent']['subscription_item_details']['subscription'] ?? ( $line['subscription'] ?? '' );
+					$lsub = (string) ( is_array( $lsub ) ? ( $lsub['id'] ?? '' ) : $lsub );
+					if ( '' === $lint && '' === $lsub && ( '' === $lpid || ! $has_prod ) ) {
+						continue; // not a recurring line (e.g. a one-time setup fee on the same invoice)
+					}
+					if ( '' === $lint && $has_prod && '' !== $lpid ) {
+						$lint = (string) $pdb->get_var( $pdb->prepare( "SELECT recurring_interval FROM `{$products}` WHERE stripe_price_id = %s LIMIT 1", $lpid ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+						if ( '' === $lint && '' === $lsub ) {
+							continue;
+						}
+					}
+					$price_id = '' !== $lpid ? $lpid : $price_id;
+					$interval = '' !== $lint ? $lint : $interval;
+					$sub_id   = '' !== $sub_id ? $sub_id : $lsub;
+					$line_amt = isset( $line['amount'] ) ? number_format( ( (float) $line['amount'] ) / 100, 2, '.', '' ) : '';
+					$line_nm  = (string) ( $line['description'] ?? '' );
+					if ( ! empty( $line['period']['start'] ) ) {
+						$p_start = gmdate( 'Y-m-d H:i:s', (int) $line['period']['start'] );
+					}
+					if ( ! empty( $line['period']['end'] ) ) {
+						$p_end = gmdate( 'Y-m-d H:i:s', (int) $line['period']['end'] );
+					}
+					break;
+				}
+			}
 			if ( '' !== $sub_id && isset( $seen_subs[ $sub_id ] ) ) {
 				continue; // already listed from the subscription itself
 			}
-			$interval = '';
-			$pname    = '';
+			$pname = '';
 			if ( $has_prod && '' !== $price_id ) {
 				$prod = $pdb->get_row( $pdb->prepare( "SELECT name, recurring_interval FROM `{$products}` WHERE stripe_price_id = %s LIMIT 1", $price_id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 				if ( $prod ) {
-					$interval = (string) ( $prod['recurring_interval'] ?? '' );
+					$interval = '' !== $interval ? $interval : (string) ( $prod['recurring_interval'] ?? '' );
 					$pname    = (string) ( $prod['name'] ?? '' );
 				}
 			}
-			if ( '' === $sub_id && '' === $interval ) {
+			if ( '' === $sub_id && '' === $interval && ! $sub_make ) {
 				continue; // a one-time charge
 			}
-			$e      = $x['entry'];
 			$rows[] = array(
 				'stripe_subscription_id' => '' !== $sub_id ? $sub_id : 'inv:' . $inv,
-				'service_name'           => '' !== $pname ? $pname : (string) ( $meta['product_name_snapshot'] ?? $e['description'] ?? '' ),
-				'amount'                 => (string) ( $e['amount'] ?? '' ),
-				'recurring_interval'     => '' !== $interval ? $interval : 'month',
-				'service_period_start'   => (string) ( $meta['service_period_start'] ?? '' ) ?: (string) ( $e['ledger_date'] ?? '' ),
-				'service_period_end'     => (string) ( $meta['service_period_end'] ?? '' ),
-				'next_billing_date'      => (string) ( $meta['service_period_end'] ?? '' ),
+				'service_name'           => '' !== $pname ? $pname : ( '' !== $line_nm ? $line_nm : (string) ( $meta['product_name_snapshot'] ?? $e['description'] ?? '' ) ),
+				'amount'                 => '' !== $line_amt ? $line_amt : (string) ( $e['amount'] ?? '' ),
+				'recurring_interval'     => $interval, // blank when the invoice doesn't say (never assume monthly)
+				'service_period_start'   => '' !== $p_start ? $p_start : (string) ( $e['ledger_date'] ?? '' ),
+				'service_period_end'     => $p_end,
+				'next_billing_date'      => $p_end,
 				'status'                 => (string) ( $e['status'] ?? 'open' ),
 			);
 		}
@@ -2107,7 +2156,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			'zip'              => 'Client ZIP',
 			'lease_begin_date' => 'Start date',
 			'lease_end_date'   => 'End date',
-			'rent_amount'      => 'Monthly service fee',
+			'rent_amount'      => 'Service fee',
 			'signer.name'      => 'Signer 1 name',
 			'signer.email'     => 'Signer 1 email',
 		);
@@ -5002,8 +5051,9 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			// Every variable the chosen form uses, filled with the chosen customer's values. Editing one
 			// overrides it for this document only (sent as vars); clearing it goes back to the customer's value.
 			var custVals = {}, custValsFor = '';
-			var VAR_LABELS = { tenant_company: 'Client name', address: 'Client street address', city: 'Client city', tenant_state: 'Client state', zip: 'Client ZIP', lease_begin_date: 'Start date', lease_end_date: 'End date', rent_amount: 'Monthly service fee' };
+			var VAR_LABELS = { tenant_company: 'Client name', address: 'Client street address', city: 'Client city', tenant_state: 'Client state', zip: 'Client ZIP', lease_begin_date: 'Start date', lease_end_date: 'End date', rent_amount: 'Service fee' };
 			function varLabel( k ) {
+				if ( 'rent_amount' === k && custVals[ 'subscription.interval' ] ) { return 'Service fee (per ' + custVals[ 'subscription.interval' ] + ')'; } // e.g. per year for Registered Agent
 				if ( VAR_LABELS[ k ] ) { return VAR_LABELS[ k ]; }
 				if ( 0 === k.indexOf( 'ask.' ) ) { return k.slice( 4 ).replace( /_/g, ' ' ).replace( /^./, function ( c ) { return c.toUpperCase(); } ); }
 				return mergeFields[ k ] ? String( mergeFields[ k ] ).replace( /\s*\(.*\)\s*$/, '' ) : k;
