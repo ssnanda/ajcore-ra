@@ -29,6 +29,7 @@ class AJCore_RA_Esign {
 	const IGNORED_ROW    = 'ajcore_breezedoc_ignored';  // BreezeDoc ids deleted from the local log (imports skip them)
 	const CRON_HOOK      = 'ajcore_ra_esign_auto_import';
 	const TPL_OPTION     = 'ajcore_ra_esign_templates'; // AJCore-native templates (PDF + signer roles + signature page)
+	const BUNDLED_OPTION = 'ajcore_ra_esign_bundled_forms'; // id => installed manifest rev (keeps deleted bundled forms deleted)
 	const SIGNED_DONE_ROW = 'ajcore_breezedoc_signed_done'; // documents whose signed copy was already emailed / filed
 
 	/** @var array<string,callable> */
@@ -1082,8 +1083,13 @@ class AJCore_RA_Esign {
 	}
 
 	/**
-	 * Installs plugin-owned forms once without replacing a form an administrator
-	 * has already edited. Future agreements only need a PDF plus one manifest entry.
+	 * Installs plugin-owned forms from assets/forms/manifest.php.
+	 *
+	 * - New id: installed once and recorded in BUNDLED_OPTION.
+	 * - Recorded but missing from the list: the admin deleted it, so it stays deleted.
+	 * - Present with an older 'rev': upgraded only while still unedited (its body +
+	 *   layout hash matches what was installed). 0.5.13 installs carry no hash, so
+	 *   they count as unedited while the body still matches the bundled HTML.
 	 *
 	 * @param array<string,array> $list Saved templates keyed by template id.
 	 * @return array<string,array>
@@ -1097,56 +1103,111 @@ class AJCore_RA_Esign {
 		if ( ! is_array( $bundled ) || empty( $bundled ) ) {
 			return $list;
 		}
-		$changed = false;
-		$dir     = $this->tpl_dir();
+		$installed = get_option( self::BUNDLED_OPTION, array() );
+		$installed = is_array( $installed ) ? $installed : array();
+		$changed   = false;
+		$seen      = false;
 		foreach ( $bundled as $id => $definition ) {
 			$id = sanitize_key( (string) $id );
-			if ( 0 !== strpos( $id, 'ajt_' ) || isset( $list[ $id ] ) || ! is_array( $definition ) ) {
+			if ( 0 !== strpos( $id, 'ajt_' ) || ! is_array( $definition ) ) {
 				continue;
 			}
-			$kind = 'doc' === ( $definition['kind'] ?? 'pdf' ) ? 'doc' : 'pdf';
-			$asset = basename( (string) ( $definition['asset'] ?? '' ) );
-			$source = dirname( __DIR__ ) . '/assets/forms/' . $asset;
-			if ( '' === $asset || ! is_readable( $source ) ) {
+			$rev = max( 1, (int) ( $definition['rev'] ?? 1 ) );
+			if ( isset( $list[ $id ] ) ) {
+				$current = $list[ $id ];
+				if ( ! isset( $installed[ $id ] ) ) {
+					$installed[ $id ] = (int) ( $current['bundled_rev'] ?? 1 );
+					$seen             = true;
+				}
+				if ( ! empty( $current['bundled'] ) && (int) ( $current['bundled_rev'] ?? 1 ) < $rev ) {
+					$fresh = $this->build_bundled_template( $id, $definition, $rev );
+					if ( $fresh && $this->bundled_template_unedited( $current, $fresh ) ) {
+						$fresh['created'] = (string) ( $current['created'] ?? $fresh['created'] );
+						$list[ $id ]      = $fresh;
+						$installed[ $id ] = $rev;
+						$changed          = true;
+						$seen             = true;
+					}
+				}
 				continue;
 			}
-			$stored = '';
-			$body   = '';
-			if ( 'doc' === $kind ) {
-				$body = self::clean_doc_html( (string) file_get_contents( $source ) );
-				if ( '' === trim( $body ) ) {
-					continue;
-				}
-			} else {
-				if ( ! is_dir( $dir ) || ! is_writable( $dir ) ) {
-					continue;
-				}
-				$stored = $id . '.pdf';
-				if ( ! copy( $source, $dir . '/' . $stored ) ) {
-					continue;
-				}
+			if ( isset( $installed[ $id ] ) ) {
+				continue; // deleted by an administrator: never reinstall
 			}
-			$list[ $id ] = array(
-				'id'       => $id,
-				'title'    => mb_substr( sanitize_text_field( (string) ( $definition['title'] ?? $asset ) ), 0, 191 ),
-				'file'     => $stored,
-				'filename' => sanitize_file_name( (string) ( $definition['filename'] ?? $asset ) ),
-				'kind'     => $kind,
-				'body'     => $body,
-				'format'   => 'html',
-				'signers'  => array_values( array_map( 'sanitize_text_field', (array) ( $definition['signers'] ?? array( 'Signer' ) ) ) ),
-				'page'     => max( 0, (int) ( $definition['page'] ?? 0 ) ),
-				'layout'   => self::clean_layout( $definition['layout'] ?? array() ),
-				'blanks'   => self::clean_blanks( $definition['blanks'] ?? array() ),
-				'created'  => current_time( 'mysql' ),
-				'bundled'  => 1,
-			);
-			$changed = true;
+			$fresh = $this->build_bundled_template( $id, $definition, $rev );
+			if ( ! $fresh ) {
+				continue;
+			}
+			$list[ $id ]      = $fresh;
+			$installed[ $id ] = $rev;
+			$changed          = true;
+			$seen             = true;
 		}
 		if ( $changed ) {
 			update_option( self::TPL_OPTION, $list, false );
 		}
+		if ( $seen ) {
+			update_option( self::BUNDLED_OPTION, $installed, false );
+		}
 		return $list;
+	}
+
+	/** Builds the stored meta for one manifest entry (copies a PDF asset into the forms folder). */
+	private function build_bundled_template( $id, array $definition, $rev ) {
+		$kind   = 'doc' === ( $definition['kind'] ?? 'pdf' ) ? 'doc' : 'pdf';
+		$asset  = basename( (string) ( $definition['asset'] ?? '' ) );
+		$source = dirname( __DIR__ ) . '/assets/forms/' . $asset;
+		if ( '' === $asset || ! is_readable( $source ) ) {
+			return null;
+		}
+		$stored = '';
+		$body   = '';
+		if ( 'doc' === $kind ) {
+			$body = self::clean_doc_html( (string) file_get_contents( $source ) );
+			if ( '' === trim( $body ) ) {
+				return null;
+			}
+		} else {
+			$dir = $this->tpl_dir();
+			if ( ! is_dir( $dir ) || ! is_writable( $dir ) ) {
+				return null;
+			}
+			$stored = $id . '.pdf';
+			if ( ! copy( $source, $dir . '/' . $stored ) ) {
+				return null;
+			}
+		}
+		$meta = array(
+			'id'          => $id,
+			'title'       => mb_substr( sanitize_text_field( (string) ( $definition['title'] ?? $asset ) ), 0, 191 ),
+			'file'        => $stored,
+			'filename'    => sanitize_file_name( (string) ( $definition['filename'] ?? $asset ) ),
+			'kind'        => $kind,
+			'body'        => $body,
+			'format'      => 'html',
+			'signers'     => array_values( array_map( 'sanitize_text_field', (array) ( $definition['signers'] ?? array( 'Signer' ) ) ) ),
+			'page'        => max( 0, (int) ( $definition['page'] ?? 0 ) ),
+			'layout'      => self::clean_layout( $definition['layout'] ?? array() ),
+			'blanks'      => self::clean_blanks( $definition['blanks'] ?? array() ),
+			'created'     => current_time( 'mysql' ),
+			'bundled'     => 1,
+			'bundled_rev' => (int) $rev,
+		);
+		$meta['bundled_hash'] = self::bundled_hash( $meta );
+		return $meta;
+	}
+
+	/** True while a saved bundled form still holds exactly what the plugin installed. */
+	private function bundled_template_unedited( array $current, array $fresh ) {
+		if ( ! empty( $current['bundled_hash'] ) ) {
+			return hash_equals( (string) $current['bundled_hash'], self::bundled_hash( $current ) );
+		}
+		// Installed by 0.5.13 (no hash yet): unedited while the document text is unchanged.
+		return 'doc' === ( $current['kind'] ?? 'pdf' ) && (string) ( $current['body'] ?? '' ) === (string) $fresh['body'];
+	}
+
+	private static function bundled_hash( array $meta ) {
+		return md5( (string) wp_json_encode( array( (string) ( $meta['body'] ?? '' ), $meta['layout'] ?? array(), $meta['signers'] ?? array(), (int) ( $meta['page'] ?? 0 ) ) ) );
 	}
 
 	private function local_template_shape( array $meta ) {
@@ -1374,7 +1435,7 @@ class AJCore_RA_Esign {
 			'tenant_state'           => 'Agreement — %tenant_state%',
 			'zip'                    => 'Agreement — %zip%',
 			'lease_begin_date'       => 'Agreement — %lease_begin_date%',
-			'lease_end_date'         => 'Agreement — %lease_end_date% (entered when sending)',
+			'lease_end_date'         => 'Agreement — %lease_end_date% (period end; override when sending)',
 			'rent_amount'            => 'Agreement — %rent_amount%',
 		);
 		if ( class_exists( 'AJCore_RA_Business_Profile' ) ) {
@@ -1609,7 +1670,8 @@ class AJCore_RA_Esign {
 		$v['tenant_state']     = (string) $v['customer.address.state'];
 		$v['zip']              = (string) $v['customer.address.zip'];
 		$v['lease_begin_date'] = (string) $v['subscription.start_date'];
-		$v['lease_end_date']   = (string) ( $v['ask.lease_end_date'] ?? '' );
+		// End of the current (initially prorated) term; the sender can override it on the send screen.
+		$v['lease_end_date']   = (string) ( ( $v['ask.lease_end_date'] ?? '' ) ?: $v['subscription.end_date'] );
 		$v['rent_amount']      = (string) $v['subscription.amount'];
 		$v['company']    = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
 		return $v;
@@ -1635,7 +1697,10 @@ class AJCore_RA_Esign {
 			if ( $preview ) {
 				return $m[0];
 			}
-			return isset( $values[ $key ] ) ? (string) $values[ $key ] : '';
+			if ( ! isset( $values[ $key ] ) ) {
+				return '' !== $m[1] ? '' : $m[0]; // unknown %word% is ordinary text (e.g. "%20" in a link), not a field
+			}
+			return (string) $values[ $key ];
 		}, $text );
 	}
 
@@ -1815,7 +1880,10 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 				return $m[0];
 			}
 			$key = strtolower( '' !== $m[1] ? $m[1] : $m[2] );
-			return isset( $values[ $key ] ) ? esc_html( (string) $values[ $key ] ) : '';
+			if ( ! isset( $values[ $key ] ) ) {
+				return '' !== $m[1] ? '' : $m[0]; // unknown %word% is ordinary text (e.g. "%20" in a link), not a field
+			}
+			return esc_html( (string) $values[ $key ] );
 		}, $html );
 	}
 
@@ -4483,8 +4551,11 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			function renderVars() {
 				var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0], layout = tplLayout.length ? tplLayout : ( t && t.layout ? t.layout : [] ), names = [], box2 = $( 'ajra-es-vars' );
 				layout.forEach( function ( f ) { String( f.fill || '' ).replace( /\{\{\s*ask\.([a-z0-9_]+)\s*\}\}/gi, function ( m, n ) { n = n.toLowerCase(); if ( names.indexOf( n ) < 0 ) { names.push( n ); } return m; } ); } );
+				// Document forms ask in the text too: {{ask.x}} and the Rentec-style %lease_end_date% (an ask with a default).
+				String( t && 'doc' === t.kind ? t.body || '' : '' ).replace( /\{\{\s*ask\.([a-z0-9_]+)\s*\}\}|%(lease_end_date)%/gi, function ( m, a, b ) { var n = String( a || b ).toLowerCase(); if ( names.indexOf( n ) < 0 ) { names.push( n ); } return m; } );
+				var askDefaults = { lease_end_date: 'Default: current period end' };
 				box2.style.display = names.length ? '' : 'none';
-				box2.innerHTML = names.map( function ( n ) { return '<label>' + esc( n.replace( /_/g, ' ' ).replace( /^./, function ( c ) { return c.toUpperCase(); } ) ) + '</label><input type="text" class="ajra-es-var" data-n="' + esc( n ) + '" value="' + esc( varVals[ n ] || '' ) + '">'; } ).join( '' );
+				box2.innerHTML = names.map( function ( n ) { return '<label>' + esc( n.replace( /_/g, ' ' ).replace( /^./, function ( c ) { return c.toUpperCase(); } ) ) + '</label><input type="text" class="ajra-es-var" data-n="' + esc( n ) + '" value="' + esc( varVals[ n ] || '' ) + '"' + ( askDefaults[ n ] ? ' placeholder="' + esc( askDefaults[ n ] ) + '"' : '' ) + '>'; } ).join( '' );
 				box2.querySelectorAll( '.ajra-es-var' ).forEach( function ( i ) { i.addEventListener( 'input', function () { varVals[ i.getAttribute( 'data-n' ) ] = i.value; queueRefresh(); } ); } );
 			}
 			function readVars() { var o = {}; document.querySelectorAll( '.ajra-es-var' ).forEach( function ( i ) { o[ i.getAttribute( 'data-n' ) ] = i.value; } ); return o; }
