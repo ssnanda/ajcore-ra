@@ -1780,6 +1780,9 @@ class AJCore_RA_Esign {
 			$got   = $admin->api_get_ops_customer_services( $customer_id, true ); // older AJ Core ignores the 2nd argument (paid only)
 			$rows  = (array) ( $got['subscriptions'] ?? array() );
 		}
+		if ( 0 !== strpos( $customer_id, 'local_' ) ) {
+			$rows = array_merge( $rows, $this->open_invoice_services( $customer_id, $rows ) );
+		}
 		$out = array();
 		foreach ( $rows as $i => $r ) {
 			$r        = (array) $r;
@@ -1794,7 +1797,7 @@ class AJCore_RA_Esign {
 			if ( '' === $key ) {
 				$key = 'svc_' . substr( md5( $name . '|' . ( $r['service_period_start'] ?? '' ) . '|' . $i ), 0, 10 );
 			}
-			$unpaid = in_array( $status, array( 'incomplete', 'past_due', 'unpaid' ), true );
+			$unpaid = in_array( $status, array( 'incomplete', 'past_due', 'unpaid', 'open', 'draft' ), true );
 			$out[]  = array(
 				'key'      => $key,
 				'name'     => '' !== $name ? $name : __( 'Subscription', 'ajcore-ra' ),
@@ -1805,10 +1808,86 @@ class AJCore_RA_Esign {
 				'next'     => self::format_merge_date( $r['next_billing_date'] ?? '' ),
 				'status'   => $status,
 				'unpaid'   => $unpaid,
-				'label'    => trim( ( '' !== $name ? $name : 'Subscription' ) . ( '' !== $amount ? ' — ' . $amount . ( '' !== $interval ? '/' . $interval : '' ) : '' ) . ( '' !== $start ? ', from ' . $start : '' ) . ( '' !== $status ? ' (' . $status . ( $unpaid ? ', unpaid' : '' ) . ')' : '' ) ),
+				'label'    => trim( ( '' !== $name ? $name : 'Subscription' ) . ( '' !== $amount ? ' — ' . $amount . ( '' !== $interval ? '/' . $interval : '' ) : '' ) . ( '' !== $start ? ', from ' . $start : '' ) . ( '' !== $status ? ' (' . ( 'open' === $status || 'draft' === $status ? $status . ' invoice' : $status ) . ( $unpaid ? ', unpaid' : '' ) . ')' : '' ) ),
 			);
 		}
 		return $out;
+	}
+
+	/**
+	 * Subscriptions that so far exist only as an unpaid invoice (first invoice open, subscription
+	 * not active yet), read from the billing ledger, so a contract can go out with that invoice.
+	 * An invoice counts when its line carries a subscription id or its price is a recurring product;
+	 * one-time charges are left out (these contracts always cover subscriptions).
+	 *
+	 * @param array $known Service rows already found (their subscription ids are skipped).
+	 * @return array<int,array> Rows in the same shape as AJ Core's service records.
+	 */
+	private function open_invoice_services( $customer_id, array $known ) {
+		$pdb    = $this->get_pdb();
+		$ledger = $this->kit['portal_table']( 'aj_portal_ledger' );
+		if ( ! $this->kit['table_exists']( $pdb, $ledger ) ) {
+			return array();
+		}
+		$entries = (array) $pdb->get_results( $pdb->prepare( "SELECT invoice_id, source_type, ledger_date, description, amount, status, metadata FROM `{$ledger}` WHERE stripe_customer_id = %s AND invoice_id <> '' AND status IN ('open','draft','unpaid','past_due') ORDER BY ledger_date DESC, id DESC LIMIT 50", $customer_id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		if ( ! $entries ) {
+			return array();
+		}
+		$seen_subs = array();
+		foreach ( $known as $k ) {
+			$sid = (string) ( ( (array) $k )['stripe_subscription_id'] ?? '' );
+			if ( '' !== $sid ) {
+				$seen_subs[ $sid ] = true;
+			}
+		}
+		// One entry per invoice: the service-charge row carries price / subscription / period metadata.
+		$by_invoice = array();
+		foreach ( $entries as $e ) {
+			$meta = json_decode( (string) ( $e['metadata'] ?? '' ), true );
+			$meta = is_array( $meta ) ? $meta : array();
+			$inv  = (string) $e['invoice_id'];
+			$cur  = $by_invoice[ $inv ] ?? array( 'entry' => $e, 'meta' => array() );
+			$cur['meta'] = array_merge( $cur['meta'], array_filter( $meta, 'is_scalar' ) );
+			if ( 'invoice' === ( $e['source_type'] ?? '' ) ) {
+				$cur['entry'] = $e; // the invoice row has the invoice's own date and description
+			}
+			$by_invoice[ $inv ] = $cur;
+		}
+		$products = $this->kit['portal_table']( 'aj_portal_stripe_products' );
+		$has_prod = $this->kit['table_exists']( $pdb, $products );
+		$rows     = array();
+		foreach ( $by_invoice as $inv => $x ) {
+			$meta     = $x['meta'];
+			$sub_id   = (string) ( $meta['subscription_id'] ?? $meta['stripe_subscription_id'] ?? '' );
+			$price_id = (string) ( $meta['price_id'] ?? $meta['stripe_price_id'] ?? '' );
+			if ( '' !== $sub_id && isset( $seen_subs[ $sub_id ] ) ) {
+				continue; // already listed from the subscription itself
+			}
+			$interval = '';
+			$pname    = '';
+			if ( $has_prod && '' !== $price_id ) {
+				$prod = $pdb->get_row( $pdb->prepare( "SELECT name, recurring_interval FROM `{$products}` WHERE stripe_price_id = %s LIMIT 1", $price_id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				if ( $prod ) {
+					$interval = (string) ( $prod['recurring_interval'] ?? '' );
+					$pname    = (string) ( $prod['name'] ?? '' );
+				}
+			}
+			if ( '' === $sub_id && '' === $interval ) {
+				continue; // a one-time charge
+			}
+			$e      = $x['entry'];
+			$rows[] = array(
+				'stripe_subscription_id' => '' !== $sub_id ? $sub_id : 'inv:' . $inv,
+				'service_name'           => '' !== $pname ? $pname : (string) ( $meta['product_name_snapshot'] ?? $e['description'] ?? '' ),
+				'amount'                 => (string) ( $e['amount'] ?? '' ),
+				'recurring_interval'     => '' !== $interval ? $interval : 'month',
+				'service_period_start'   => (string) ( $meta['service_period_start'] ?? '' ) ?: (string) ( $e['ledger_date'] ?? '' ),
+				'service_period_end'     => (string) ( $meta['service_period_end'] ?? '' ),
+				'next_billing_date'      => (string) ( $meta['service_period_end'] ?? '' ),
+				'status'                 => (string) ( $e['status'] ?? 'open' ),
+			);
+		}
+		return $rows;
 	}
 
 	/** Formats a stored MySQL/ISO date for a document merge field. */
@@ -2223,7 +2302,9 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 						$pdf->text( $lx, $by + $bh - 10, $label, $font, 8, array( 0.33, 0.33, 0.33 ) );
 						$pdf->line( $bx, $by + $bh, $bx + $bw, $by + $bh, array( 0.13, 0.13, 0.13 ), 0.75 );
 						if ( $outline ) {
+							$pdf->filled_rectangle( $bx, $by, $bw, $bh, array( 0.933, 0.953, 1 ) );
 							$pdf->rectangle( $bx, $by, $bw, $bh, array( 0.22, 0.35, 0.91 ), 0.6, array( 2, 2 ) );
+							$pdf->text( $bx + 2, $by + 2, 'Initials', $font, 6.5, array( 0.22, 0.35, 0.91 ) );
 						}
 					}
 				);
@@ -4847,10 +4928,19 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			function custLabel() { var c = customers.filter( function ( x ) { return x.id === cust.value; } )[0]; custBtn.textContent = ( c ? c.name || c.email : 'Select customer' ) + ' ▾'; }
 			custBtn.addEventListener( 'click', function () { var open = 'none' === custPop.style.display; custPop.style.display = open ? '' : 'none'; if ( open ) { custQ.focus(); } } );
 			document.addEventListener( 'click', function ( e ) { if ( ! custPop.contains( e.target ) && e.target !== custBtn ) { custPop.style.display = 'none'; } } );
+			var prevCustId = cust.value;
 			cust.addEventListener( 'change', function () {
 				custLabel(); custPop.style.display = 'none';
 				var c = customers.filter( function ( x ) { return x.id === cust.value; } )[0], r = box.querySelector( '.ajra-es-r' );
-				if ( c && r && ! r.querySelector( '.n' ).value && ! r.querySelector( '.e' ).value ) { r.querySelector( '.n' ).value = c.name; r.querySelector( '.e' ).value = c.email; updateSend(); } // first signer = the customer, if empty
+				var old = customers.filter( function ( x ) { return x.id === prevCustId; } )[0];
+				prevCustId = cust.value;
+				if ( c && r ) {
+					// First signer follows the customer: replaced when empty or still showing the previous
+					// customer, kept when someone else was typed in on purpose.
+					var n = r.querySelector( '.n' ), e = r.querySelector( '.e' );
+					var stale = ( ! n.value && ! e.value ) || ( old && ( ( e.value && e.value.toLowerCase() === String( old.email || '' ).toLowerCase() ) || ( n.value && n.value === old.name ) ) );
+					if ( stale ) { n.value = c.name; e.value = c.email; updateSend(); }
+				}
 			} );
 			fillCustomers();
 			templates.forEach( function ( t ) { var o = document.createElement( 'option' ); o.value = t.id; o.textContent = t.title || t.id; tpl.appendChild( o ); } );
@@ -4967,7 +5057,9 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			}
 			tpl.addEventListener( 'change', function () { renderRecipients( currentTemplateRecipients() ); syncTplFields(); refreshInline(); } );
 			cust.addEventListener( 'change', updateSend );
-			cust.addEventListener( 'change', function () { delete varVals._service; loadCustVals(); } ); // a new customer starts on their default service
+			// Field edits belong to the customer they were made for: a different customer starts clean
+			// (their own values and default service), so one client's name can't end up in another's contract.
+			cust.addEventListener( 'change', function () { varVals = {}; loadCustVals(); queueRefresh(); } );
 			var upLayout = [], inlineEd = null, inlineHost = $( 'ajra-es-inline' ), inlineSeq = 0, reqside = $( 'ajra-es-reqside' ), reqHome = reqside.parentNode;
 			function rehome() { if ( reqside.parentNode !== reqHome ) { reqHome.appendChild( reqside ); } } // back into the card before the editor is torn down
 			// Live values for the "Preview with values" checkbox: every merge field resolved for the chosen customer.
@@ -5048,7 +5140,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 					setMode( 'pdf' === d.mode ? 'pdf' : 'template' );
 					if ( d.customer_id ) {
 						if ( ! Array.prototype.some.call( cust.options, function ( o ) { return o.value === d.customer_id; } ) ) { var c0 = customers.filter( function ( x ) { return x.id === d.customer_id; } )[0]; if ( c0 ) { var o0 = document.createElement( 'option' ); o0.value = c0.id; o0.textContent = c0.name + ' (' + c0.email + ')'; cust.appendChild( o0 ); } }
-						cust.value = d.customer_id; custLabel();
+						cust.value = d.customer_id; custLabel(); prevCustId = cust.value;
 					}
 					varVals = {}; Object.keys( d.vars || {} ).forEach( function ( k ) { if ( String( d.vars[ k ] ).trim() ) { varVals[ k ] = String( d.vars[ k ] ); } } );
 					loadCustVals();
