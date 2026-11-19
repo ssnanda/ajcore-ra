@@ -1416,7 +1416,7 @@ class AJCore_RA_Esign {
 				return $pdf;
 			}
 			if ( ! empty( $options['preview_only'] ) ) {
-				return array( 'preview_pdf' => $pdf );
+				return array( 'preview_pdf' => $pdf, 'missing' => $this->preview_missing );
 			}
 			$tmp = wp_tempnam( 'ajesign.pdf' );
 			if ( ! $tmp || false === file_put_contents( $tmp, $pdf ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
@@ -1480,9 +1480,9 @@ class AJCore_RA_Esign {
 			'city'                   => 'Agreement — %city%',
 			'tenant_state'           => 'Agreement — %tenant_state%',
 			'zip'                    => 'Agreement — %zip%',
-			'lease_begin_date'       => 'Agreement — %lease_begin_date%',
+			'lease_begin_date'       => 'Agreement — start date (%lease_begin_date%; subscription start, or typed when sending)',
 			'lease_end_date'         => 'Agreement — %lease_end_date% (period end; override when sending)',
-			'rent_amount'            => 'Agreement — %rent_amount%',
+			'rent_amount'            => 'Agreement — monthly fee (%rent_amount%; subscription amount, or typed when sending)',
 		);
 		if ( class_exists( 'AJCore_RA_Business_Profile' ) ) {
 			foreach ( AJCore_RA_Business_Profile::fields() as $k => $def ) {
@@ -1721,10 +1721,15 @@ class AJCore_RA_Esign {
 		$v['city']             = (string) $v['customer.address.city'];
 		$v['tenant_state']     = (string) $v['customer.address.state'];
 		$v['zip']              = (string) $v['customer.address.zip'];
-		$v['lease_begin_date'] = (string) $v['subscription.start_date'];
+		// Start date and monthly fee: a value typed on the send screen wins, else the subscription.
+		$v['lease_begin_date'] = (string) ( ( $v['ask.lease_begin_date'] ?? '' ) ?: $v['subscription.start_date'] );
 		// End of the current (initially prorated) term; the sender can override it on the send screen.
 		$v['lease_end_date']   = (string) ( ( $v['ask.lease_end_date'] ?? '' ) ?: $v['subscription.end_date'] );
-		$v['rent_amount']      = (string) $v['subscription.amount'];
+		$typed_fee             = trim( (string) ( $v['ask.rent_amount'] ?? '' ) );
+		if ( '' !== $typed_fee && is_numeric( str_replace( array( '$', ',' ), '', $typed_fee ) ) ) {
+			$typed_fee = '$' . number_format_i18n( (float) str_replace( array( '$', ',' ), '', $typed_fee ), 2 );
+		}
+		$v['rent_amount']      = '' !== $typed_fee ? $typed_fee : (string) $v['subscription.amount'];
 		$v['company']    = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
 		return $v;
 	}
@@ -1757,6 +1762,9 @@ class AJCore_RA_Esign {
 	}
 
 	/** Merged PDF bytes for a document template. Last page is always a signature page. */
+	/** @var string[] Fields that came out empty in the last send-screen preview. */
+	private $preview_missing = array();
+
 	private function render_doc_template( array $meta, $stripe_customer_id, array $recipients, $preview = false, array $vars = array(), &$anchors = null, $outline = false ) {
 		$anchors = array();
 		$values  = $this->merge_values( $stripe_customer_id, $recipients, $vars );
@@ -1765,7 +1773,9 @@ class AJCore_RA_Esign {
 				'roles'   => array_values( (array) ( $meta['signers'] ?? array() ) ),
 				'outline' => $preview || $outline,
 			);
-			return $this->build_html_pdf( (string) $meta['title'], $this->merge_html( (string) $meta['body'], $values, $preview ), $doc, $anchors );
+			$this->preview_missing = array();
+			$html = $this->merge_html( (string) $meta['body'], $values, $preview, $this->preview_missing, $outline && ! $preview );
+			return $this->build_html_pdf( (string) $meta['title'], $html, $doc, $anchors );
 		}
 		$text = $this->merge_text( (string) $meta['body'], $values, $preview );
 		return self::build_text_pdf( (string) $meta['title'], $text, array() );
@@ -1930,17 +1940,57 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 		return (string) $out;
 	}
 
-	/** Fills {{tokens}} and Rentec-style %tokens% in rich HTML. */
-	private function merge_html( $html, array $values, $preview = false ) {
-		return preg_replace_callback( '/\{\{\s*([a-z0-9_.]+)\s*\}\}|%([a-z0-9_.]+)%/i', static function ( $m ) use ( $values, $preview ) {
+	/** Friendly name of a merge field, for "missing" notes in previews. */
+	private static function merge_field_label( $key ) {
+		$named = array(
+			'tenant_company'   => 'Client name',
+			'address'          => 'Client street address',
+			'city'             => 'Client city',
+			'tenant_state'     => 'Client state',
+			'zip'              => 'Client ZIP',
+			'lease_begin_date' => 'Start date',
+			'lease_end_date'   => 'End date',
+			'rent_amount'      => 'Monthly service fee',
+			'signer.name'      => 'Signer 1 name',
+			'signer.email'     => 'Signer 1 email',
+		);
+		if ( isset( $named[ $key ] ) ) {
+			return $named[ $key ];
+		}
+		if ( preg_match( '/^signer(\d+)\.(name|email)$/', $key, $m ) ) {
+			return 'Signer ' . $m[1] . ' ' . $m[2];
+		}
+		$catalog = self::merge_field_catalog();
+		return isset( $catalog[ $key ] ) ? (string) $catalog[ $key ] : ucfirst( str_replace( array( '.', '_' ), ' ', $key ) );
+	}
+
+	/**
+	 * Fills {{tokens}} and Rentec-style %tokens% in rich HTML (values HTML-escaped).
+	 * $mark (send-screen previews): an empty field prints a red "[missing: …]" and its label is
+	 * added to $missing, so gaps are obvious before anything is sent.
+	 */
+	private function merge_html( $html, array $values, $preview = false, &$missing = null, $mark = false ) {
+		$missing = is_array( $missing ) ? $missing : array();
+		return preg_replace_callback( '/\{\{\s*([a-z0-9_.]+)\s*\}\}|%([a-z0-9_.]+)%/i', static function ( $m ) use ( $values, $preview, &$missing, $mark ) {
 			if ( $preview ) {
 				return $m[0];
 			}
 			$key = strtolower( '' !== $m[1] ? $m[1] : $m[2] );
-			if ( ! isset( $values[ $key ] ) ) {
-				return '' !== $m[1] ? '' : $m[0]; // unknown %word% is ordinary text (e.g. "%20" in a link), not a field
+			if ( ! isset( $values[ $key ] ) && '' === $m[1] ) {
+				return $m[0]; // unknown %word% is ordinary text (e.g. "%20" in a link), not a field
 			}
-			return esc_html( (string) $values[ $key ] );
+			$val = isset( $values[ $key ] ) ? trim( (string) $values[ $key ] ) : '';
+			if ( '' === $val ) {
+				if ( ! $mark ) {
+					return '';
+				}
+				$label = self::merge_field_label( $key );
+				if ( ! in_array( $label, $missing, true ) ) {
+					$missing[] = $label;
+				}
+				return '<span style="background-color:#fee2e2;color:#b91c1c;font-weight:bold">[missing: ' . esc_html( $label ) . ']</span>';
+			}
+			return esc_html( $val );
 		}, $html );
 	}
 
@@ -3647,6 +3697,14 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			$recipients = json_decode( $recipients, true );
 		}
 		$recipients = array_values( (array) $recipients );
+		$missing_signers = array();
+		foreach ( $recipients as $i => $r ) {
+			$n = trim( (string) ( $r['name'] ?? '' ) );
+			$e = trim( (string) ( $r['email'] ?? '' ) );
+			if ( '' === $n || ! is_email( $e ) ) {
+				$missing_signers[] = sprintf( 'Signer %d %s', $i + 1, '' === $n ? ( is_email( $e ) ? 'name' : 'name and email' ) : 'email' );
+			}
+		}
 		foreach ( $recipients as $i => $r ) { // a preview doesn't need real signer details
 			$recipients[ $i ]['name']  = '' !== trim( (string) ( $r['name'] ?? '' ) ) ? $r['name'] : 'Signer ' . ( $i + 1 );
 			$recipients[ $i ]['email'] = is_email( (string) ( $r['email'] ?? '' ) ) ? $r['email'] : 'signer' . ( $i + 1 ) . '@example.com';
@@ -3677,6 +3735,10 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 		nocache_headers();
 		header( 'Content-Type: application/pdf' );
 		header( 'Content-Disposition: inline; filename="' . $name . '"' );
+		// Missing values for the send screen's preview summary (JSON array of labels).
+		$missing = array_values( array_unique( array_merge( $missing_signers, (array) ( $res['missing'] ?? array() ) ) ) );
+		header( 'X-AJ-Missing: ' . wp_json_encode( $missing ) );
+		header( 'Access-Control-Expose-Headers: X-AJ-Missing' );
 		header( 'Content-Length: ' . strlen( $res['preview_pdf'] ) );
 		echo $res['preview_pdf']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 		exit;
@@ -3972,6 +4034,13 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			.ajra-es .ajra-tpl-detail{flex-basis:100%;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;font-size:12px}
 			#ajra-es-modal{display:none;position:fixed;inset:0;z-index:100000;background:rgba(15,23,42,.6);align-items:center;justify-content:center;padding:24px}
 			#ajra-es-modal.on{display:flex}
+			#ajra-es-pvbox{margin-top:12px;border:1px solid #dcdcde;border-radius:8px;overflow:hidden}
+			#ajra-es-pvbox .pvh{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#f8fafc;border-bottom:1px solid #e2e8f0}
+			#ajra-es-pvbox .pvh strong{flex:1}
+			#ajra-es-pvbox .pvs{padding:8px 12px;font-size:12px;line-height:1.6;border-bottom:1px solid #e2e8f0}
+			#ajra-es-pvbox .pvm{color:#b91c1c;font-weight:600}
+			#ajra-es-pvbox .pvok{color:#15803d;font-weight:600}
+			#ajra-es-pvbox iframe{display:block;width:100%;height:80vh;border:0;background:#fff}
 			#ajra-es-modal .ajra-box{background:#fff;border-radius:10px;width:min(980px,100%);height:min(90vh,900px);display:flex;flex-direction:column;overflow:hidden}
 			#ajra-es-modal .ajra-mbar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #dcdcde}
 			#ajra-es-modal .ajra-mbar strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -4120,6 +4189,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 							<button type="button" class="button button-primary" id="ajra-es-send" disabled><?php esc_html_e( 'Send for signature', 'ajcore-ra' ); ?></button>
 						</div>
 					</div>
+					<div id="ajra-es-pvbox" style="display:none"></div>
 				</div>
 			<?php endif; ?>
 
@@ -4752,8 +4822,8 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 				var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0], layout = tplLayout.length ? tplLayout : ( t && t.layout ? t.layout : [] ), names = [], box2 = $( 'ajra-es-vars' );
 				layout.forEach( function ( f ) { String( f.fill || '' ).replace( /\{\{\s*ask\.([a-z0-9_]+)\s*\}\}/gi, function ( m, n ) { n = n.toLowerCase(); if ( names.indexOf( n ) < 0 ) { names.push( n ); } return m; } ); } );
 				// Document forms ask in the text too: {{ask.x}} and the Rentec-style %lease_end_date% (an ask with a default).
-				String( t && 'doc' === t.kind ? t.body || '' : '' ).replace( /\{\{\s*ask\.([a-z0-9_]+)\s*\}\}|%(lease_end_date)%/gi, function ( m, a, b ) { var n = String( a || b ).toLowerCase(); if ( names.indexOf( n ) < 0 ) { names.push( n ); } return m; } );
-				var askDefaults = { lease_end_date: 'Default: current period end' };
+				String( t && 'doc' === t.kind ? t.body || '' : '' ).replace( /\{\{\s*ask\.([a-z0-9_]+)\s*\}\}|%(lease_end_date|lease_begin_date|rent_amount)%/gi, function ( m, a, b ) { var n = String( a || b ).toLowerCase(); if ( names.indexOf( n ) < 0 ) { names.push( n ); } return m; } );
+				var askDefaults = { lease_end_date: 'Default: current period end', lease_begin_date: 'Default: subscription start (MM/DD/YYYY)', rent_amount: 'Default: subscription amount' };
 				box2.style.display = names.length ? '' : 'none';
 				box2.innerHTML = names.map( function ( n ) { return '<label>' + esc( n.replace( /_/g, ' ' ).replace( /^./, function ( c ) { return c.toUpperCase(); } ) ) + '</label><input type="text" class="ajra-es-var" data-n="' + esc( n ) + '" value="' + esc( varVals[ n ] || '' ) + '"' + ( askDefaults[ n ] ? ' placeholder="' + esc( askDefaults[ n ] ) + '"' : '' ) + '>'; } ).join( '' );
 				box2.querySelectorAll( '.ajra-es-var' ).forEach( function ( i ) { i.addEventListener( 'input', function () { varVals[ i.getAttribute( 'data-n' ) ] = i.value; queueRefresh(); } ); } );
@@ -4874,6 +4944,24 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			}
 			try { var resumeId = window.sessionStorage.getItem( 'ajra_es_resume' ); if ( resumeId ) { window.sessionStorage.removeItem( 'ajra_es_resume' ); loadDraft( resumeId ); } } catch ( e ) { /* convenience only */ }
 
+			// Preview shown under the form (not a popup): who signs, what is still missing, then the PDF.
+			var lastMissing = [], pvUrl = '';
+			function showInlinePreview( url, missing ) {
+				var pv = $( 'ajra-es-pvbox' ), roles = currentTemplateRecipients(), rec = readRecipients();
+				if ( pvUrl ) { URL.revokeObjectURL( pvUrl ); }
+				pvUrl = url; lastMissing = missing || [];
+				var signers = rec.map( function ( r, i ) {
+					var role = ( roles[ i ] && roles[ i ].role ) || ( 'Signer ' + ( i + 1 ) );
+					return '<b>' + esc( role ) + ':</b> ' + ( r.name ? esc( r.name ) : '<span class="pvm">no name</span>' ) + ' ' + ( r.email ? '&lt;' + esc( r.email ) + '&gt;' : '<span class="pvm">no email</span>' );
+				} ).join( ' &nbsp;·&nbsp; ' );
+				pv.innerHTML = '<div class="pvh"><strong>Preview — not sent</strong><a class="button button-small" target="_blank" rel="noopener" href="' + url + '">Open in new tab</a><button type="button" class="button button-small" id="ajra-es-pvclose">Close</button></div>' +
+					'<div class="pvs"><div>Signers: ' + ( signers || '<span class="pvm">none</span>' ) + '</div>' +
+					( lastMissing.length ? '<div class="pvm">Missing: ' + lastMissing.map( esc ).join( ', ' ) + '</div>' : '<div class="pvok">All fields filled</div>' ) + '</div>' +
+					'<iframe title="Preview" src="' + url + '"></iframe>';
+				pv.style.display = '';
+				$( 'ajra-es-pvclose' ).addEventListener( 'click', function () { pv.style.display = 'none'; pv.innerHTML = ''; lastMissing = []; } );
+				pv.scrollIntoView( { behavior: 'smooth', block: 'start' } );
+			}
 			if ( $( 'ajra-es-preview' ) ) { $( 'ajra-es-preview' ).addEventListener( 'click', function () {
 				var btn = this, rec = readRecipients(), headers = { 'X-WP-Nonce': nonce }, opt;
 				err.style.display = 'none';
@@ -4893,12 +4981,14 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 				btn.disabled = true; btn.textContent = 'Building…';
 				fetch( base + '/preview-filled', opt ).then( function ( r ) {
 					if ( ( r.headers.get( 'Content-Type' ) || '' ).indexOf( 'application/pdf' ) < 0 ) { return r.json().then( function ( d ) { throw new Error( d.message || 'Preview failed' ); } ); }
-					return r.blob();
-				} ).then( function ( blob ) { showPreview( 'Preview — not sent', { mode: 'pdf', url: URL.createObjectURL( blob ) } ); } )
+					var miss = []; try { miss = JSON.parse( r.headers.get( 'X-AJ-Missing' ) || '[]' ) || []; } catch ( e ) { miss = []; }
+					return r.blob().then( function ( blob ) { return { blob: blob, missing: miss }; } );
+				} ).then( function ( res ) { showInlinePreview( URL.createObjectURL( res.blob ), res.missing ); } )
 					.catch( function ( e ) { err.style.display = 'block'; err.textContent = e.message; } )
 					.finally( function () { btn.textContent = 'Preview'; updateSend(); } );
 			} ); }
 			send.addEventListener( 'click', function () {
+				if ( lastMissing.length && ! window.confirm( 'The last preview is missing: ' + lastMissing.join( ', ' ) + '.\n\nSend anyway?' ) ) { return; }
 				err.style.display = 'none';
 				function fail( m ) { err.style.display = 'block'; err.textContent = m; updateSend(); send.textContent = 'Send for signature'; }
 				var rec = readRecipients(), exp = $( 'ajra-es-expires' ), msg = $( 'ajra-es-message' ), ord = $( 'ajra-es-order' ), req;
