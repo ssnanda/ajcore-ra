@@ -18,7 +18,7 @@ if ( ! defined( 'WPINC' ) ) {
 
 return array(
 	'ajt_virtual_office_agreement' => array(
-		'rev'             => 3,
+		'rev'             => 5,
 		// Text fingerprint of the 0.5.13 document (installed before edit tracking) so
 		// an untouched copy of it can still be upgraded.
 		'legacy_text_md5' => 'ec5a9a3b85bafafe1b9fe7e610938c48',
