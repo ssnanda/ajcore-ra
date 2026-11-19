@@ -1350,6 +1350,14 @@ class AJCore_RA_Esign {
 			'subscription.end_date'  => 'Subscription — current period end',
 			'subscription.next_billing_date' => 'Subscription — next billing date',
 			'subscription.status'    => 'Subscription — status',
+			'tenant_company'         => 'Agreement — %tenant_company%',
+			'address'                => 'Agreement — %address%',
+			'city'                   => 'Agreement — %city%',
+			'tenant_state'           => 'Agreement — %tenant_state%',
+			'zip'                    => 'Agreement — %zip%',
+			'lease_begin_date'       => 'Agreement — %lease_begin_date%',
+			'lease_end_date'         => 'Agreement — %lease_end_date% (entered when sending)',
+			'rent_amount'            => 'Agreement — %rent_amount%',
 		);
 		if ( class_exists( 'AJCore_RA_Business_Profile' ) ) {
 			foreach ( AJCore_RA_Business_Profile::fields() as $k => $def ) {
@@ -1575,6 +1583,16 @@ class AJCore_RA_Esign {
 		foreach ( $vars as $k => $val ) {
 			$v[ 'ask.' . sanitize_key( (string) $k ) ] = sanitize_text_field( (string) $val );
 		}
+		// Rentec-compatible agreement aliases. These deliberately remain flat so the
+		// source document can use familiar placeholders such as %zip%.
+		$v['tenant_company']   = (string) ( ( $v['business.name'] ?? '' ) ?: $v['customer.business_name'] ?: $v['customer.name'] );
+		$v['address']          = (string) $v['customer.address.line1'];
+		$v['city']             = (string) $v['customer.address.city'];
+		$v['tenant_state']     = (string) $v['customer.address.state'];
+		$v['zip']              = (string) $v['customer.address.zip'];
+		$v['lease_begin_date'] = (string) $v['subscription.start_date'];
+		$v['lease_end_date']   = (string) ( $v['ask.lease_end_date'] ?? '' );
+		$v['rent_amount']      = (string) $v['subscription.amount'];
 		$v['company']    = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
 		return $v;
 	}
@@ -1589,10 +1607,13 @@ class AJCore_RA_Esign {
 		return false === $timestamp ? $value : wp_date( 'm/d/Y', $timestamp );
 	}
 
-	/** Fills {{tokens}} in $text; $preview keeps unreplaced tokens visible. */
+	/** Fills {{tokens}} and Rentec-style %tokens%; $preview keeps them visible. */
 	private function merge_text( $text, array $values, $preview = false ) {
-		return preg_replace_callback( '/\{\{\s*([a-z0-9_.]+)\s*\}\}/i', static function ( $m ) use ( $values, $preview ) {
+		return preg_replace_callback( '/\{\{\s*([a-z0-9_.]+)\s*\}\}|%([a-z0-9_.]+)%/i', static function ( $m ) use ( $values, $preview ) {
 			$key = strtolower( $m[1] );
+			if ( '' === $key ) {
+				$key = strtolower( $m[2] );
+			}
 			if ( $preview ) {
 				return $m[0];
 			}
@@ -1769,13 +1790,13 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 		return (string) $out;
 	}
 
-	/** Fills {{tokens}} in rich HTML; values are HTML-escaped. */
+	/** Fills {{tokens}} and Rentec-style %tokens% in rich HTML. */
 	private function merge_html( $html, array $values, $preview = false ) {
-		return preg_replace_callback( '/\{\{\s*([a-z0-9_.]+)\s*\}\}/i', static function ( $m ) use ( $values, $preview ) {
+		return preg_replace_callback( '/\{\{\s*([a-z0-9_.]+)\s*\}\}|%([a-z0-9_.]+)%/i', static function ( $m ) use ( $values, $preview ) {
 			if ( $preview ) {
 				return $m[0];
 			}
-			$key = strtolower( $m[1] );
+			$key = strtolower( '' !== $m[1] ? $m[1] : $m[2] );
 			return isset( $values[ $key ] ) ? esc_html( (string) $values[ $key ] ) : '';
 		}, $html );
 	}
