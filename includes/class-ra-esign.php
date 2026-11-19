@@ -1082,7 +1082,7 @@ class AJCore_RA_Esign {
 	}
 
 	/**
-	 * Installs plugin-owned PDF forms once without replacing a form an administrator
+	 * Installs plugin-owned forms once without replacing a form an administrator
 	 * has already edited. Future agreements only need a PDF plus one manifest entry.
 	 *
 	 * @param array<string,array> $list Saved templates keyed by template id.
@@ -1104,21 +1104,36 @@ class AJCore_RA_Esign {
 			if ( 0 !== strpos( $id, 'ajt_' ) || isset( $list[ $id ] ) || ! is_array( $definition ) ) {
 				continue;
 			}
+			$kind = 'doc' === ( $definition['kind'] ?? 'pdf' ) ? 'doc' : 'pdf';
 			$asset = basename( (string) ( $definition['asset'] ?? '' ) );
 			$source = dirname( __DIR__ ) . '/assets/forms/' . $asset;
-			if ( '' === $asset || ! is_readable( $source ) || ! is_dir( $dir ) || ! is_writable( $dir ) ) {
+			if ( '' === $asset || ! is_readable( $source ) ) {
 				continue;
 			}
-			$stored = $id . '.pdf';
-			if ( ! copy( $source, $dir . '/' . $stored ) ) {
-				continue;
+			$stored = '';
+			$body   = '';
+			if ( 'doc' === $kind ) {
+				$body = self::clean_doc_html( (string) file_get_contents( $source ) );
+				if ( '' === trim( $body ) ) {
+					continue;
+				}
+			} else {
+				if ( ! is_dir( $dir ) || ! is_writable( $dir ) ) {
+					continue;
+				}
+				$stored = $id . '.pdf';
+				if ( ! copy( $source, $dir . '/' . $stored ) ) {
+					continue;
+				}
 			}
 			$list[ $id ] = array(
 				'id'       => $id,
 				'title'    => mb_substr( sanitize_text_field( (string) ( $definition['title'] ?? $asset ) ), 0, 191 ),
 				'file'     => $stored,
-				'filename' => sanitize_file_name( $asset ),
-				'kind'     => 'pdf',
+				'filename' => sanitize_file_name( (string) ( $definition['filename'] ?? $asset ) ),
+				'kind'     => $kind,
+				'body'     => $body,
+				'format'   => 'html',
 				'signers'  => array_values( array_map( 'sanitize_text_field', (array) ( $definition['signers'] ?? array( 'Signer' ) ) ) ),
 				'page'     => max( 0, (int) ( $definition['page'] ?? 0 ) ),
 				'layout'   => self::clean_layout( $definition['layout'] ?? array() ),
@@ -1302,8 +1317,11 @@ class AJCore_RA_Esign {
 			if ( ! $tmp || false === file_put_contents( $tmp, $pdf ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
 				return new WP_Error( 'tmp_failed', __( 'Could not write the generated PDF.', 'ajcore-ra' ), array( 'status' => 500 ) );
 			}
+			if ( ! empty( $meta['layout'] ) && empty( $options['layout'] ) ) {
+				$options['layout'] = $meta['layout'];
+			}
 			$options['sig_x'] = 0.08;
-			$options['sig_y'] = 0.30; // generated signature page: boxes in the upper-middle, clear of text
+			$options['sig_y'] = 0.30; // fallback when a built document has no saved signature layout
 			$result = $this->send_esign_pdf( array( 'tmp_name' => $tmp, 'name' => (string) $meta['filename'], 'error' => 0 ), (string) $meta['title'], $stripe_customer_id, $recipients, 0, $options );
 			@unlink( $tmp ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink
 			return $result;
