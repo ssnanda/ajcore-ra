@@ -719,7 +719,11 @@ class AJCore_RA_Esign {
 		}
 
 		if ( 0 === strpos( $template_id, 'ajt_' ) ) {
-			return $this->send_local_template( $template_id, $stripe_customer_id, $recipients, $options );
+			$result = $this->send_local_template( $template_id, $stripe_customer_id, $recipients, $options );
+			if ( ! is_wp_error( $result ) && empty( $options['preview_only'] ) ) {
+				self::remember_signers( $template_id, $recipients );
+			}
+			return $result;
 		}
 		if ( 0 !== strpos( $template_id, 'tpl_' ) ) {
 			return $this->send_esign_document_legacy( absint( $template_id ), $stripe_customer_id, $recipients );
@@ -1212,10 +1216,47 @@ class AJCore_RA_Esign {
 		return md5( (string) wp_json_encode( array( (string) ( $meta['body'] ?? '' ), $meta['layout'] ?? array(), $meta['signers'] ?? array(), (int) ( $meta['page'] ?? 0 ) ) ) );
 	}
 
+	const SIGNER_MEMORY_OPTION = 'ajcore_ra_esign_signer_memory'; // template id => party => {name, email}
+
+	/**
+	 * Remembers who signed as party 2+ (e.g. the Provider) so the next send of that form
+	 * starts filled in. Party 1 is the customer and always comes from the chosen customer.
+	 */
+	private static function remember_signers( $template_id, array $recipients ) {
+		$memory = get_option( self::SIGNER_MEMORY_OPTION, array() );
+		$memory = is_array( $memory ) ? $memory : array();
+		$keep   = array();
+		foreach ( $recipients as $r ) {
+			$party = (int) ( $r['party'] ?? 0 );
+			if ( $party > 1 && ! empty( $r['email'] ) ) {
+				$keep[ $party ] = array( 'name' => sanitize_text_field( (string) ( $r['name'] ?? '' ) ), 'email' => sanitize_email( (string) $r['email'] ) );
+			}
+		}
+		if ( $keep ) {
+			$memory[ (string) $template_id ] = $keep;
+			update_option( self::SIGNER_MEMORY_OPTION, $memory, false );
+		}
+	}
+
 	private function local_template_shape( array $meta ) {
 		$recipients = array();
+		$memory     = get_option( self::SIGNER_MEMORY_OPTION, array() );
+		$remember   = is_array( $memory ) && isset( $memory[ (string) $meta['id'] ] ) && is_array( $memory[ (string) $meta['id'] ] ) ? $memory[ (string) $meta['id'] ] : array();
+		$me         = function_exists( 'wp_get_current_user' ) ? wp_get_current_user() : null;
 		foreach ( array_values( (array) $meta['signers'] ) as $i => $role ) {
-			$recipients[] = array( 'party' => $i + 1, 'name' => '', 'email' => '', 'completedAt' => '', 'viewedAt' => '', 'role' => (string) $role );
+			$party = $i + 1;
+			$name  = '';
+			$email = '';
+			if ( $party > 1 ) { // countersigner (Provider): last person used on this form, else the staff member sending it
+				if ( ! empty( $remember[ $party ]['email'] ) ) {
+					$name  = (string) ( $remember[ $party ]['name'] ?? '' );
+					$email = (string) $remember[ $party ]['email'];
+				} elseif ( $me && $me->exists() ) {
+					$name  = (string) $me->display_name;
+					$email = (string) $me->user_email;
+				}
+			}
+			$recipients[] = array( 'party' => $party, 'name' => $name, 'email' => $email, 'completedAt' => '', 'viewedAt' => '', 'role' => (string) $role );
 		}
 		return array(
 			'id'         => (string) $meta['id'],
@@ -4668,6 +4709,17 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			function readRecipients() {
 				return Array.prototype.map.call( box.querySelectorAll( '.ajra-es-r' ), function ( r, i ) { return { party: parseInt( r.getAttribute( 'data-party' ), 10 ) || i + 1, name: r.querySelector( '.n' ).value.trim(), email: r.querySelector( '.e' ).value.trim() }; } );
 			}
+			// A draft keeps what was typed; a signer row it saved empty (e.g. the Provider) takes the form's default.
+			function withSignerDefaults( saved, defs ) {
+				if ( ! saved || ! saved.length ) { return defs; }
+				return saved.map( function ( r, i ) {
+					var party = r.party || i + 1, d = defs.filter( function ( x ) { return ( x.party || 0 ) === party; } )[0];
+					if ( ! d ) { return r; }
+					var out = Object.assign( {}, r, { role: r.role || d.role } );
+					if ( ! r.name && ! r.email ) { out.name = d.name || ''; out.email = d.email || ''; }
+					return out;
+				} );
+			}
 			function currentTemplateRecipients() {
 				var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0];
 				return t ? t.recipients : [];
@@ -4811,7 +4863,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 						tpl.value = d.template_id || '';
 						renderRecipients( currentTemplateRecipients() ); syncTplFields();
 						tplLayout = d.layout || [];
-						renderRecipients( d.recipients && d.recipients.length ? d.recipients : currentTemplateRecipients() );
+						renderRecipients( withSignerDefaults( d.recipients, currentTemplateRecipients() ) );
 						renderVars(); refreshInline();
 					}
 					if ( $( 'ajra-es-expires' ) ) { $( 'ajra-es-expires' ).value = d.expires || 30; $( 'ajra-es-order' ).checked = !! d.ordered; }
