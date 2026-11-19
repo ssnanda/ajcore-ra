@@ -1731,6 +1731,20 @@ class AJCore_RA_Esign {
 		}
 		$v['rent_amount']      = '' !== $typed_fee ? $typed_fee : (string) $v['subscription.amount'];
 		$v['company']    = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
+		// Any field the sender edited on the send screen ("rent_amount", "tenant_company",
+		// "customer.name", …) replaces the customer's value. Blank = keep the customer's value.
+		// Signer fields always come from the signer rows.
+		foreach ( $vars as $k => $val ) {
+			$key = strtolower( (string) preg_replace( '/[^a-z0-9_.]/i', '', (string) $k ) );
+			$val = trim( sanitize_text_field( (string) $val ) );
+			if ( '' === $val || '' === $key || ! array_key_exists( $key, $v ) || 0 === strpos( $key, 'signer' ) ) {
+				continue;
+			}
+			if ( 'rent_amount' === $key && is_numeric( str_replace( array( '$', ',' ), '', $val ) ) ) {
+				$val = '$' . number_format_i18n( (float) str_replace( array( '$', ',' ), '', $val ), 2 );
+			}
+			$v[ $key ] = $val;
+		}
 		return $v;
 	}
 
@@ -1771,6 +1785,7 @@ class AJCore_RA_Esign {
 		if ( ( $meta['format'] ?? 'text' ) === 'html' ) {
 			$doc = array(
 				'roles'   => array_values( (array) ( $meta['signers'] ?? array() ) ),
+				'names'   => array_map( static function ( $r ) { return trim( (string) ( $r['name'] ?? '' ) ); }, array_values( $recipients ) ),
 				'outline' => $preview || $outline,
 			);
 			$this->preview_missing = array();
@@ -2019,9 +2034,15 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 		}
 		$roles   = array_values( (array) ( $doc['roles'] ?? array() ) );
 		$outline = ! empty( $doc['outline'] );
+		$names   = array_values( (array) ( $doc['names'] ?? array() ) );
 		$role_of = static function ( $party ) use ( $roles ) {
 			/* translators: %d: signer number */
 			return (string) ( $roles[ $party - 1 ] ?? sprintf( __( 'Signer %d', 'ajcore-ra' ), $party ) );
+		};
+		// Previews name the person behind each box ("Client: Operation Jump") so it is clear who signs where.
+		$who_of  = static function ( $party ) use ( $role_of, $names, $outline ) {
+			$name = (string) ( $names[ $party - 1 ] ?? '' );
+			return $role_of( $party ) . ( $outline && '' !== $name ? ': ' . $name : '' );
 		};
 
 		// Footer initials: remember the signer, drop the marker (and a paragraph holding only it).
@@ -2038,7 +2059,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 		$has_sig = false;
 		$html    = preg_replace_callback(
 			'/\[\[\s*(signature|initials|date|text)\s*:\s*(\d{1,2})\s*\]\]/i',
-			static function ( $m ) use ( &$seq, &$has_sig, $sizes, $outline, $role_of ) {
+			static function ( $m ) use ( &$seq, &$has_sig, $sizes, $outline, $who_of ) {
 				$type  = strtolower( $m[1] );
 				$party = max( 1, (int) $m[2] );
 				$has_sig = $has_sig || 'signature' === $type;
@@ -2047,7 +2068,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 				$label = '';
 				if ( $outline ) {
 					$style .= ';background-color:#eef3ff;border:1px dashed #3858e9';
-					$label  = esc_html( ucfirst( $type ) . ' · ' . $role_of( $party ) );
+					$label  = esc_html( ucfirst( $type ) . ' · ' . $who_of( $party ) );
 				}
 				return '<span data-ajf="' . $type . ':' . $party . ':' . ( ++$seq ) . '" style="' . $style . '">' . $label . '</span>';
 			},
@@ -2122,6 +2143,9 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 				$bx    = $pw - $margin - $bw;
 				$by    = $ph - 52;
 				$label = sprintf( /* translators: %s: signer role, e.g. Client */ __( '%s initials', 'ajcore-ra' ), $role_of( $every ) );
+				if ( $outline && '' !== (string) ( $names[ $every - 1 ] ?? '' ) ) {
+					$label .= ': ' . $names[ $every - 1 ]; // preview: "Client initials: Operation Jump"
+				}
 				$lx    = $bx - 6 - $metrics->getTextWidth( $label, $font, 8 );
 				for ( $pg = 1, $n = (int) $canvas->get_page_count(); $pg <= $n; $pg++ ) {
 					if ( ! isset( $skip[ $pg ] ) ) {
@@ -4034,6 +4058,10 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			.ajra-es .ajra-tpl-detail{flex-basis:100%;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;font-size:12px}
 			#ajra-es-modal{display:none;position:fixed;inset:0;z-index:100000;background:rgba(15,23,42,.6);align-items:center;justify-content:center;padding:24px}
 			#ajra-es-modal.on{display:flex}
+			.ajra-es #ajra-es-vars{flex-basis:100%;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:6px 12px;margin-top:4px}
+			.ajra-es #ajra-es-vars .ajra-vars-h{grid-column:1/-1;font-weight:600;color:#475569;margin:0}
+			.ajra-es .ajra-var span{display:block;font-size:11px;color:#64748b;margin-bottom:2px}.ajra-es .ajra-var input{width:100%}
+			.ajra-es .ajra-var.edited input{border-color:#2563eb;background:#eff6ff}.ajra-es .ajra-var.miss input{border-color:#dc2626;background:#fef2f2}
 			#ajra-es-pvbox{margin-top:12px;border:1px solid #dcdcde;border-radius:8px;overflow:hidden}
 			#ajra-es-pvbox .pvh{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#f8fafc;border-bottom:1px solid #e2e8f0}
 			#ajra-es-pvbox .pvh strong{flex:1}
@@ -4818,17 +4846,52 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			document.querySelectorAll( '.ajra-es a[data-mode]' ).forEach( function ( a ) { a.addEventListener( 'click', function () { setMode( a.getAttribute( 'data-mode' ) ); } ); } );
 			var tplLayout = [];
 			var varVals = {};
-			function renderVars() {
-				var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0], layout = tplLayout.length ? tplLayout : ( t && t.layout ? t.layout : [] ), names = [], box2 = $( 'ajra-es-vars' );
-				layout.forEach( function ( f ) { String( f.fill || '' ).replace( /\{\{\s*ask\.([a-z0-9_]+)\s*\}\}/gi, function ( m, n ) { n = n.toLowerCase(); if ( names.indexOf( n ) < 0 ) { names.push( n ); } return m; } ); } );
-				// Document forms ask in the text too: {{ask.x}} and the Rentec-style %lease_end_date% (an ask with a default).
-				String( t && 'doc' === t.kind ? t.body || '' : '' ).replace( /\{\{\s*ask\.([a-z0-9_]+)\s*\}\}|%(lease_end_date|lease_begin_date|rent_amount)%/gi, function ( m, a, b ) { var n = String( a || b ).toLowerCase(); if ( names.indexOf( n ) < 0 ) { names.push( n ); } return m; } );
-				var askDefaults = { lease_end_date: 'Default: current period end', lease_begin_date: 'Default: subscription start (MM/DD/YYYY)', rent_amount: 'Default: subscription amount' };
-				box2.style.display = names.length ? '' : 'none';
-				box2.innerHTML = names.map( function ( n ) { return '<label>' + esc( n.replace( /_/g, ' ' ).replace( /^./, function ( c ) { return c.toUpperCase(); } ) ) + '</label><input type="text" class="ajra-es-var" data-n="' + esc( n ) + '" value="' + esc( varVals[ n ] || '' ) + '"' + ( askDefaults[ n ] ? ' placeholder="' + esc( askDefaults[ n ] ) + '"' : '' ) + '>'; } ).join( '' );
-				box2.querySelectorAll( '.ajra-es-var' ).forEach( function ( i ) { i.addEventListener( 'input', function () { varVals[ i.getAttribute( 'data-n' ) ] = i.value; queueRefresh(); } ); } );
+			// Every variable the chosen form uses, filled with the chosen customer's values. Editing one
+			// overrides it for this document only (sent as vars); clearing it goes back to the customer's value.
+			var custVals = {}, custValsFor = '';
+			var VAR_LABELS = { tenant_company: 'Client name', address: 'Client street address', city: 'Client city', tenant_state: 'Client state', zip: 'Client ZIP', lease_begin_date: 'Start date', lease_end_date: 'End date', rent_amount: 'Monthly service fee' };
+			function varLabel( k ) {
+				if ( VAR_LABELS[ k ] ) { return VAR_LABELS[ k ]; }
+				if ( 0 === k.indexOf( 'ask.' ) ) { return k.slice( 4 ).replace( /_/g, ' ' ).replace( /^./, function ( c ) { return c.toUpperCase(); } ); }
+				return mergeFields[ k ] ? String( mergeFields[ k ] ).replace( /\s*\(.*\)\s*$/, '' ) : k;
 			}
-			function readVars() { var o = {}; document.querySelectorAll( '.ajra-es-var' ).forEach( function ( i ) { o[ i.getAttribute( 'data-n' ) ] = i.value; } ); return o; }
+			function formVarKeys() {
+				var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0], layout = tplLayout.length ? tplLayout : ( t && t.layout ? t.layout : [] ), keys = [];
+				var text = ( t && 'doc' === t.kind ? String( t.body || '' ) : '' ) + ' ' + layout.map( function ( f ) { return String( f.fill || '' ); } ).join( ' ' );
+				text.replace( /\{\{\s*([a-z0-9_.]+)\s*\}\}|%([a-z0-9_.]+)%/gi, function ( m, a, b ) {
+					var k = String( a || b ).toLowerCase();
+					if ( b && ! mergeFields[ k ] && ! ( k in custVals ) ) { return m; } // a %word% that isn't a field
+					if ( 0 === k.indexOf( 'signer' ) ) { return m; }                      // from the signer rows
+					if ( keys.indexOf( k ) < 0 ) { keys.push( k ); }
+					return m;
+				} );
+				return keys;
+			}
+			function varName( k ) { return 0 === k.indexOf( 'ask.' ) ? k.slice( 4 ) : k; } // name sent in vars
+			function loadCustVals() {
+				if ( ! cust.value ) { custVals = {}; custValsFor = ''; renderVars(); return; }
+				if ( custValsFor === cust.value ) { renderVars(); return; }
+				var want = cust.value;
+				fetch( base + '/merge-values', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-WP-Nonce': nonce }, body: JSON.stringify( { stripe_customer_id: want, recipients: readRecipients(), vars: '{}' } ) } )
+					.then( function ( r ) { return r.json(); } ).then( function ( d ) { if ( want === cust.value ) { custVals = d || {}; custValsFor = want; renderVars(); } } )
+					.catch( function () { /* fields stay editable; preview shows what is missing */ } );
+			}
+			function renderVars() {
+				var box2 = $( 'ajra-es-vars' ), keys = 'template' === mode ? formVarKeys() : [];
+				box2.style.display = keys.length ? '' : 'none';
+				box2.innerHTML = keys.length ? '<label class="ajra-vars-h">Form fields' + ( cust.value ? ' — prefilled for this customer; edit to change this document only' : ' — pick a customer to prefill' ) + '</label>' + keys.map( function ( k ) {
+					var n = varName( k ), edited = Object.prototype.hasOwnProperty.call( varVals, n ), val = edited ? varVals[ n ] : ( custVals[ k ] || '' );
+					return '<div class="ajra-var' + ( edited ? ' edited' : '' ) + ( '' === String( val ).trim() ? ' miss' : '' ) + '"><span>' + esc( varLabel( k ) ) + '</span><input type="text" class="ajra-es-var" data-n="' + esc( n ) + '" data-k="' + esc( k ) + '" value="' + esc( val ) + '" placeholder="' + ( cust.value ? 'missing' : '' ) + '"></div>';
+				} ).join( '' ) : '';
+				box2.querySelectorAll( '.ajra-es-var' ).forEach( function ( i ) { i.addEventListener( 'input', function () {
+					var n = i.getAttribute( 'data-n' ), k = i.getAttribute( 'data-k' ), wrap = i.parentNode;
+					if ( i.value === ( custVals[ k ] || '' ) || '' === i.value.trim() ) { delete varVals[ n ]; } else { varVals[ n ] = i.value; }
+					wrap.classList.toggle( 'edited', Object.prototype.hasOwnProperty.call( varVals, n ) );
+					wrap.classList.toggle( 'miss', '' === i.value.trim() && ! custVals[ k ] );
+					queueRefresh();
+				} ); } );
+			}
+			function readVars() { return Object.assign( {}, varVals ); } // only what the sender changed
 			function syncTplFields() {
 				var t = templates.filter( function ( x ) { return String( x.id ) === tpl.value; } )[0];
 				tplLayout = [];
@@ -4836,6 +4899,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			}
 			tpl.addEventListener( 'change', function () { renderRecipients( currentTemplateRecipients() ); syncTplFields(); refreshInline(); } );
 			cust.addEventListener( 'change', updateSend );
+			cust.addEventListener( 'change', loadCustVals );
 			var upLayout = [], inlineEd = null, inlineHost = $( 'ajra-es-inline' ), inlineSeq = 0, reqside = $( 'ajra-es-reqside' ), reqHome = reqside.parentNode;
 			function rehome() { if ( reqside.parentNode !== reqHome ) { reqHome.appendChild( reqside ); } } // back into the card before the editor is torn down
 			// Live values for the "Preview with values" checkbox: every merge field resolved for the chosen customer.
@@ -4918,7 +4982,8 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 						if ( ! Array.prototype.some.call( cust.options, function ( o ) { return o.value === d.customer_id; } ) ) { var c0 = customers.filter( function ( x ) { return x.id === d.customer_id; } )[0]; if ( c0 ) { var o0 = document.createElement( 'option' ); o0.value = c0.id; o0.textContent = c0.name + ' (' + c0.email + ')'; cust.appendChild( o0 ); } }
 						cust.value = d.customer_id; custLabel();
 					}
-					varVals = d.vars || {};
+					varVals = {}; Object.keys( d.vars || {} ).forEach( function ( k ) { if ( String( d.vars[ k ] ).trim() ) { varVals[ k ] = String( d.vars[ k ] ); } } );
+					loadCustVals();
 					if ( 'pdf' === d.mode ) {
 						$( 'ajra-es-title' ).value = d.title || ''; $( 'ajra-es-page' ).value = d.page || '';
 						upLayout = d.layout || [];
