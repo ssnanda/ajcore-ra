@@ -1089,7 +1089,7 @@ class AJCore_RA_Esign {
 	 * - Recorded but missing from the list: the admin deleted it, so it stays deleted.
 	 * - Present with an older 'rev': upgraded only while still unedited (its body +
 	 *   layout hash matches what was installed). 0.5.13 installs carry no hash, so
-	 *   they count as unedited while the body still matches the bundled HTML.
+	 *   they count as unedited while their text matches 'legacy_text_md5'.
 	 *
 	 * @param array<string,array> $list Saved templates keyed by template id.
 	 * @return array<string,array>
@@ -1121,7 +1121,7 @@ class AJCore_RA_Esign {
 				}
 				if ( ! empty( $current['bundled'] ) && (int) ( $current['bundled_rev'] ?? 1 ) < $rev ) {
 					$fresh = $this->build_bundled_template( $id, $definition, $rev );
-					if ( $fresh && $this->bundled_template_unedited( $current, $fresh ) ) {
+					if ( $fresh && $this->bundled_template_unedited( $current, $definition ) ) {
 						$fresh['created'] = (string) ( $current['created'] ?? $fresh['created'] );
 						$list[ $id ]      = $fresh;
 						$installed[ $id ] = $rev;
@@ -1198,12 +1198,14 @@ class AJCore_RA_Esign {
 	}
 
 	/** True while a saved bundled form still holds exactly what the plugin installed. */
-	private function bundled_template_unedited( array $current, array $fresh ) {
+	private function bundled_template_unedited( array $current, array $definition ) {
 		if ( ! empty( $current['bundled_hash'] ) ) {
 			return hash_equals( (string) $current['bundled_hash'], self::bundled_hash( $current ) );
 		}
-		// Installed by 0.5.13 (no hash yet): unedited while the document text is unchanged.
-		return 'doc' === ( $current['kind'] ?? 'pdf' ) && (string) ( $current['body'] ?? '' ) === (string) $fresh['body'];
+		// Installed by 0.5.13 (no hash yet): unedited while its text matches that release's document.
+		$legacy = (string) ( $definition['legacy_text_md5'] ?? '' );
+		return '' !== $legacy && 'doc' === ( $current['kind'] ?? 'pdf' )
+			&& hash_equals( $legacy, md5( trim( (string) preg_replace( '/\s+/u', ' ', html_entity_decode( strip_tags( (string) ( $current['body'] ?? '' ) ), ENT_QUOTES | ENT_HTML5, 'UTF-8' ) ) ) ) );
 	}
 
 	private static function bundled_hash( array $meta ) {
@@ -1367,7 +1369,8 @@ class AJCore_RA_Esign {
 		}
 		$meta = $all[ $template_id ];
 		if ( ( $meta['kind'] ?? 'pdf' ) === 'doc' ) {
-			$pdf = $this->render_doc_template( $meta, $stripe_customer_id, $recipients, false, isset( $options['vars'] ) && is_array( $options['vars'] ) ? $options['vars'] : array() );
+			$anchors = array();
+			$pdf     = $this->render_doc_template( $meta, $stripe_customer_id, $recipients, false, isset( $options['vars'] ) && is_array( $options['vars'] ) ? $options['vars'] : array(), $anchors, ! empty( $options['preview_only'] ) );
 			if ( is_wp_error( $pdf ) ) {
 				return $pdf;
 			}
@@ -1378,8 +1381,10 @@ class AJCore_RA_Esign {
 			if ( ! $tmp || false === file_put_contents( $tmp, $pdf ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
 				return new WP_Error( 'tmp_failed', __( 'Could not write the generated PDF.', 'ajcore-ra' ), array( 'status' => 500 ) );
 			}
-			if ( ! empty( $meta['layout'] ) && empty( $options['layout'] ) ) {
-				$options['layout'] = $meta['layout'];
+			// Boxes measured from [[signature:1]]-style anchors in the text, plus any placed by hand.
+			$placed = ! empty( $options['layout'] ) ? self::clean_layout( $options['layout'] ) : ( ! empty( $meta['layout'] ) ? self::clean_layout( $meta['layout'] ) : array() );
+			if ( $anchors || $placed ) {
+				$options['layout'] = array_merge( $anchors, $placed );
 			}
 			$options['sig_x'] = 0.08;
 			$options['sig_y'] = 0.30; // fallback when a built document has no saved signature layout
@@ -1465,6 +1470,8 @@ class AJCore_RA_Esign {
 			'mailbox.id_issuer'      => 'Mailbox — ID issuer',
 			'signer.name'            => 'Signer 1 — name',
 			'signer.email'           => 'Signer 1 — email',
+			'signer2.name'           => 'Signer 2 — name',
+			'signer2.email'          => 'Signer 2 — email',
 			'date'                   => 'Today (long date)',
 			'date.short'             => 'Today (numeric)',
 			'date.day'               => 'Today — day',
@@ -1652,6 +1659,10 @@ class AJCore_RA_Esign {
 			$v['signer.name']  = (string) ( $recipients[0]['name'] ?? '' );
 			$v['signer.email'] = (string) ( $recipients[0]['email'] ?? '' );
 		}
+		foreach ( array_slice( array_values( $recipients ), 1, 8 ) as $i => $r ) { // {{signer2.name}}, {{signer3.email}}, …
+			$v[ 'signer' . ( $i + 2 ) . '.name' ]  = (string) ( $r['name'] ?? '' );
+			$v[ 'signer' . ( $i + 2 ) . '.email' ] = (string) ( $r['email'] ?? '' );
+		}
 		$v['date']       = wp_date( 'F j, Y' );
 		$v['date.short'] = wp_date( 'm/d/Y' );
 		$v['date.day']   = wp_date( 'j' );
@@ -1705,10 +1716,15 @@ class AJCore_RA_Esign {
 	}
 
 	/** Merged PDF bytes for a document template. Last page is always a signature page. */
-	private function render_doc_template( array $meta, $stripe_customer_id, array $recipients, $preview = false, array $vars = array() ) {
-		$values = $this->merge_values( $stripe_customer_id, $recipients, $vars );
+	private function render_doc_template( array $meta, $stripe_customer_id, array $recipients, $preview = false, array $vars = array(), &$anchors = null, $outline = false ) {
+		$anchors = array();
+		$values  = $this->merge_values( $stripe_customer_id, $recipients, $vars );
 		if ( ( $meta['format'] ?? 'text' ) === 'html' ) {
-			return $this->build_html_pdf( (string) $meta['title'], $this->merge_html( (string) $meta['body'], $values, $preview ) );
+			$doc = array(
+				'roles'   => array_values( (array) ( $meta['signers'] ?? array() ) ),
+				'outline' => $preview || $outline,
+			);
+			return $this->build_html_pdf( (string) $meta['title'], $this->merge_html( (string) $meta['body'], $values, $preview ), $doc, $anchors );
 		}
 		$text = $this->merge_text( (string) $meta['body'], $values, $preview );
 		return self::build_text_pdf( (string) $meta['title'], $text, array() );
@@ -1887,16 +1903,66 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 		}, $html );
 	}
 
-	/** Rich HTML → PDF with the bundled dompdf (no remote fetches, no inline PHP); ends with a signature page. */
-	private function build_html_pdf( $title, $html ) {
+	/**
+	 * Rich HTML → PDF with the bundled dompdf (no remote fetches, no inline PHP).
+	 *
+	 * Signer boxes are anchors typed in the text, so the document can flow freely:
+	 *   [[signature:1]] [[initials:1]] [[date:2]] [[text:1]]  (type : signer number)
+	 *   [[initials-every-page:1]]  signer 1 initials in the footer of every page
+	 *                              except the page(s) where that signer signs.
+	 * Each anchor's real page and box are measured during the render and returned in
+	 * $anchors as layout fields (page fractions), so nothing depends on fixed page
+	 * numbers. A document with no [[signature:…]] anchor still gets the generic
+	 * signature page at the end, as before. $doc: roles (signer labels), outline
+	 * (draw dashed, labelled boxes for previews).
+	 */
+	private function build_html_pdf( $title, $html, array $doc = array(), &$anchors = null ) {
+		$anchors  = array();
 		$autoload = __DIR__ . '/lib/dompdf/autoload.inc.php';
-		if ( ! is_readable( $autoload ) ) {
+		if ( ! is_readable( $autoload ) || ! is_readable( __DIR__ . '/lib/dompdf/vendor/autoload.php' ) ) {
 			return new WP_Error( 'no_pdf_engine', __( 'The PDF engine (dompdf) is missing from the AJCore-RA plugin.', 'ajcore-ra' ), array( 'status' => 500 ) );
 		}
 		require_once $autoload;
 		if ( function_exists( 'wp_raise_memory_limit' ) ) {
 			wp_raise_memory_limit( 'admin' );
 		}
+		$roles   = array_values( (array) ( $doc['roles'] ?? array() ) );
+		$outline = ! empty( $doc['outline'] );
+		$role_of = static function ( $party ) use ( $roles ) {
+			/* translators: %d: signer number */
+			return (string) ( $roles[ $party - 1 ] ?? sprintf( __( 'Signer %d', 'ajcore-ra' ), $party ) );
+		};
+
+		// Footer initials: remember the signer, drop the marker (and a paragraph holding only it).
+		$every = 0;
+		if ( preg_match( '/\[\[\s*initials-every-page\s*:\s*(\d{1,2})\s*\]\]/i', $html, $em ) ) {
+			$every = max( 1, (int) $em[1] );
+		}
+		$html = preg_replace( '/<p[^>]*>\s*(?:\[\[\s*initials-every-page\s*:\s*\d{1,2}\s*\]\]\s*)+<\/p>/i', '', $html );
+		$html = preg_replace( '/\[\[\s*initials-every-page\s*:\s*\d{1,2}\s*\]\]/i', '', $html );
+
+		// Inline anchors become sized spans; their rendered boxes are captured below.
+		$sizes   = array( 'signature' => array( 210, 34 ), 'initials' => array( 64, 24 ), 'date' => array( 110, 20 ), 'text' => array( 170, 20 ) );
+		$seq     = 0;
+		$has_sig = false;
+		$html    = preg_replace_callback(
+			'/\[\[\s*(signature|initials|date|text)\s*:\s*(\d{1,2})\s*\]\]/i',
+			static function ( $m ) use ( &$seq, &$has_sig, $sizes, $outline, $role_of ) {
+				$type  = strtolower( $m[1] );
+				$party = max( 1, (int) $m[2] );
+				$has_sig = $has_sig || 'signature' === $type;
+				list( $w, $h ) = $sizes[ $type ];
+				$style = 'display:inline-block;width:' . $w . 'pt;height:' . $h . 'pt;border-bottom:1px solid #222;vertical-align:bottom;font-size:7pt;line-height:1.2;color:#3858e9';
+				$label = '';
+				if ( $outline ) {
+					$style .= ';background-color:#eef3ff;border:1px dashed #3858e9';
+					$label  = esc_html( ucfirst( $type ) . ' · ' . $role_of( $party ) );
+				}
+				return '<span data-ajf="' . $type . ':' . $party . ':' . ( ++$seq ) . '" style="' . $style . '">' . $label . '</span>';
+			},
+			$html
+		);
+
 		$cache = $this->tpl_dir() . '/cache';
 		wp_mkdir_p( $cache );
 		try {
@@ -1909,15 +1975,83 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			$options->set( 'fontDir', $cache );
 			$options->set( 'fontCache', $cache );
 			$options->set( 'defaultFont', 'Helvetica' );
-			$css = '@page{margin:0.8in}body{font-family:Helvetica,Arial,sans-serif;font-size:11pt;line-height:1.4;color:#111}'
-				. 'h1{font-size:20pt;margin:0 0 8pt}h2{font-size:15pt;margin:10pt 0 6pt}h3{font-size:12.5pt;margin:8pt 0 4pt}p{margin:0 0 7pt}'
-				. 'table{border-collapse:collapse;width:100%;margin:0 0 8pt}td,th{border:1px solid #444;padding:4pt 6pt;vertical-align:top}'
+			$css = '@page{margin:0.8in 0.8in 0.9in}body{font-family:Helvetica,Arial,sans-serif;font-size:10.5pt;line-height:1.4;color:#111}'
+				. 'h1{font-size:18pt;margin:0 0 6pt}h2{font-size:13pt;margin:12pt 0 5pt;page-break-after:avoid}h3{font-size:11.5pt;margin:8pt 0 4pt;page-break-after:avoid}p{margin:0 0 6pt}'
+				. 'table{border-collapse:collapse;width:100%;margin:0 0 8pt}td,th{border:1px solid #9ca3af;padding:4pt 6pt;vertical-align:top}tr{page-break-inside:avoid}'
 				. 'img{max-width:100%}hr.pb{border:0;height:0;margin:0;page-break-after:always}';
-			$sig  = '<hr class="pb"><h2>Signatures</h2><p>' . esc_html( $title ) . '</p><p style="font-size:9pt;color:#555">' . esc_html__( 'Please sign and date in the boxes provided below.', 'ajcore-ra' ) . '</p>';
+			$sig = $has_sig ? '' : '<hr class="pb"><h2>Signatures</h2><p>' . esc_html( $title ) . '</p><p style="font-size:9pt;color:#555">' . esc_html__( 'Please sign and date in the boxes provided below.', 'ajcore-ra' ) . '</p>';
 			$dompdf = new \Dompdf\Dompdf( $options );
+			$found  = array();
+			$dompdf->setCallbacks(
+				array(
+					array(
+						'event' => 'end_frame',
+						'f'     => static function ( $frame, $canvas ) use ( &$found ) {
+							$node = $frame->get_node();
+							if ( $node instanceof \DOMElement && $node->hasAttribute( 'data-ajf' ) ) {
+								$found[ $node->getAttribute( 'data-ajf' ) ] = array( (int) $canvas->get_page_number(), $frame->get_border_box() );
+							}
+						},
+					),
+				)
+			);
 			$dompdf->loadHtml( '<!doctype html><html><head><meta charset="utf-8"><style>' . $css . '</style></head><body>' . $html . $sig . '</body></html>', 'UTF-8' );
 			$dompdf->setPaper( 'letter' );
 			$dompdf->render();
+
+			$canvas  = $dompdf->getCanvas();
+			$metrics = $dompdf->getFontMetrics();
+			$font    = $metrics->getFont( 'Helvetica' );
+			$pw      = (float) $canvas->get_width();
+			$ph      = (float) $canvas->get_height();
+			$margin  = 0.8 * 72;
+			$signs   = array(); // party => pages where that signer signs
+			foreach ( $found as $key => $hit ) {
+				list( $type, $party ) = explode( ':', $key );
+				$box       = $hit[1];
+				$anchors[] = array(
+					'type'  => $type,
+					'party' => (int) $party,
+					'page'  => $hit[0],
+					'x'     => round( $box['x'] / $pw, 4 ),
+					'y'     => round( $box['y'] / $ph, 4 ),
+					'w'     => round( $box['w'] / $pw, 4 ),
+					'h'     => round( $box['h'] / $ph, 4 ),
+					'fill'  => '',
+				);
+				if ( 'signature' === $type ) {
+					$signs[ (int) $party ][ $hit[0] ] = true;
+				}
+			}
+
+			if ( $every ) {
+				$skip  = $signs[ $every ] ?? array();
+				$bw    = 70;
+				$bh    = 22;
+				$bx    = $pw - $margin - $bw;
+				$by    = $ph - 52;
+				$label = sprintf( /* translators: %s: signer role, e.g. Client */ __( '%s initials', 'ajcore-ra' ), $role_of( $every ) );
+				$lx    = $bx - 6 - $metrics->getTextWidth( $label, $font, 8 );
+				for ( $pg = 1, $n = (int) $canvas->get_page_count(); $pg <= $n; $pg++ ) {
+					if ( ! isset( $skip[ $pg ] ) ) {
+						$anchors[] = array( 'type' => 'initials', 'party' => $every, 'page' => $pg, 'x' => round( $bx / $pw, 4 ), 'y' => round( $by / $ph, 4 ), 'w' => round( $bw / $pw, 4 ), 'h' => round( $bh / $ph, 4 ), 'fill' => '' );
+					}
+				}
+				$canvas->page_script(
+					static function ( $page, $count, $pdf ) use ( $skip, $bx, $by, $bw, $bh, $lx, $label, $font, $outline ) {
+						if ( isset( $skip[ $page ] ) ) {
+							return;
+						}
+						$pdf->text( $lx, $by + $bh - 10, $label, $font, 8, array( 0.33, 0.33, 0.33 ) );
+						$pdf->line( $bx, $by + $bh, $bx + $bw, $by + $bh, array( 0.13, 0.13, 0.13 ), 0.75 );
+						if ( $outline ) {
+							$pdf->rectangle( $bx, $by, $bw, $bh, array( 0.22, 0.35, 0.91 ), 0.6, array( 2, 2 ) );
+						}
+					}
+				);
+			}
+			// Footer on every page: document title + page x of y.
+			$canvas->page_text( $margin, $ph - 40, wp_strip_all_tags( $title ) . '  ·  ' . __( 'Page {PAGE_NUM} of {PAGE_COUNT}', 'ajcore-ra' ), $font, 8, array( 0.4, 0.4, 0.4 ) );
 			return $dompdf->output();
 		} catch ( \Throwable $e ) {
 			return new WP_Error( 'pdf_failed', sprintf( /* translators: %s: error */ __( 'Could not build the PDF: %s', 'ajcore-ra' ), $e->getMessage() ), array( 'status' => 500 ) );
@@ -2059,6 +2193,18 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 	}
 
 	/** Streams a template PDF (admin only). */
+	/** The form's own file name (falls back to its title) for a PDF the browser shows or saves. */
+	private static function pdf_download_name( array $meta ) {
+		$name = sanitize_file_name( (string) ( $meta['filename'] ?? '' ) );
+		if ( '' === $name || '.pdf' === $name ) {
+			$name = sanitize_file_name( (string) ( $meta['title'] ?? 'form' ) ) . '.pdf';
+		}
+		if ( '.pdf' !== strtolower( substr( $name, -4 ) ) ) {
+			$name .= '.pdf';
+		}
+		return str_replace( array( '"', "\r", "\n" ), '', $name );
+	}
+
 	public function stream_local_template( $id ) {
 		$all = $this->local_templates();
 		$id  = (string) $id;
@@ -2072,7 +2218,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			}
 			nocache_headers();
 			header( 'Content-Type: application/pdf' );
-			header( 'Content-Disposition: inline; filename="preview.pdf"' );
+			header( 'Content-Disposition: inline; filename="' . self::pdf_download_name( $all[ $id ] ) . '"' );
 			header( 'Content-Length: ' . strlen( $bytes ) );
 			echo $bytes; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 			exit;
@@ -3485,9 +3631,11 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 		if ( empty( $res['preview_pdf'] ) ) {
 			return new WP_Error( 'no_preview', __( 'Could not build the preview.', 'ajcore-ra' ), array( 'status' => 500 ) );
 		}
+		$tpls = '' !== $tid ? $this->local_templates() : array();
+		$name = isset( $tpls[ $tid ] ) ? self::pdf_download_name( $tpls[ $tid ] ) : 'preview.pdf';
 		nocache_headers();
 		header( 'Content-Type: application/pdf' );
-		header( 'Content-Disposition: inline; filename="preview.pdf"' );
+		header( 'Content-Disposition: inline; filename="' . $name . '"' );
 		header( 'Content-Length: ' . strlen( $res['preview_pdf'] ) );
 		echo $res['preview_pdf']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 		exit;
