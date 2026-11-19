@@ -96,7 +96,7 @@ build_zip() {
 
   rsync -a \
     --exclude='.git' --exclude='.gitignore' --exclude='.DS_Store' \
-    --exclude='node_modules' --exclude='vendor' --exclude='releases' --exclude='bin' \
+    --exclude='node_modules' --exclude='/vendor' --exclude='/releases' --exclude='/bin' \
     --exclude='README.md' --exclude='*.zip' --exclude='.vscode' --exclude='.idea' \
     --exclude='/CLAUDE.local.md' --exclude='/CLAUDE.md' --exclude='/AGENTS.md' \
     --exclude='/tests' --exclude='/phpunit-*.xml' --exclude='/docs' \
@@ -110,7 +110,9 @@ build_zip() {
 
 verify_zip() {
   [[ -f "$1" ]] || { echo "Error: zip was not created: $1" >&2; exit 1; }
-  unzip -l "$1" | awk '{print $4}' | grep -q "^$PLUGIN_SLUG/$PLUGIN_SLUG.php$" \
+  # awk reads the whole listing; `grep -q` exits on the first match, and under
+  # pipefail the resulting SIGPIPE (141) on large zips looked like a missing file.
+  unzip -l "$1" | awk -v want="$PLUGIN_SLUG/$PLUGIN_SLUG.php" '$4 == want { found = 1 } END { exit !found }' \
     || { echo "Error: zip is missing $PLUGIN_SLUG/$PLUGIN_SLUG.php" >&2; exit 1; }
 }
 
