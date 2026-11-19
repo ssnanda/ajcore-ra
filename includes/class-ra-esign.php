@@ -1958,8 +1958,13 @@ class AJCore_RA_Esign {
 		if ( '' === $value ) {
 			return '';
 		}
-		$timestamp = strtotime( $value );
-		return false === $timestamp ? $value : wp_date( 'm/d/Y', $timestamp );
+		// A service/billing date is a calendar date: print the date as recorded, without shifting it
+		// into the site's timezone (midnight UTC would otherwise become the evening before).
+		try {
+			return ( new DateTimeImmutable( $value, new DateTimeZone( 'UTC' ) ) )->format( 'm/d/Y' );
+		} catch ( \Exception $e ) {
+			return $value;
+		}
 	}
 
 	/** Fills {{tokens}} and Rentec-style %tokens%; $preview keeps them visible. */
