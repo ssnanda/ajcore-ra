@@ -1679,6 +1679,7 @@ class AJCore_RA_Esign {
 			// For the send screen's service picker (merge-values response); never a document field.
 			$v['_services']        = $services;
 			$v['_service_picked']  = $picked ? $picked['key'] : '';
+			$v['_services_note']   = $services ? '' : implode( '; ', $this->services_notes );
 		}
 		// Mailbox profile.
 		if ( '' !== $id ) {
@@ -1757,7 +1758,8 @@ class AJCore_RA_Esign {
 	 * @return array<int,array{key:string,name:string,amount:string,interval:string,start:string,end:string,next:string,status:string,unpaid:bool,label:string}>
 	 */
 	private function customer_services( $customer_id ) {
-		$rows = array();
+		$rows                 = array();
+		$this->services_notes = array();
 		if ( 0 === strpos( $customer_id, 'local_' ) ) {
 			$pdb = $this->get_pdb();
 			$tbl = $this->kit['portal_table']( 'aj_portal_local_services' );
@@ -1779,6 +1781,15 @@ class AJCore_RA_Esign {
 			$admin = new AJForms_Admin();
 			$got   = $admin->api_get_ops_customer_services( $customer_id, true ); // older AJ Core ignores the 2nd argument (paid only)
 			$rows  = (array) ( $got['subscriptions'] ?? array() );
+			// For the "why nothing?" note: every subscription the Stripe sync stored, whatever its status.
+			$pdb  = $this->get_pdb();
+			$stbl = $this->kit['portal_table']( 'aj_portal_stripe_subscriptions' );
+			if ( $this->kit['table_exists']( $pdb, $stbl ) ) {
+				$subs = (array) $pdb->get_results( $pdb->prepare( "SELECT stripe_subscription_id, status FROM `{$stbl}` WHERE stripe_customer_id = %s", $customer_id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$this->services_notes[] = $subs
+					? 'Stripe sync has: ' . implode( ', ', array_map( static function ( $x ) { return $x['stripe_subscription_id'] . ' (' . $x['status'] . ')'; }, $subs ) )
+					: 'Stripe sync has no subscriptions for this customer';
+			}
 		}
 		if ( 0 !== strpos( $customer_id, 'local_' ) ) {
 			$rows = array_merge( $rows, $this->open_invoice_services( $customer_id, $rows ) );
@@ -1831,6 +1842,7 @@ class AJCore_RA_Esign {
 		}
 		$entries = (array) $pdb->get_results( $pdb->prepare( "SELECT invoice_id, source_type, ledger_date, description, amount, status, metadata FROM `{$ledger}` WHERE stripe_customer_id = %s AND invoice_id <> '' AND status IN ('open','draft','unpaid','past_due') ORDER BY ledger_date DESC, id DESC LIMIT 50", $customer_id ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		if ( ! $entries ) {
+			$this->services_notes[] = 'no open invoices';
 			return array();
 		}
 		$seen_subs = array();
@@ -1923,6 +1935,7 @@ class AJCore_RA_Esign {
 				}
 			}
 			if ( '' === $sub_id && '' === $interval && ! $sub_make ) {
+				$this->services_notes[] = sprintf( 'open invoice %s (%s) skipped: %s', $inv, (string) ( $e['description'] ?? '' ), is_array( $raw ) ? 'no subscription link or recurring price (one-time charge)' : 'no cached Stripe invoice and no subscription/price in the ledger' );
 				continue; // a one-time charge
 			}
 			$rows[] = array(
@@ -1967,6 +1980,9 @@ class AJCore_RA_Esign {
 	}
 
 	/** Merged PDF bytes for a document template. Last page is always a signature page. */
+	/** @var string[] Why customer_services() found nothing (shown under the service picker). */
+	private $services_notes = array();
+
 	/** @var string[] Fields that came out empty in the last send-screen preview. */
 	private $preview_missing = array();
 
@@ -5084,7 +5100,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 				var svcs = Array.isArray( custVals._services ) ? custVals._services : [], picked = varVals._service || custVals._service_picked || '';
 				var picker = cust.value && keys.length ? '<div class="ajra-var ajra-svc"><span>Service this contract is for</span>' + ( svcs.length
 					? '<select id="ajra-es-service">' + svcs.map( function ( x ) { return '<option value="' + esc( x.key ) + '"' + ( x.key === picked ? ' selected' : '' ) + '>' + esc( x.label ) + '</option>'; } ).join( '' ) + '</select>'
-					: '<em class="ajra-muted">No subscriptions found for this customer — fill in the fields below.</em>' ) + '</div>' : '';
+					: '<em class="ajra-muted">No subscriptions found for this customer — fill in the fields below.</em>' + ( custVals._services_note ? '<small class="ajra-muted" style="display:block">Checked: ' + esc( custVals._services_note ) + '</small>' : '' ) ) + '</div>' : '';
 				box2.style.display = keys.length ? '' : 'none';
 				box2.innerHTML = keys.length ? picker + '<label class="ajra-vars-h">Form fields' + ( cust.value ? ' — prefilled for this customer; edit to change this document only' : ' — pick a customer to prefill' ) + '</label>' + keys.map( function ( k ) {
 					var n = varName( k ), edited = Object.prototype.hasOwnProperty.call( varVals, n ), val = edited ? varVals[ n ] : ( custVals[ k ] || '' );
