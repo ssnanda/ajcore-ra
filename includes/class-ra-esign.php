@@ -1975,8 +1975,8 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			$options->set( 'fontDir', $cache );
 			$options->set( 'fontCache', $cache );
 			$options->set( 'defaultFont', 'Helvetica' );
-			$css = '@page{margin:0.8in 0.8in 0.9in}body{font-family:Helvetica,Arial,sans-serif;font-size:10.5pt;line-height:1.4;color:#111}'
-				. 'h1{font-size:18pt;margin:0 0 6pt}h2{font-size:13pt;margin:12pt 0 5pt;page-break-after:avoid}h3{font-size:11.5pt;margin:8pt 0 4pt;page-break-after:avoid}p{margin:0 0 6pt}'
+			$css = '@page{margin:0.75in 0.75in 0.9in}body{font-family:Helvetica,Arial,sans-serif;font-size:10pt;line-height:1.35;color:#111}'
+				. 'h1{font-size:18pt;margin:0 0 6pt}h2{font-size:13pt;margin:12pt 0 5pt;page-break-after:avoid}h3{font-size:11.5pt;margin:8pt 0 4pt;page-break-after:avoid}p{margin:0 0 6pt;page-break-inside:avoid}li{page-break-inside:avoid}'
 				. 'table{border-collapse:collapse;width:100%;margin:0 0 8pt}td,th{border:1px solid #9ca3af;padding:4pt 6pt;vertical-align:top}tr{page-break-inside:avoid}'
 				. 'img{max-width:100%}hr.pb{border:0;height:0;margin:0;page-break-after:always}';
 			$sig = $has_sig ? '' : '<hr class="pb"><h2>Signatures</h2><p>' . esc_html( $title ) . '</p><p style="font-size:9pt;color:#555">' . esc_html__( 'Please sign and date in the boxes provided below.', 'ajcore-ra' ) . '</p>';
@@ -2004,7 +2004,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			$font    = $metrics->getFont( 'Helvetica' );
 			$pw      = (float) $canvas->get_width();
 			$ph      = (float) $canvas->get_height();
-			$margin  = 0.8 * 72;
+			$margin  = 0.75 * 72;
 			$signs   = array(); // party => pages where that signer signs
 			foreach ( $found as $key => $hit ) {
 				list( $type, $party ) = explode( ':', $key );
