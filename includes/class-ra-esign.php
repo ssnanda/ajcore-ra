@@ -1646,37 +1646,39 @@ class AJCore_RA_Esign {
 			$csz = trim( implode( ' ', array_filter( array( ( $bv['city'] ?? '' ) . ( ! empty( $bv['city'] ) && ! empty( $bv['state'] ) ? ',' : '' ), (string) ( $bv['state'] ?? '' ), (string) ( $bv['zip'] ?? '' ) ) ) ) );
 			$v['business.address'] = implode( ', ', array_filter( array( (string) ( $bv['street'] ?? '' ), $csz ) ) );
 		}
-		// Prefer the customer's active Virtual Office subscription; otherwise use their
-		// most recent active recurring service. The service snapshot is the normalized
-		// source used by AJ Ops and works for Stripe-backed customer records.
+		// The service the contract is for: the one picked on the send screen (vars "_service"),
+		// else an active Virtual Office subscription, else any active one, else the newest.
+		// Unpaid subscriptions are included so a contract can go out with the first invoice.
 		if ( '' !== $id ) {
-			$stbl = $this->kit['portal_table']( 'aj_portal_service_snapshots' );
-			if ( $this->kit['table_exists']( $pdb, $stbl ) ) {
-				$subscription = $pdb->get_row(
-					$pdb->prepare(
-						"SELECT product_name_snapshot, price_label_snapshot, amount, currency, recurring_interval, service_period_start, service_period_end, next_billing_date, status
-						FROM `{$stbl}`
-						WHERE stripe_customer_id = %s AND billing_type = 'subscription'
-						ORDER BY CASE WHEN LOWER(product_name_snapshot) LIKE '%%virtual%%office%%' THEN 0 ELSE 1 END,
-							CASE WHEN status IN ('active','trialing') THEN 0 ELSE 1 END,
-							COALESCE(service_period_start, created_at) DESC, id DESC
-						LIMIT 1",
-						$id
-					),
-					ARRAY_A
-				); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-				if ( $subscription ) {
-					$currency = strtoupper( (string) ( $subscription['currency'] ?? 'USD' ) );
-					$amount   = (float) ( $subscription['amount'] ?? 0 );
-					$v['subscription.name'] = (string) ( $subscription['product_name_snapshot'] ?: $subscription['price_label_snapshot'] );
-					$v['subscription.amount'] = 0.0 !== $amount ? ( 'USD' === $currency ? '$' : $currency . ' ' ) . number_format_i18n( $amount, 2 ) : '';
-					$v['subscription.interval'] = (string) ( $subscription['recurring_interval'] ?? '' );
-					$v['subscription.start_date'] = self::format_merge_date( $subscription['service_period_start'] ?? '' );
-					$v['subscription.end_date'] = self::format_merge_date( $subscription['service_period_end'] ?? '' );
-					$v['subscription.next_billing_date'] = self::format_merge_date( $subscription['next_billing_date'] ?? '' );
-					$v['subscription.status'] = (string) ( $subscription['status'] ?? '' );
+			$services = $this->customer_services( $id );
+			$picked   = null;
+			$want     = isset( $vars['_service'] ) ? (string) $vars['_service'] : '';
+			foreach ( $services as $svc ) {
+				if ( '' !== $want && $svc['key'] === $want ) {
+					$picked = $svc;
+					break;
 				}
 			}
+			if ( ! $picked && $services ) {
+				$rank = static function ( $svc ) {
+					return ( false !== stripos( $svc['name'], 'virtual' ) && false !== stripos( $svc['name'], 'office' ) ? 0 : 2 ) + ( $svc['unpaid'] || ! in_array( $svc['status'], array( 'active', 'trialing' ), true ) ? 1 : 0 );
+				};
+				$sorted = $services;
+				usort( $sorted, static function ( $a, $b ) use ( $rank ) { return $rank( $a ) <=> $rank( $b ); } );
+				$picked = $sorted[0];
+			}
+			if ( $picked ) {
+				$v['subscription.name']              = $picked['name'];
+				$v['subscription.amount']            = $picked['amount'];
+				$v['subscription.interval']          = $picked['interval'];
+				$v['subscription.start_date']        = $picked['start'];
+				$v['subscription.end_date']          = $picked['end'];
+				$v['subscription.next_billing_date'] = $picked['next'];
+				$v['subscription.status']            = $picked['status'];
+			}
+			// For the send screen's service picker (merge-values response); never a document field.
+			$v['_services']        = $services;
+			$v['_service_picked']  = $picked ? $picked['key'] : '';
 		}
 		// Mailbox profile.
 		if ( '' !== $id ) {
@@ -1746,6 +1748,67 @@ class AJCore_RA_Esign {
 			$v[ $key ] = $val;
 		}
 		return $v;
+	}
+
+	/**
+	 * The customer's recurring services (subscriptions only; these contracts never cover one-time
+	 * payments), including unpaid ones. Same records AJ Core shows on the customer page.
+	 *
+	 * @return array<int,array{key:string,name:string,amount:string,interval:string,start:string,end:string,next:string,status:string,unpaid:bool,label:string}>
+	 */
+	private function customer_services( $customer_id ) {
+		$rows = array();
+		if ( 0 === strpos( $customer_id, 'local_' ) ) {
+			$pdb = $this->get_pdb();
+			$tbl = $this->kit['portal_table']( 'aj_portal_local_services' );
+			if ( $this->kit['table_exists']( $pdb, $tbl ) ) {
+				foreach ( (array) $pdb->get_results( $pdb->prepare( "SELECT * FROM `{$tbl}` WHERE local_customer_id = %s ORDER BY contract_start_date DESC, id DESC", $customer_id ), ARRAY_A ) as $r ) { // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+					$rows[] = array(
+						'stripe_subscription_id' => 'local:' . ( $r['local_service_id'] ?? $r['id'] ?? '' ),
+						'service_name'           => $r['service_name'] ?? '',
+						'amount'                 => $r['monthly_rate'] ?? '',
+						'recurring_interval'     => $r['billing_interval'] ?? 'month',
+						'service_period_start'   => $r['contract_start_date'] ?? '',
+						'service_period_end'     => $r['contract_end_date'] ?? '',
+						'next_billing_date'      => $r['next_charge_date'] ?? '',
+						'status'                 => $r['status'] ?? '',
+					);
+				}
+			}
+		} elseif ( class_exists( 'AJForms_Admin' ) && method_exists( 'AJForms_Admin', 'api_get_ops_customer_services' ) ) {
+			$admin = new AJForms_Admin();
+			$got   = $admin->api_get_ops_customer_services( $customer_id, true ); // older AJ Core ignores the 2nd argument (paid only)
+			$rows  = (array) ( $got['subscriptions'] ?? array() );
+		}
+		$out = array();
+		foreach ( $rows as $i => $r ) {
+			$r        = (array) $r;
+			$name     = trim( (string) ( $r['service_name'] ?? '' ) );
+			$status   = strtolower( trim( (string) ( $r['status'] ?? '' ) ) );
+			$raw_amt  = trim( (string) ( $r['amount'] ?? '' ) );
+			$num      = str_replace( array( '$', ',' ), '', $raw_amt );
+			$amount   = '' !== $raw_amt && is_numeric( $num ) && 0.0 !== (float) $num ? '$' . number_format_i18n( (float) $num, 2 ) : trim( (string) strtok( (string) ( $r['price'] ?? '' ), '/' ) );
+			$interval = trim( (string) ( $r['recurring_interval'] ?? '' ) );
+			$start    = self::format_merge_date( $r['service_period_start'] ?? '' );
+			$key      = (string) ( $r['stripe_subscription_id'] ?? '' );
+			if ( '' === $key ) {
+				$key = 'svc_' . substr( md5( $name . '|' . ( $r['service_period_start'] ?? '' ) . '|' . $i ), 0, 10 );
+			}
+			$unpaid = in_array( $status, array( 'incomplete', 'past_due', 'unpaid' ), true );
+			$out[]  = array(
+				'key'      => $key,
+				'name'     => '' !== $name ? $name : __( 'Subscription', 'ajcore-ra' ),
+				'amount'   => $amount,
+				'interval' => $interval,
+				'start'    => $start,
+				'end'      => self::format_merge_date( $r['service_period_end'] ?? '' ),
+				'next'     => self::format_merge_date( $r['next_billing_date'] ?? '' ),
+				'status'   => $status,
+				'unpaid'   => $unpaid,
+				'label'    => trim( ( '' !== $name ? $name : 'Subscription' ) . ( '' !== $amount ? ' — ' . $amount . ( '' !== $interval ? '/' . $interval : '' ) : '' ) . ( '' !== $start ? ', from ' . $start : '' ) . ( '' !== $status ? ' (' . $status . ( $unpaid ? ', unpaid' : '' ) . ')' : '' ) ),
+			);
+		}
+		return $out;
 	}
 
 	/** Formats a stored MySQL/ISO date for a document merge field. */
@@ -4059,7 +4122,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			#ajra-es-modal{display:none;position:fixed;inset:0;z-index:100000;background:rgba(15,23,42,.6);align-items:center;justify-content:center;padding:24px}
 			#ajra-es-modal.on{display:flex}
 			.ajra-es #ajra-es-vars{flex-basis:100%;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:6px 12px;margin-top:4px}
-			.ajra-es #ajra-es-vars .ajra-vars-h{grid-column:1/-1;font-weight:600;color:#475569;margin:0}
+			.ajra-es #ajra-es-vars .ajra-vars-h{grid-column:1/-1;font-weight:600;color:#475569;margin:0}.ajra-es .ajra-var.ajra-svc{grid-column:1/-1}.ajra-es .ajra-var.ajra-svc select{max-width:640px;width:100%}
 			.ajra-es .ajra-var span{display:block;font-size:11px;color:#64748b;margin-bottom:2px}.ajra-es .ajra-var input{width:100%}
 			.ajra-es .ajra-var.edited input{border-color:#2563eb;background:#eff6ff}.ajra-es .ajra-var.miss input{border-color:#dc2626;background:#fef2f2}
 			#ajra-es-pvbox{margin-top:12px;border:1px solid #dcdcde;border-radius:8px;overflow:hidden}
@@ -4870,19 +4933,24 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			function varName( k ) { return 0 === k.indexOf( 'ask.' ) ? k.slice( 4 ) : k; } // name sent in vars
 			function loadCustVals() {
 				if ( ! cust.value ) { custVals = {}; custValsFor = ''; renderVars(); return; }
-				if ( custValsFor === cust.value ) { renderVars(); return; }
-				var want = cust.value;
-				fetch( base + '/merge-values', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-WP-Nonce': nonce }, body: JSON.stringify( { stripe_customer_id: want, recipients: readRecipients(), vars: '{}' } ) } )
-					.then( function ( r ) { return r.json(); } ).then( function ( d ) { if ( want === cust.value ) { custVals = d || {}; custValsFor = want; renderVars(); } } )
+				var svc = varVals._service || '', want = cust.value + '|' + svc;
+				if ( custValsFor === want ) { renderVars(); return; }
+				fetch( base + '/merge-values', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-WP-Nonce': nonce }, body: JSON.stringify( { stripe_customer_id: cust.value, recipients: readRecipients(), vars: JSON.stringify( svc ? { _service: svc } : {} ) } ) } )
+					.then( function ( r ) { return r.json(); } ).then( function ( d ) { if ( want === cust.value + '|' + ( varVals._service || '' ) ) { custVals = d || {}; custValsFor = want; renderVars(); } } )
 					.catch( function () { /* fields stay editable; preview shows what is missing */ } );
 			}
 			function renderVars() {
 				var box2 = $( 'ajra-es-vars' ), keys = 'template' === mode ? formVarKeys() : [];
+				var svcs = Array.isArray( custVals._services ) ? custVals._services : [], picked = varVals._service || custVals._service_picked || '';
+				var picker = cust.value && keys.length ? '<div class="ajra-var ajra-svc"><span>Service this contract is for</span>' + ( svcs.length
+					? '<select id="ajra-es-service">' + svcs.map( function ( x ) { return '<option value="' + esc( x.key ) + '"' + ( x.key === picked ? ' selected' : '' ) + '>' + esc( x.label ) + '</option>'; } ).join( '' ) + '</select>'
+					: '<em class="ajra-muted">No subscriptions found for this customer — fill in the fields below.</em>' ) + '</div>' : '';
 				box2.style.display = keys.length ? '' : 'none';
-				box2.innerHTML = keys.length ? '<label class="ajra-vars-h">Form fields' + ( cust.value ? ' — prefilled for this customer; edit to change this document only' : ' — pick a customer to prefill' ) + '</label>' + keys.map( function ( k ) {
+				box2.innerHTML = keys.length ? picker + '<label class="ajra-vars-h">Form fields' + ( cust.value ? ' — prefilled for this customer; edit to change this document only' : ' — pick a customer to prefill' ) + '</label>' + keys.map( function ( k ) {
 					var n = varName( k ), edited = Object.prototype.hasOwnProperty.call( varVals, n ), val = edited ? varVals[ n ] : ( custVals[ k ] || '' );
 					return '<div class="ajra-var' + ( edited ? ' edited' : '' ) + ( '' === String( val ).trim() ? ' miss' : '' ) + '"><span>' + esc( varLabel( k ) ) + '</span><input type="text" class="ajra-es-var" data-n="' + esc( n ) + '" data-k="' + esc( k ) + '" value="' + esc( val ) + '" placeholder="' + ( cust.value ? 'missing' : '' ) + '"></div>';
 				} ).join( '' ) : '';
+				if ( $( 'ajra-es-service' ) ) { $( 'ajra-es-service' ).addEventListener( 'change', function () { varVals._service = this.value; loadCustVals(); queueRefresh(); queueSave(); } ); }
 				box2.querySelectorAll( '.ajra-es-var' ).forEach( function ( i ) { i.addEventListener( 'input', function () {
 					var n = i.getAttribute( 'data-n' ), k = i.getAttribute( 'data-k' ), wrap = i.parentNode;
 					if ( i.value === ( custVals[ k ] || '' ) || '' === i.value.trim() ) { delete varVals[ n ]; } else { varVals[ n ] = i.value; }
@@ -4899,7 +4967,7 @@ $types = array( 'signature', 'initials', 'text', 'email', 'date', 'checkbox', 'l
 			}
 			tpl.addEventListener( 'change', function () { renderRecipients( currentTemplateRecipients() ); syncTplFields(); refreshInline(); } );
 			cust.addEventListener( 'change', updateSend );
-			cust.addEventListener( 'change', loadCustVals );
+			cust.addEventListener( 'change', function () { delete varVals._service; loadCustVals(); } ); // a new customer starts on their default service
 			var upLayout = [], inlineEd = null, inlineHost = $( 'ajra-es-inline' ), inlineSeq = 0, reqside = $( 'ajra-es-reqside' ), reqHome = reqside.parentNode;
 			function rehome() { if ( reqside.parentNode !== reqHome ) { reqHome.appendChild( reqside ); } } // back into the card before the editor is torn down
 			// Live values for the "Preview with values" checkbox: every merge field resolved for the chosen customer.
