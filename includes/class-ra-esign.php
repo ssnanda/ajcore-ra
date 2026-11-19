@@ -1077,7 +1077,61 @@ class AJCore_RA_Esign {
 	/** @return array<string,array> id => meta (title, file, filename, signers[], page, created) */
 	private function local_templates() {
 		$list = get_option( self::TPL_OPTION, array() );
-		return is_array( $list ) ? $list : array();
+		$list = is_array( $list ) ? $list : array();
+		return $this->install_bundled_templates( $list );
+	}
+
+	/**
+	 * Installs plugin-owned PDF forms once without replacing a form an administrator
+	 * has already edited. Future agreements only need a PDF plus one manifest entry.
+	 *
+	 * @param array<string,array> $list Saved templates keyed by template id.
+	 * @return array<string,array>
+	 */
+	private function install_bundled_templates( array $list ) {
+		$manifest_path = dirname( __DIR__ ) . '/assets/forms/manifest.php';
+		if ( ! is_readable( $manifest_path ) ) {
+			return $list;
+		}
+		$bundled = require $manifest_path;
+		if ( ! is_array( $bundled ) || empty( $bundled ) ) {
+			return $list;
+		}
+		$changed = false;
+		$dir     = $this->tpl_dir();
+		foreach ( $bundled as $id => $definition ) {
+			$id = sanitize_key( (string) $id );
+			if ( 0 !== strpos( $id, 'ajt_' ) || isset( $list[ $id ] ) || ! is_array( $definition ) ) {
+				continue;
+			}
+			$asset = basename( (string) ( $definition['asset'] ?? '' ) );
+			$source = dirname( __DIR__ ) . '/assets/forms/' . $asset;
+			if ( '' === $asset || ! is_readable( $source ) || ! is_dir( $dir ) || ! is_writable( $dir ) ) {
+				continue;
+			}
+			$stored = $id . '.pdf';
+			if ( ! copy( $source, $dir . '/' . $stored ) ) {
+				continue;
+			}
+			$list[ $id ] = array(
+				'id'       => $id,
+				'title'    => mb_substr( sanitize_text_field( (string) ( $definition['title'] ?? $asset ) ), 0, 191 ),
+				'file'     => $stored,
+				'filename' => sanitize_file_name( $asset ),
+				'kind'     => 'pdf',
+				'signers'  => array_values( array_map( 'sanitize_text_field', (array) ( $definition['signers'] ?? array( 'Signer' ) ) ) ),
+				'page'     => max( 0, (int) ( $definition['page'] ?? 0 ) ),
+				'layout'   => self::clean_layout( $definition['layout'] ?? array() ),
+				'blanks'   => self::clean_blanks( $definition['blanks'] ?? array() ),
+				'created'  => current_time( 'mysql' ),
+				'bundled'  => 1,
+			);
+			$changed = true;
+		}
+		if ( $changed ) {
+			update_option( self::TPL_OPTION, $list, false );
+		}
+		return $list;
 	}
 
 	private function local_template_shape( array $meta ) {
@@ -1289,6 +1343,13 @@ class AJCore_RA_Esign {
 			'customer.address.country' => 'Customer — country',
 			'customer.number'        => 'Customer — number',
 			'customer.description'   => 'Customer — description',
+			'subscription.name'      => 'Subscription — service name',
+			'subscription.amount'    => 'Subscription — recurring amount',
+			'subscription.interval'  => 'Subscription — billing interval',
+			'subscription.start_date' => 'Subscription — service start date',
+			'subscription.end_date'  => 'Subscription — current period end',
+			'subscription.next_billing_date' => 'Subscription — next billing date',
+			'subscription.status'    => 'Subscription — status',
 		);
 		if ( class_exists( 'AJCore_RA_Business_Profile' ) ) {
 			foreach ( AJCore_RA_Business_Profile::fields() as $k => $def ) {
@@ -1450,6 +1511,38 @@ class AJCore_RA_Esign {
 			$csz = trim( implode( ' ', array_filter( array( ( $bv['city'] ?? '' ) . ( ! empty( $bv['city'] ) && ! empty( $bv['state'] ) ? ',' : '' ), (string) ( $bv['state'] ?? '' ), (string) ( $bv['zip'] ?? '' ) ) ) ) );
 			$v['business.address'] = implode( ', ', array_filter( array( (string) ( $bv['street'] ?? '' ), $csz ) ) );
 		}
+		// Prefer the customer's active Virtual Office subscription; otherwise use their
+		// most recent active recurring service. The service snapshot is the normalized
+		// source used by AJ Ops and works for Stripe-backed customer records.
+		if ( '' !== $id ) {
+			$stbl = $this->kit['portal_table']( 'aj_portal_service_snapshots' );
+			if ( $this->kit['table_exists']( $pdb, $stbl ) ) {
+				$subscription = $pdb->get_row(
+					$pdb->prepare(
+						"SELECT product_name_snapshot, price_label_snapshot, amount, currency, recurring_interval, service_period_start, service_period_end, next_billing_date, status
+						FROM `{$stbl}`
+						WHERE stripe_customer_id = %s AND billing_type = 'subscription'
+						ORDER BY CASE WHEN LOWER(product_name_snapshot) LIKE '%%virtual%%office%%' THEN 0 ELSE 1 END,
+							CASE WHEN status IN ('active','trialing') THEN 0 ELSE 1 END,
+							COALESCE(service_period_start, created_at) DESC, id DESC
+						LIMIT 1",
+						$id
+					),
+					ARRAY_A
+				); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				if ( $subscription ) {
+					$currency = strtoupper( (string) ( $subscription['currency'] ?? 'USD' ) );
+					$amount   = (float) ( $subscription['amount'] ?? 0 );
+					$v['subscription.name'] = (string) ( $subscription['product_name_snapshot'] ?: $subscription['price_label_snapshot'] );
+					$v['subscription.amount'] = 0.0 !== $amount ? ( 'USD' === $currency ? '$' : $currency . ' ' ) . number_format_i18n( $amount, 2 ) : '';
+					$v['subscription.interval'] = (string) ( $subscription['recurring_interval'] ?? '' );
+					$v['subscription.start_date'] = self::format_merge_date( $subscription['service_period_start'] ?? '' );
+					$v['subscription.end_date'] = self::format_merge_date( $subscription['service_period_end'] ?? '' );
+					$v['subscription.next_billing_date'] = self::format_merge_date( $subscription['next_billing_date'] ?? '' );
+					$v['subscription.status'] = (string) ( $subscription['status'] ?? '' );
+				}
+			}
+		}
 		// Mailbox profile.
 		if ( '' !== $id ) {
 			$ptbl = $this->kit['portal_table']( 'aj_portal_customer_profiles' );
@@ -1484,6 +1577,16 @@ class AJCore_RA_Esign {
 		}
 		$v['company']    = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
 		return $v;
+	}
+
+	/** Formats a stored MySQL/ISO date for a document merge field. */
+	private static function format_merge_date( $value ) {
+		$value = trim( (string) $value );
+		if ( '' === $value ) {
+			return '';
+		}
+		$timestamp = strtotime( $value );
+		return false === $timestamp ? $value : wp_date( 'm/d/Y', $timestamp );
 	}
 
 	/** Fills {{tokens}} in $text; $preview keeps unreplaced tokens visible. */

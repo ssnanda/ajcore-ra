@@ -1,6 +1,6 @@
 # AJCore ecosystem roadmap
 
-Last updated: 2026-11-05. Numbers are stable; do not renumber.
+Last updated: 2026-11-19. Numbers are stable; do not renumber.
 
 ## Architecture (decided)
 
@@ -58,6 +58,8 @@ Open questions for 12/13: exact HOA steps, who sees what (do owners see requests
 16. [ ] AJOps module structure: `ra` and `hoa` module folders, registry of nav items and routes, hidden when not in capabilities.
 17. [ ] iOS app: same capabilities list and site switching (one app, or a second app if needed).
 18. [ ] Build the HOA AJOps module.
+19. [ ] E-Sign Virtual Office agreement: expose active subscription merge fields, prepare the supplied agreement as an unsigned reusable PDF form, then package and verify it after the canonical plugin change is deployed.
+20. [ ] E-Sign Registered Agent PDF forms: inventory, map fields, package as built-in forms, and verify after item 19 passes.
 
 ## Notes
 
